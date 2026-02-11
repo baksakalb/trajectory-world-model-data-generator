@@ -1,0 +1,17 @@
+{
+  "name": "mcp_health_check",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "check": "node check.mjs",
+    "check:json": "node check.mjs --json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}

@@ -4,7 +4,14 @@
       "command": "npx",
       "args": ["unreal-engine-mcp-server"],
       "env": {
-        "UE_PROJECT_PATH": "C:/Users/baris/Documents/Unreal Projects/he_grenade_game"
+        "UE_PROJECT_PATH": "C:/Users/baris/Documents/Unreal Projects/he_grenade_game",
+        "MCP_AUTOMATION_HOST": "127.0.0.1",
+        "MCP_AUTOMATION_PORT": "8091",
+        "MCP_AUTOMATION_WS_HOST": "127.0.0.1",
+        "MCP_AUTOMATION_WS_PORT": "8091",
+        "MCP_AUTOMATION_CLIENT_PORT": "8091",
+        "LOG_LEVEL": "info",
+        "MCP_ROUTE_STDOUT_LOGS": "true"
       }
     }
   }
