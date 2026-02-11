@@ -1,0 +1,28 @@
+# Unreal Engine generated artifacts
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# User/IDE files
+.vs/
+.vscode/
+.codex/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userprefs
+
+# Build system artifacts
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tmp
+*.opensdf
+*.sdf
+
+# Plugin intermediates/binaries
+Plugins/*/Binaries/
+Plugins/*/Intermediate/

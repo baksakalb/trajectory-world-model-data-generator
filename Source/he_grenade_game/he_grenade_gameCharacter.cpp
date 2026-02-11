@@ -1,0 +1,312 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "he_grenade_gameCharacter.h"
+
+#include "Animation/AnimInstance.h"
+#include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/InputComponent.h"
+#include "EnhancedInputComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/GameModeBase.h"
+#include "GameFramework/PlayerController.h"
+#include "InputActionValue.h"
+#include "InputCoreTypes.h"
+#include "Grenade/GGMovementComponent.h"
+#include "Grenade/GrenadeThrowerComponent.h"
+#include "Grenade/GrenadeTrajectoryComponent.h"
+#include "he_grenade_game.h"
+
+Ahe_grenade_gameCharacter::Ahe_grenade_gameCharacter(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UGGMovementComponent>(ACharacter::CharacterMovementComponentName))
+{
+	// Set size for collision capsule
+	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
+
+	// Create the first person mesh that will be viewed only by this character's owner
+	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("First Person Mesh"));
+	FirstPersonMesh->SetupAttachment(GetMesh());
+	FirstPersonMesh->SetOnlyOwnerSee(true);
+	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
+
+	// Create the Camera Component
+	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
+	FirstPersonCameraComponent->SetupAttachment(FirstPersonMesh, FName("head"));
+	FirstPersonCameraComponent->SetRelativeLocationAndRotation(FVector(-2.8f, 5.89f, 0.0f), FRotator(0.0f, 90.0f, -90.0f));
+	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+	FirstPersonCameraComponent->bEnableFirstPersonFieldOfView = true;
+	FirstPersonCameraComponent->bEnableFirstPersonScale = true;
+	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
+	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
+
+	// Grenade systems
+	GrenadeThrowerComponent = CreateDefaultSubobject<UGrenadeThrowerComponent>(TEXT("GrenadeThrowerComponent"));
+	GrenadeTrajectoryComponent = CreateDefaultSubobject<UGrenadeTrajectoryComponent>(TEXT("GrenadeTrajectoryComponent"));
+
+	// Configure character visuals
+	GetMesh()->SetOwnerNoSee(true);
+	GetMesh()->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::WorldSpaceRepresentation;
+	GetCapsuleComponent()->SetCapsuleSize(34.0f, 96.0f);
+
+	// Crouch support
+	GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
+	GetCharacterMovement()->SetCrouchedHalfHeight(88.0f);
+}
+
+void Ahe_grenade_gameCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Runtime hardening in case Blueprint defaults override constructor-time crouch flags.
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
+	}
+
+	if (FirstPersonCameraComponent)
+	{
+		StandingCameraRelativeLocation = FirstPersonCameraComponent->GetRelativeLocation();
+		CurrentCrouchCameraOffsetCm = 0.0f;
+	}
+}
+
+void Ahe_grenade_gameCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	RefreshCrouchFromInput();
+	UpdateCrouchCamera(DeltaSeconds);
+}
+
+void Ahe_grenade_gameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
+	{
+		// Jumping
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &Ahe_grenade_gameCharacter::DoJumpStart);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &Ahe_grenade_gameCharacter::DoJumpEnd);
+
+		// Moving
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &Ahe_grenade_gameCharacter::MoveInput);
+
+		// Looking/Aiming
+		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &Ahe_grenade_gameCharacter::LookInput);
+		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &Ahe_grenade_gameCharacter::LookInput);
+	}
+	else
+	{
+		UE_LOG(Loghe_grenade_game, Error, TEXT("'%s' Failed to find an Enhanced Input Component!"), *GetNameSafe(this));
+	}
+
+	if (PlayerInputComponent)
+	{
+		// Action bindings that intentionally avoid requiring additional IA/IMC assets.
+		PlayerInputComponent->BindKey(EKeys::LeftMouseButton, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoThrowPressed);
+		PlayerInputComponent->BindKey(EKeys::LeftMouseButton, IE_Released, this, &Ahe_grenade_gameCharacter::DoThrowReleased);
+
+		PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoAimStart);
+		PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Released, this, &Ahe_grenade_gameCharacter::DoAimEnd);
+
+		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoSprintStart);
+		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Released, this, &Ahe_grenade_gameCharacter::DoSprintEnd);
+
+		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoCrouchStart);
+		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Released, this, &Ahe_grenade_gameCharacter::DoCrouchEnd);
+		PlayerInputComponent->BindKey(EKeys::C, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoCrouchStart);
+		PlayerInputComponent->BindKey(EKeys::C, IE_Released, this, &Ahe_grenade_gameCharacter::DoCrouchEnd);
+	}
+}
+
+void Ahe_grenade_gameCharacter::MoveInput(const FInputActionValue& Value)
+{
+	const FVector2D MovementVector = Value.Get<FVector2D>();
+	DoMove(MovementVector.X, MovementVector.Y);
+}
+
+void Ahe_grenade_gameCharacter::LookInput(const FInputActionValue& Value)
+{
+	const FVector2D LookAxisVector = Value.Get<FVector2D>();
+	DoAim(LookAxisVector.X, LookAxisVector.Y);
+}
+
+void Ahe_grenade_gameCharacter::DoAim(float Yaw, float Pitch)
+{
+	if (GetController())
+	{
+		AddControllerYawInput(Yaw);
+		AddControllerPitchInput(Pitch);
+	}
+}
+
+void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
+{
+	if (GetController())
+	{
+		AddMovementInput(GetActorRightVector(), Right);
+		AddMovementInput(GetActorForwardVector(), Forward);
+	}
+}
+
+void Ahe_grenade_gameCharacter::DoJumpStart()
+{
+	Jump();
+}
+
+void Ahe_grenade_gameCharacter::DoJumpEnd()
+{
+	StopJumping();
+}
+
+void Ahe_grenade_gameCharacter::DoThrowPressed()
+{
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->OnThrowPressed();
+	}
+}
+
+void Ahe_grenade_gameCharacter::DoThrowReleased()
+{
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->OnThrowReleased();
+	}
+}
+
+void Ahe_grenade_gameCharacter::DoAimStart()
+{
+	bAimModeActive = true;
+
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->SetAimModeActive(true);
+	}
+	if (GrenadeTrajectoryComponent)
+	{
+		GrenadeTrajectoryComponent->SetAimModeActive(true);
+	}
+
+	UpdateMovementStates();
+}
+
+void Ahe_grenade_gameCharacter::DoAimEnd()
+{
+	bAimModeActive = false;
+
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->SetAimModeActive(false);
+	}
+	if (GrenadeTrajectoryComponent)
+	{
+		GrenadeTrajectoryComponent->SetAimModeActive(false);
+	}
+
+	UpdateMovementStates();
+}
+
+void Ahe_grenade_gameCharacter::DoSprintStart()
+{
+	bSprintInputHeld = true;
+	UpdateMovementStates();
+}
+
+void Ahe_grenade_gameCharacter::DoSprintEnd()
+{
+	bSprintInputHeld = false;
+	UpdateMovementStates();
+}
+
+void Ahe_grenade_gameCharacter::DoCrouchStart()
+{
+	bCrouchInputHeld = true;
+	RefreshCrouchFromInput();
+	UpdateMovementStates();
+}
+
+void Ahe_grenade_gameCharacter::DoCrouchEnd()
+{
+	bCrouchInputHeld = false;
+	RefreshCrouchFromInput();
+	UpdateMovementStates();
+}
+
+void Ahe_grenade_gameCharacter::FellOutOfWorld(const UDamageType& DmgType)
+{
+	AController* PawnController = GetController();
+	Destroy();
+
+	if (PawnController)
+	{
+		if (AGameModeBase* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode() : nullptr)
+		{
+			GameMode->RestartPlayer(PawnController);
+		}
+	}
+}
+
+void Ahe_grenade_gameCharacter::UpdateMovementStates()
+{
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		MovementComponent->SetAimMode(bAimModeActive);
+		MovementComponent->SetSprinting(bSprintInputHeld && !bAimModeActive);
+	}
+}
+
+void Ahe_grenade_gameCharacter::RefreshCrouchFromInput()
+{
+	bool bWantsCrouchInput = bCrouchInputHeld;
+
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		bWantsCrouchInput = bWantsCrouchInput
+			|| PC->IsInputKeyDown(EKeys::LeftControl)
+			|| PC->IsInputKeyDown(EKeys::C);
+	}
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		const bool bShouldCrouch = bWantsCrouchInput;
+
+		Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
+		Movement->bWantsToCrouch = bShouldCrouch;
+
+		if (bShouldCrouch)
+		{
+			Crouch(false);
+		}
+		else
+		{
+			UnCrouch(false);
+		}
+	}
+}
+
+void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
+{
+	if (!FirstPersonCameraComponent)
+	{
+		return;
+	}
+
+	const float TargetOffsetCm = bIsCrouched ? -FMath::Max(0.0f, CrouchCameraDropCm) : 0.0f;
+	CurrentCrouchCameraOffsetCm = FMath::FInterpTo(CurrentCrouchCameraOffsetCm, TargetOffsetCm, DeltaSeconds, FMath::Max(1.0f, CrouchCameraInterpSpeed));
+
+	FVector NewRelativeLocation = StandingCameraRelativeLocation;
+	NewRelativeLocation.Z += CurrentCrouchCameraOffsetCm;
+	FirstPersonCameraComponent->SetRelativeLocation(NewRelativeLocation);
+}
+
+UGGMovementComponent* Ahe_grenade_gameCharacter::GetGGMovementComponent() const
+{
+	return Cast<UGGMovementComponent>(GetCharacterMovement());
+}
+
+bool Ahe_grenade_gameCharacter::IsGrenadeStateGreen() const
+{
+	return GrenadeThrowerComponent ? GrenadeThrowerComponent->IsStateGreen() : false;
+}
