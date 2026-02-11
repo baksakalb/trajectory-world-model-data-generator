@@ -26,3 +26,7 @@ Saved/
 # Plugin intermediates/binaries
 Plugins/*/Binaries/
 Plugins/*/Intermediate/
+
+# Node modules (MCP server testing)
+node_modules/
+package-lock.json

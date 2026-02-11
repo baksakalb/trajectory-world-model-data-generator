@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "unreal-engine": {
+      "command": "npx",
+      "args": ["unreal-engine-mcp-server"],
+      "env": {
+        "UE_PROJECT_PATH": "C:/Users/baris/Documents/Unreal Projects/he_grenade_game"
+      }
+    }
+  }
+}

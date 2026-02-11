@@ -296,8 +296,19 @@ void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
 	const float TargetOffsetCm = bIsCrouched ? -FMath::Max(0.0f, CrouchCameraDropCm) : 0.0f;
 	CurrentCrouchCameraOffsetCm = FMath::FInterpTo(CurrentCrouchCameraOffsetCm, TargetOffsetCm, DeltaSeconds, FMath::Max(1.0f, CrouchCameraInterpSpeed));
 
-	FVector NewRelativeLocation = StandingCameraRelativeLocation;
-	NewRelativeLocation.Z += CurrentCrouchCameraOffsetCm;
+	// Camera is attached to a rotated socket, so convert actor-up into the camera parent space.
+	FVector CrouchAxisInParentSpace = FVector::UpVector;
+	if (const USceneComponent* ParentComponent = FirstPersonCameraComponent->GetAttachParent())
+	{
+		CrouchAxisInParentSpace = ParentComponent->GetComponentTransform().InverseTransformVectorNoScale(GetActorUpVector()).GetSafeNormal();
+	}
+
+	if (CrouchAxisInParentSpace.IsNearlyZero())
+	{
+		CrouchAxisInParentSpace = FVector::UpVector;
+	}
+
+	const FVector NewRelativeLocation = StandingCameraRelativeLocation + (CrouchAxisInParentSpace * CurrentCrouchCameraOffsetCm);
 	FirstPersonCameraComponent->SetRelativeLocation(NewRelativeLocation);
 }
 
