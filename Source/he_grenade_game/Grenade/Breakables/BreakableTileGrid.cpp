@@ -7,8 +7,8 @@ ABreakableTileGrid::ABreakableTileGrid()
 {
 	PrimaryActorTick.bCanEverTick = false;
 
-	// Center a 10x10 grid (200cm tiles) around the actor origin.
-	GridLocalOriginOffset = FVector(-900.0f, -900.0f, 0.0f);
+	// Center a 10x10 grid (250cm tiles) around the actor origin.
+	GridLocalOriginOffset = FVector(-1125.0f, -1125.0f, 0.0f);
 }
 
 void ABreakableTileGrid::BeginPlay()
@@ -54,7 +54,7 @@ void ABreakableTileGrid::BuildGrid()
 			const FVector TileScale(
 				FMath::Max(0.01f, TileSizeCm / 100.0f),
 				FMath::Max(0.01f, TileSizeCm / 100.0f),
-				0.10f);
+				FMath::Max(0.01f, TileThicknessScale));
 			const FTransform SpawnTransform(GetActorRotation(), SpawnLocation, TileScale);
 
 			FActorSpawnParameters SpawnParams;

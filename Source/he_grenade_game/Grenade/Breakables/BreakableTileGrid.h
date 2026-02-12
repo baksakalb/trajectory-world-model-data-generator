@@ -24,13 +24,16 @@ public:
 	int32 TilesY = 10;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (Units = "cm", ClampMin = "1.0"))
-	float TileSizeCm = 200.0f;
+	float TileSizeCm = 250.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "0.01"))
+	float TileThicknessScale = 0.15f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (Units = "cm"))
 	float TileSpacingCm = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
-	FVector GridLocalOriginOffset = FVector::ZeroVector;
+	FVector GridLocalOriginOffset = FVector(-1125.0f, -1125.0f, 0.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
 	TSubclassOf<ABreakableTile> TileClass;

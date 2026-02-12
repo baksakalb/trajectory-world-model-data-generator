@@ -58,6 +58,21 @@ bRequireCapabilityToken=False
 2. Start or refresh Codex.
 3. Run the Mandatory Read-Time Health Check sequence.
 
+## Execution Responsibility
+- Codex should run compile, reload, and editor reset/restart actions itself via MCP/tool commands whenever possible.
+- Do not ask the user to perform editor-side restart/rebuild/reload steps unless automation is blocked or impossible.
+
+## Compile + Restart Workflow (C++ Changes)
+- Preferred full rebuild flow when code changes must be visible in-editor:
+1. Close editor (prefer MCP `control_editor` with `action=console_command`, `command=QUIT_EDITOR`).
+2. Wait until `UnrealEditor.exe` process exits.
+3. Build from shell:
+   `C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat he_grenade_gameEditor Win64 Development "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject" -waitmutex`
+4. Reopen editor from shell:
+   `C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject"`
+5. Wait for bridge readiness (port `8091`) and run the Mandatory Read-Time Health Check sequence.
+- If a direct build fails due live coding lock, use the full close/build/reopen flow above.
+
 ## Health and Dead-Server Behavior
 - `ue://health` may show disconnected immediately after startup; this can be normal before first bridge call.
 - If tool calls fail with transport errors:

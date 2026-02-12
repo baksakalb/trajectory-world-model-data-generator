@@ -68,7 +68,7 @@ void Ahe_grenade_gameGameMode::BeginPlay()
 
 void Ahe_grenade_gameGameMode::SpawnArenaWalls()
 {
-	// Grid spans -1000..+1000 in XY, tile top at Z=11.
+	// Grid spans -1250..+1250 in XY, tile top at Z=13.5.
 	// Spawn 4 invisible collision walls around the perimeter.
 	// Cube mesh is 100cm; scale to wall dimensions.
 	struct FWallDef
@@ -77,13 +77,13 @@ void Ahe_grenade_gameGameMode::SpawnArenaWalls()
 		FVector Scale;
 	};
 
-	const float WallZ = 261.0f; // center of 500cm wall starting at tile top (Z=11)
+	const float WallZ = 263.5f; // center of 500cm wall starting at tile top (Z=13.5)
 	const FWallDef Walls[] =
 	{
-		{ FVector(0.0f,  1005.0f, WallZ), FVector(20.2f, 0.1f, 5.0f) }, // +Y
-		{ FVector(0.0f, -1005.0f, WallZ), FVector(20.2f, 0.1f, 5.0f) }, // -Y
-		{ FVector( 1005.0f, 0.0f, WallZ), FVector(0.1f, 20.2f, 5.0f) }, // +X
-		{ FVector(-1005.0f, 0.0f, WallZ), FVector(0.1f, 20.2f, 5.0f) }, // -X
+		{ FVector(0.0f,  1255.0f, WallZ), FVector(25.2f, 0.1f, 5.0f) }, // +Y
+		{ FVector(0.0f, -1255.0f, WallZ), FVector(25.2f, 0.1f, 5.0f) }, // -Y
+		{ FVector( 1255.0f, 0.0f, WallZ), FVector(0.1f, 25.2f, 5.0f) }, // +X
+		{ FVector(-1255.0f, 0.0f, WallZ), FVector(0.1f, 25.2f, 5.0f) }, // -X
 	};
 
 	for (const FWallDef& W : Walls)
@@ -98,9 +98,11 @@ void Ahe_grenade_gameGameMode::SpawnArenaWalls()
 
 void Ahe_grenade_gameGameMode::SpawnArenaObstacles()
 {
-	// Tile top surface at Z=11. Cube mesh is 100cm centered.
+	// Tile top surface at Z=13.5. Cube mesh is 100cm centered.
 	// For an obstacle with Z-scale S, bottom sits at spawn_Z - 50*S,
-	// so spawn_Z = 11 + 50*S to place bottom on tile surface.
+	// so spawn_Z = 13.5 + 50*S to place bottom on tile surface.
+	const float TileTopSurfaceZ = 13.5f;
+
 	struct FObstacleDef
 	{
 		FVector Location;
@@ -111,17 +113,17 @@ void Ahe_grenade_gameGameMode::SpawnArenaObstacles()
 	const FObstacleDef Obstacles[] =
 	{
 		// Large cover block
-		{ FVector(400.0f, 400.0f, 11.0f + 75.0f),   FRotator::ZeroRotator, FVector(1.5f, 1.5f, 1.5f) },
+		{ FVector(400.0f, 400.0f, TileTopSurfaceZ + 75.0f),   FRotator::ZeroRotator, FVector(1.5f, 1.5f, 1.5f) },
 		// Low wide cover
-		{ FVector(-500.0f, 200.0f, 11.0f + 40.0f),   FRotator::ZeroRotator, FVector(2.0f, 1.0f, 0.8f) },
+		{ FVector(-500.0f, 200.0f, TileTopSurfaceZ + 40.0f),   FRotator::ZeroRotator, FVector(2.0f, 1.0f, 0.8f) },
 		// Tall pillar
-		{ FVector(0.0f, -500.0f, 11.0f + 150.0f),    FRotator::ZeroRotator, FVector(0.7f, 0.7f, 3.0f) },
+		{ FVector(0.0f, -500.0f, TileTopSurfaceZ + 150.0f),    FRotator::ZeroRotator, FVector(0.7f, 0.7f, 3.0f) },
 		// Ramp
-		{ FVector(-300.0f, -400.0f, 11.0f + 50.0f),  FRotator(20.0f, 0.0f, 0.0f), FVector(2.5f, 1.5f, 0.15f) },
+		{ FVector(-300.0f, -400.0f, TileTopSurfaceZ + 50.0f),  FRotator(20.0f, 0.0f, 0.0f), FVector(2.5f, 1.5f, 0.15f) },
 		// Small step platform
-		{ FVector(600.0f, -300.0f, 11.0f + 25.0f),   FRotator::ZeroRotator, FVector(1.5f, 1.5f, 0.5f) },
+		{ FVector(600.0f, -300.0f, TileTopSurfaceZ + 25.0f),   FRotator::ZeroRotator, FVector(1.5f, 1.5f, 0.5f) },
 		// Medium cover block
-		{ FVector(-700.0f, 500.0f, 11.0f + 100.0f),  FRotator::ZeroRotator, FVector(1.0f, 2.0f, 2.0f) },
+		{ FVector(-700.0f, 500.0f, TileTopSurfaceZ + 100.0f),  FRotator::ZeroRotator, FVector(1.0f, 2.0f, 2.0f) },
 	};
 
 	for (const FObstacleDef& O : Obstacles)

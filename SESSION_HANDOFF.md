@@ -54,7 +54,7 @@ First-person grenade game. Player throws grenades on a glass-tile arena floor. B
 
 ### 2.4 Arena / Breakables
 **Arena layout**
-- Glass tile floor: **10x10 grid of 200cm tiles** (20m x 20m arena)
+- Glass tile floor: **10x10 grid of 250cm tiles** (25m x 25m arena)
 - Old template level geometry deleted (only sky, lighting, fog, PlayerStart remain)
 - 4 invisible boundary walls around perimeter (collision only, hidden)
 - 6 obstacles spawned via `AArenaObstacle` (cover blocks, pillar, ramp, step platform)
@@ -72,11 +72,11 @@ First-person grenade game. Player throws grenades on a glass-tile arena floor. B
 
 **Grid coordinate math (useful for edits)**
 - Grid spawned at `(0, 0, 6)` by GameMode
-- `GridLocalOriginOffset = (-900, -900, 0)` centers 10x10 grid
-- Tile centers: -900 to +900 in XY (step 200)
-- Tile edges: -1000 to +1000
-- Tile Z-scale 0.10 → ~10cm thick; top surface at Z=11
-- Obstacles bottom placed at Z=11
+- `GridLocalOriginOffset = (-1125, -1125, 0)` centers 10x10 grid
+- Tile centers: -1125 to +1125 in XY (step 250)
+- Tile edges: -1250 to +1250
+- Tile Z-scale 0.15 → ~15cm thick; top surface at Z=13.5
+- Obstacles bottom placed at Z=13.5
 
 **Observed behavior (from logs, 2026-02-11)**
 - Auto-spawn observed:
@@ -111,9 +111,10 @@ First-person grenade game. Player throws grenades on a glass-tile arena floor. B
 
 ## 4) TODO (Priority Order)
 
-### 4.1 Tile Improvements
-- Make glass tiles slightly bigger (consider 250cm or 300cm)
-- Make tiles thicker (increase Z-scale from 0.10)
+### 4.1 Tile Improvements (COMPLETED 2026-02-12)
+- Done: increased tile size from 200cm to 250cm.
+- Done: increased tile thickness scale from 0.10 to 0.15.
+- Done: updated grid centering/walls/obstacle Z assumptions to match new tile dimensions.
 
 ### 4.2 Crouch ↔ Trajectory Behavior (design decision needed)
 There is a **conflicting intent across sessions**:
