@@ -1,0 +1,83 @@
+# Escape Hatch (Non-MCP Fallback)
+
+Last updated: 2026-02-12
+
+## Purpose
+- Define a safe fallback when required work cannot be completed through exposed MCP tools.
+- This path does not depend on MCP tool availability and uses Unreal Python execution directly from terminal.
+
+## When To Use
+Use this only after all MCP checks below are completed and still blocked:
+1. Run the mandatory MCP health check sequence from `CODEX_INSTRUCTIONS.md`.
+2. Pick best matching MCP tool/action from `MCP_TOOL_CALL_MATRIX.json`.
+3. Validate payload shape (`action` + selector field).
+4. Retry once with minimal known-good payload.
+5. Confirm failure is capability-related (for example: tool missing from surface, `action_not_supported`, misroute, or repeated unknown action).
+
+If all five checks are true, switch to this escape hatch.
+
+## Modes
+- `readonly`: gather data only, no changes.
+- `preview`: compute intended changes, no writes.
+- `apply`: execute changes.
+
+Default mode is `readonly`.
+
+## Execution Pattern
+1. Build a request JSON file with `task`, `mode`, and `args`.
+2. Run Unreal Python from terminal against this project.
+3. Python script writes structured result JSON (`success`, `summary`, `changes`, `warnings`, `error`).
+4. If `mode=apply`, immediately run the mandatory MCP health check sequence again.
+
+## Terminal Command Templates
+Use one of these depending on local UE behavior.
+
+```powershell
+& "C:\Path\To\UE\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+  "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject" `
+  -run=pythonscript `
+  -script="C:\Users\baris\Documents\Unreal Projects\he_grenade_game\Scripts\escape_hatch.py" `
+  -unattended -nop4
+```
+
+```powershell
+& "C:\Path\To\UE\Engine\Binaries\Win64\UnrealEditor.exe" `
+  "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject" `
+  -ExecutePythonScript="C:\Users\baris\Documents\Unreal Projects\he_grenade_game\Scripts\escape_hatch.py"
+```
+
+## Request/Result Contract
+Request JSON shape:
+
+```json
+{
+  "task": "describe_required_operation",
+  "mode": "readonly",
+  "args": {}
+}
+```
+
+Result JSON shape:
+
+```json
+{
+  "success": true,
+  "summary": "what was done",
+  "changes": [],
+  "warnings": [],
+  "error": null
+}
+```
+
+## Safety Rules
+1. Do not use this path if MCP can do the job.
+2. Prefer `readonly` first, then `preview`, then `apply`.
+3. Require explicit user confirmation before `apply`.
+4. In `apply`, use editor transactions where possible and track touched assets/actors in `changes`.
+5. Never perform delete/move/rename unless the request explicitly asks for it.
+6. On any exception, stop and return a structured error; do not continue partial scripted steps.
+
+## Post-Run Requirements
+1. Re-run the mandatory MCP health check sequence from `CODEX_INSTRUCTIONS.md`.
+2. Report exact script used, mode used, and resulting `changes`.
+3. If fallback solved a repeated gap, note it for future MCP/tooling improvement.
