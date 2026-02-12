@@ -1,0 +1,698 @@
+{
+  "audit_meta": {
+    "date_utc": "2026-02-12",
+    "project": "he_grenade_game",
+    "repo_head": "9715ac3",
+    "repo_branch": "main",
+    "mcp_server_version": "0.5.15",
+    "mcp_server_commit": "29d1315",
+    "ue_version": "5.7.2-49658320+++UE5+Release-5.7",
+    "notes": [
+      "Matrix is based on live probing plus source inspection.",
+      "manage_pipeline is present in server source but not exposed to this Codex client surface.",
+      "manage_level:get_summary is stateful and succeeds after manage_level:load for the same path.",
+      "A transport drop occurred during bulk delete cleanup testing.",
+      "After Codex refresh and warm-up, health reconnected and audit assets were verified absent via exists/list."
+    ]
+  },
+  "rows": [
+    {
+      "tool": "manage_pipeline",
+      "action": "get_status",
+      "payload_example": {
+        "action": "get_status"
+      },
+      "result_class": "action_not_supported",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "Tool not exposed in Codex function surface",
+      "notes": "Server source contains manage_pipeline, but tool list filters it for clients without listChanged support.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/server/tool-registry.ts:288",
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/server/tool-registry.ts:294"
+      ]
+    },
+    {
+      "tool": "animation_physics",
+      "action": "get_animation_info",
+      "payload_example": {
+        "action": "get_animation_info",
+        "assetPath": "/Game/Characters/Mannequins/Anims/Unarmed/MM_Idle.MM_Idle"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "assetPath"
+      ],
+      "response_signature": "success:true; result.animationInfo{assetType,skeletonPath,duration,numFrames,...}",
+      "notes": "Missing assetPath returns explicit required-arg error.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:398"
+      ]
+    },
+    {
+      "tool": "build_environment",
+      "action": "get_foliage_instances",
+      "payload_example": {
+        "action": "get_foliage_instances"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.instances[]",
+      "notes": "Returns empty list cleanly when no foliage actor exists.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:684"
+      ]
+    },
+    {
+      "tool": "control_actor",
+      "action": "list",
+      "payload_example": {
+        "action": "list"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.data.actors[]",
+      "notes": "Reliable baseline actor inventory call.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:245"
+      ]
+    },
+    {
+      "tool": "control_editor",
+      "action": "console_command",
+      "payload_example": {
+        "action": "console_command",
+        "command": "stat none"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "command"
+      ],
+      "response_signature": "success:true; output/result.command,executed",
+      "notes": "Used as safe warm-up and health check command.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:305"
+      ]
+    },
+    {
+      "tool": "inspect",
+      "action": "list_objects",
+      "payload_example": {
+        "action": "list_objects"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; actors[]; count",
+      "notes": "Good read-only object inventory fallback.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:906"
+      ]
+    },
+    {
+      "tool": "manage_ai",
+      "action": "get_ai_info",
+      "payload_example": {
+        "action": "get_ai_info",
+        "behaviorTreePath": "/Game/__test_bt__.__test_bt__"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "one path selector"
+      ],
+      "response_signature": "success:true; result.aiInfo{}",
+      "notes": "Without a path selector returns MISSING_PARAMETER.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:2250"
+      ]
+    },
+    {
+      "tool": "manage_asset",
+      "action": "list",
+      "payload_example": {
+        "action": "list",
+        "path": "/Game"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; data.assets[]; data.folders[]",
+      "notes": "list and exists are stable. Query-style routes are affected by asset_query misroute (see defect row).",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:33"
+      ]
+    },
+    {
+      "tool": "manage_audio",
+      "action": "get_audio_info",
+      "payload_example": {
+        "action": "get_audio_info",
+        "assetPath": "/Game/Weapons/GrenadeLauncher/Audio/FirstPersonTemplateWeaponFire02.FirstPersonTemplateWeaponFire02"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "assetPath"
+      ],
+      "response_signature": "success:true; result{assetClass,type,duration,sampleRate,numChannels}",
+      "notes": "Without assetPath returns missing required parameter.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:948"
+      ]
+    },
+    {
+      "tool": "manage_behavior_tree",
+      "action": "create",
+      "payload_example": {
+        "action": "create",
+        "name": "BT_MCP_AUDIT_TMP",
+        "savePath": "/Game/__MCP_AUDIT__/BT_MCP_AUDIT_TMP"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "name",
+        "savePath"
+      ],
+      "response_signature": "success:true; result.assetPath; result.saved",
+      "notes": "Mutating probe succeeded. Cleanup bulk delete timed out in initial pass; post-refresh exists/list checks confirmed no residual audit assets.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1057"
+      ]
+    },
+    {
+      "tool": "manage_blueprint",
+      "action": "list_node_types",
+      "payload_example": {
+        "action": "list_node_types",
+        "blueprintPath": "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "blueprintPath"
+      ],
+      "response_signature": "success:true; result.nodeTypes[]; count",
+      "notes": "Without blueprintPath/assetPath returns INVALID_ARGUMENT.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:137"
+      ]
+    },
+    {
+      "tool": "manage_character",
+      "action": "get_character_info",
+      "payload_example": {
+        "action": "get_character_info",
+        "blueprintPath": "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "blueprintPath"
+      ],
+      "response_signature": "success:true; result{capsuleRadius,walkSpeed,jumpZVelocity,...}",
+      "notes": "Missing blueprintPath fails immediately.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1908"
+      ]
+    },
+    {
+      "tool": "manage_combat",
+      "action": "get_combat_info",
+      "payload_example": {
+        "action": "get_combat_info",
+        "blueprintPath": "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "blueprintPath"
+      ],
+      "response_signature": "success:true; result.combatInfo{}",
+      "notes": "Works as read-only inspection path.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:2073"
+      ]
+    },
+    {
+      "tool": "manage_effect",
+      "action": "list_debug_shapes",
+      "payload_example": {
+        "action": "list_debug_shapes"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.shapes[]",
+      "notes": "get_niagara_info requires a valid Niagara assetPath; non-Niagara paths return ASSET_NOT_FOUND.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:542"
+      ]
+    },
+    {
+      "tool": "manage_game_framework",
+      "action": "get_game_framework_info",
+      "payload_example": {
+        "action": "get_game_framework_info"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.gameFrameworkInfo{}",
+      "notes": "Read-only call succeeds without extra parameters.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:3592"
+      ]
+    },
+    {
+      "tool": "manage_gas",
+      "action": "get_gas_info",
+      "payload_example": {
+        "action": "get_gas_info",
+        "assetPath": "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "assetPath"
+      ],
+      "response_signature": "success:true; result{assetType,parentClass,...}",
+      "notes": "Without assetPath returns missing required parameter.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1668"
+      ]
+    },
+    {
+      "tool": "manage_geometry",
+      "action": "get_mesh_info",
+      "payload_example": {
+        "action": "get_mesh_info",
+        "actorName": "PlayerStart_0"
+      },
+      "result_class": "invalid_argument_or_type",
+      "required_params": [
+        "action",
+        "actorName"
+      ],
+      "response_signature": "success:false; error: ACTOR_NOT_FOUND",
+      "notes": "In current map, tested actorName values are not accepted by geometry handler for get_mesh_info.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1216"
+      ]
+    },
+    {
+      "tool": "manage_input",
+      "action": "create_input_action",
+      "payload_example": {
+        "action": "create_input_action",
+        "name": "IA_MCP_AUDIT_TMP",
+        "path": "/Game/__MCP_AUDIT__"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "name",
+        "path"
+      ],
+      "response_signature": "success:true; result.assetPath",
+      "notes": "Mutating probe succeeded.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:873"
+      ]
+    },
+    {
+      "tool": "manage_interaction",
+      "action": "get_interaction_info",
+      "payload_example": {
+        "action": "get_interaction_info",
+        "actorName": "PlayerStart_0"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "one selector (actorName/blueprintPath/etc.)"
+      ],
+      "response_signature": "success:true; result{actorName,actorClass}",
+      "notes": "Without selector returns MISSING_PARAMETER.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:2785"
+      ]
+    },
+    {
+      "tool": "manage_inventory",
+      "action": "get_inventory_info",
+      "payload_example": {
+        "action": "get_inventory_info",
+        "blueprintPath": "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "one selector (blueprintPath/itemPath/etc.)"
+      ],
+      "response_signature": "success:true; result{assetType,className,components}",
+      "notes": "Without selector returns MISSING_PARAMETER.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:2508"
+      ]
+    },
+    {
+      "tool": "manage_level",
+      "action": "list_levels",
+      "payload_example": {
+        "action": "list_levels"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; currentWorldLevels[]; allMaps[]",
+      "notes": "get_summary is stateful: load/track the level via manage_level:load first.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:348"
+      ]
+    },
+    {
+      "tool": "manage_level",
+      "action": "get_summary (after load)",
+      "payload_example": {
+        "action": "get_summary",
+        "levelPath": "/Game/FirstPerson/Lvl_FirstPerson"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "levelPath (or current tracked level)"
+      ],
+      "response_signature": "success:true; message:'Level summary ready'; path/name/loaded/visible",
+      "notes": "Observed success immediately after manage_level:load for the same level path.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/level.ts:200",
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/level.ts:271"
+      ]
+    },
+    {
+      "tool": "manage_level_structure",
+      "action": "get_level_structure_info",
+      "payload_example": {
+        "action": "get_level_structure_info"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.levelStructureInfo{}",
+      "notes": "Stable read-only call for partition/sublevel metadata.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:3827"
+      ]
+    },
+    {
+      "tool": "manage_lighting",
+      "action": "list_light_types",
+      "payload_example": {
+        "action": "list_light_types"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.types[]",
+      "notes": "Reliable non-destructive probe action.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1091"
+      ]
+    },
+    {
+      "tool": "manage_material_authoring",
+      "action": "get_material_info",
+      "payload_example": {
+        "action": "get_material_info",
+        "assetPath": "/Game/Materials/M_GlassTile.M_GlassTile"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "assetPath or materialPath"
+      ],
+      "response_signature": "success:true; result{domain,blendMode,nodeCount,parameters[]}",
+      "notes": "Missing assetPath/materialPath yields explicit argument error.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1444"
+      ]
+    },
+    {
+      "tool": "manage_navigation",
+      "action": "get_navigation_info",
+      "payload_example": {
+        "action": "get_navigation_info"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.navMeshInfo{}",
+      "notes": "Read-only nav diagnostics call.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:4133"
+      ]
+    },
+    {
+      "tool": "manage_networking",
+      "action": "get_networking_info",
+      "payload_example": {
+        "action": "get_networking_info",
+        "blueprintPath": "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "blueprintPath or actorName"
+      ],
+      "response_signature": "success:true; result.networkingInfo{}",
+      "notes": "Without selector returns INVALID_PARAMS.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:3373"
+      ]
+    },
+    {
+      "tool": "manage_performance",
+      "action": "show_stats",
+      "payload_example": {
+        "action": "show_stats",
+        "enabled": true
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; message indicates stat/unit state",
+      "notes": "No destructive effect with enabled toggles during probe.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1159"
+      ]
+    },
+    {
+      "tool": "manage_sequence",
+      "action": "list",
+      "payload_example": {
+        "action": "list"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.sequences[]",
+      "notes": "Returns empty set cleanly when project has no Level Sequence assets.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:813"
+      ]
+    },
+    {
+      "tool": "manage_sessions",
+      "action": "get_sessions_info",
+      "payload_example": {
+        "action": "get_sessions_info"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.sessionsInfo{}",
+      "notes": "This handler also surfaced as an erroneous fallback for unrelated actions (defect rows).",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:3718",
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_SessionsHandlers.cpp:924"
+      ]
+    },
+    {
+      "tool": "manage_skeleton",
+      "action": "get_skeleton_info",
+      "payload_example": {
+        "action": "get_skeleton_info",
+        "skeletonPath": "/Game/Characters/Mannequins/Meshes/SK_Mannequin.SK_Mannequin"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "skeletonPath"
+      ],
+      "response_signature": "success:true; result{boneCount,socketCount,...}",
+      "notes": "Missing skeletonPath fails with SKELETON_NOT_FOUND.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1339"
+      ]
+    },
+    {
+      "tool": "manage_splines",
+      "action": "get_splines_info",
+      "payload_example": {
+        "action": "get_splines_info"
+      },
+      "result_class": "routing_bug_or_wrong_handler",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:false; message:'Unknown manage_sessions action: get_splines_info'",
+      "notes": "Expected spline handler is bypassed/misrouted in current runtime.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-handlers.ts:452",
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_ProcessRequest.cpp:518",
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridgeSubsystem.cpp:889"
+      ]
+    },
+    {
+      "tool": "manage_texture",
+      "action": "get_texture_info",
+      "payload_example": {
+        "action": "get_texture_info",
+        "assetPath": "/Game/Weapons/Pistol/Textures/T_Pistol_D.T_Pistol_D"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "assetPath or texturePath"
+      ],
+      "response_signature": "success:true; result.textureInfo{width,height,format,...}",
+      "notes": "Missing path returns explicit argument error.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:1531"
+      ]
+    },
+    {
+      "tool": "manage_volumes",
+      "action": "get_volumes_info",
+      "payload_example": {
+        "action": "get_volumes_info"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; result.volumesInfo{totalCount,volumes[]}",
+      "notes": "Good map safety probe for volume inventory.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:4002"
+      ]
+    },
+    {
+      "tool": "manage_widget_authoring",
+      "action": "create_widget_blueprint + get_widget_info",
+      "payload_example": {
+        "action": "get_widget_info",
+        "widgetPath": "/Game/__MCP_AUDIT__/WBP_MCP_AUDIT_TMP.WBP_MCP_AUDIT_TMP"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action",
+        "widgetPath for read ops"
+      ],
+      "response_signature": "success:true; result.widgetInfo{widgetClass,parentClass,...}",
+      "notes": "Mutating probe succeeded in audit namespace. Initial bulk delete caused transport failure; post-refresh verification confirmed assets absent.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:2962"
+      ]
+    },
+    {
+      "tool": "system_control",
+      "action": "get_project_settings",
+      "payload_example": {
+        "action": "get_project_settings"
+      },
+      "result_class": "success",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:true; settings{projectVersion,...}",
+      "notes": "console_command via system_control also validated successfully.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/consolidated-tool-definitions.ts:765"
+      ]
+    },
+    {
+      "tool": "defect.manage_asset.asset_query",
+      "action": "search_assets / find_by_tag / get_source_control_state",
+      "payload_example": {
+        "action": "search_assets",
+        "searchText": "M_GlassTile"
+      },
+      "result_class": "routing_bug_or_wrong_handler",
+      "required_params": [
+        "action"
+      ],
+      "response_signature": "success:false; message:'Unknown manage_sessions action: asset_query'",
+      "notes": "Asset query routes through top-level asset_query but gets swallowed by manage_sessions fallback chain.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/tools/assets.ts:99",
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_AssetQueryHandlers.cpp:33",
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_ProcessRequest.cpp:518"
+      ]
+    },
+    {
+      "tool": "defect.manage_pipeline.visibility",
+      "action": "N/A (tool exposure)",
+      "payload_example": {},
+      "result_class": "action_not_supported",
+      "required_params": [],
+      "response_signature": "Tool hidden from client tool list",
+      "notes": "Registry filters out manage_pipeline when supportsListChanged is false for client capability detection.",
+      "source_refs": [
+        "C:/Users/baris/.codex/tools/Unreal_mcp/src/server/tool-registry.ts:294"
+      ]
+    },
+    {
+      "tool": "defect.cleanup.bulk_delete_timeout",
+      "action": "bulk_delete",
+      "payload_example": {
+        "action": "bulk_delete",
+        "assetPaths": [
+          "/Game/__MCP_AUDIT__/WBP_MCP_AUDIT_TMP.WBP_MCP_AUDIT_TMP"
+        ],
+        "showConfirmation": false
+      },
+      "result_class": "action_not_supported",
+      "required_params": [
+        "action",
+        "assetPaths"
+      ],
+      "response_signature": "tools/call timeout then MCP transport closed",
+      "notes": "Cleanup flow hit timeout and closed transport; post-refresh checks showed all audit assets exists=false and /Game/__MCP_AUDIT__ list empty; on-disk folder remained FILE_COUNT=0.",
+      "source_refs": [
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_AssetWorkflowHandlers.cpp:90",
+        "C:/Users/baris/Desktop/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_AssetWorkflowHandlers.cpp:628"
+      ]
+    }
+  ]
+}
