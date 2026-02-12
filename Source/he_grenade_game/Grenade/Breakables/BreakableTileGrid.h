@@ -18,13 +18,13 @@ public:
 	bool bSpawnOnBeginPlay = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
-	int32 TilesX = 20;
+	int32 TilesX = 10;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
-	int32 TilesY = 20;
+	int32 TilesY = 10;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (Units = "cm", ClampMin = "1.0"))
-	float TileSizeCm = 100.0f;
+	float TileSizeCm = 200.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (Units = "cm"))
 	float TileSpacingCm = 0.0f;

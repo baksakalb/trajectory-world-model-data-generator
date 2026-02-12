@@ -3,8 +3,8 @@
 > **PURPOSE:** This is the single source of truth for Claude (AI assistant) at the start of every session.
 > It covers: how the MCP connection works, how to call every tool, how to verify the connection is healthy.
 >
-> For game-specific design context and current development state, read `SESSION_HANDOFF_2026-02-11.md`
-> separately -- that file covers gameplay systems, bugs, and priorities.
+> For game-specific design context and current development state, read `SESSION_HANDOFF.md`
+> separately -- that file covers gameplay systems, current state, and future priorities.
 >
 > Plugin: [ChiR24/Unreal_mcp](https://github.com/ChiR24/Unreal_mcp) | Engine: UE 5.7.2
 > Protocol: WebSocket `ws://127.0.0.1:8091` | Config: `.mcp.json` in project root
@@ -59,6 +59,42 @@ bAllowNonLoopback=True
 bRequireCapabilityToken=False
 bMultiListen=False
 ```
+
+---
+
+## Workflow Rules
+
+### Build Cycle (MANDATORY)
+- **No Live Coding / No Live Edit** -- these are disabled and must never be used.
+- The standard cycle is: **close editor -> build -> reopen editor**.
+- Claude has full permission to do this autonomously:
+  1. `Stop-Process -Name 'UnrealEditor'` (PowerShell)
+  2. `Build.bat he_grenade_gameEditor Win64 Development ...`
+  3. `Start-Process UnrealEditor.exe ...`
+- **Do NOT ask the user to restart/reopen the editor.** Handle it yourself.
+- After reopening, wait for the editor to load, then continue working via MCP.
+
+### When to Prompt the User
+- **Visual testing only:** When code changes are built and you need the user to Play and give feedback on look/feel.
+- **Impossible tasks:** If something genuinely cannot be done programmatically and requires manual editor interaction, explain what and why, then wait.
+- **Everything else:** Do it yourself. Delete actors, create materials, compile, reopen -- all autonomous.
+
+### Build Commands
+```powershell
+# Close editor
+powershell -Command "Stop-Process -Name 'UnrealEditor' -ErrorAction SilentlyContinue"
+
+# Build
+powershell -Command "& 'C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat' he_grenade_gameEditor Win64 Development '-Project=C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject' -WaitMutex -FromMsBuild"
+
+# Reopen editor
+powershell -Command "Start-Process 'C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe' -ArgumentList '\"C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject\"'"
+```
+
+### MCP Material Authoring: connect_nodes Convention
+When connecting material nodes to the main material output, use:
+- `targetNodeId: "Main"` (the material result node)
+- `targetPin: "BaseColor"`, `"Metallic"`, `"Roughness"`, `"Opacity"`, `"Normal"`, etc.
 
 ---
 

@@ -7,6 +7,7 @@
 #include "he_grenade_gameGameMode.generated.h"
 
 class ABreakableTileGrid;
+class AArenaObstacle;
 
 /**
  * Base game mode used by first-person gameplay variant.
@@ -30,4 +31,8 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+
+private:
+	void SpawnArenaWalls();
+	void SpawnArenaObstacles();
 };

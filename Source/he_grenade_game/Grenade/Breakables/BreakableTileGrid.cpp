@@ -7,8 +7,8 @@ ABreakableTileGrid::ABreakableTileGrid()
 {
 	PrimaryActorTick.bCanEverTick = false;
 
-	// Center a default 20x20 grid around the actor origin.
-	GridLocalOriginOffset = FVector(-950.0f, -950.0f, 0.0f);
+	// Center a 10x10 grid (200cm tiles) around the actor origin.
+	GridLocalOriginOffset = FVector(-900.0f, -900.0f, 0.0f);
 }
 
 void ABreakableTileGrid::BeginPlay()

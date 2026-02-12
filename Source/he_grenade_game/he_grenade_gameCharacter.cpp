@@ -65,9 +65,9 @@ void Ahe_grenade_gameCharacter::BeginPlay()
 		Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
 	}
 
-	if (FirstPersonCameraComponent)
+	if (FirstPersonMesh)
 	{
-		StandingCameraRelativeLocation = FirstPersonCameraComponent->GetRelativeLocation();
+		StandingMeshRelativeLocation = FirstPersonMesh->GetRelativeLocation();
 		CurrentCrouchCameraOffsetCm = 0.0f;
 	}
 }
@@ -288,7 +288,7 @@ void Ahe_grenade_gameCharacter::RefreshCrouchFromInput()
 
 void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
 {
-	if (!FirstPersonCameraComponent)
+	if (!FirstPersonMesh)
 	{
 		return;
 	}
@@ -296,20 +296,13 @@ void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
 	const float TargetOffsetCm = bIsCrouched ? -FMath::Max(0.0f, CrouchCameraDropCm) : 0.0f;
 	CurrentCrouchCameraOffsetCm = FMath::FInterpTo(CurrentCrouchCameraOffsetCm, TargetOffsetCm, DeltaSeconds, FMath::Max(1.0f, CrouchCameraInterpSpeed));
 
-	// Camera is attached to a rotated socket, so convert actor-up into the camera parent space.
-	FVector CrouchAxisInParentSpace = FVector::UpVector;
-	if (const USceneComponent* ParentComponent = FirstPersonCameraComponent->GetAttachParent())
-	{
-		CrouchAxisInParentSpace = ParentComponent->GetComponentTransform().InverseTransformVectorNoScale(GetActorUpVector()).GetSafeNormal();
-	}
-
-	if (CrouchAxisInParentSpace.IsNearlyZero())
-	{
-		CrouchAxisInParentSpace = FVector::UpVector;
-	}
-
-	const FVector NewRelativeLocation = StandingCameraRelativeLocation + (CrouchAxisInParentSpace * CurrentCrouchCameraOffsetCm);
-	FirstPersonCameraComponent->SetRelativeLocation(NewRelativeLocation);
+	// Offset the entire first-person mesh in Z. Since it's attached to GetMesh()
+	// (which has at most a yaw rotation), local Z is always world-vertical.
+	// This avoids the coordinate-space mismatch of offsetting the camera
+	// inside its rotated socket.
+	FVector NewLocation = StandingMeshRelativeLocation;
+	NewLocation.Z += CurrentCrouchCameraOffsetCm;
+	FirstPersonMesh->SetRelativeLocation(NewLocation);
 }
 
 UGGMovementComponent* Ahe_grenade_gameCharacter::GetGGMovementComponent() const

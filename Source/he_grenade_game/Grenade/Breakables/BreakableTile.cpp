@@ -2,6 +2,7 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 
 ABreakableTile::ABreakableTile()
@@ -19,6 +20,12 @@ ABreakableTile::ABreakableTile()
 	if (TileMeshAsset.Succeeded())
 	{
 		TileMesh->SetStaticMesh(TileMeshAsset.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> GlassMat(TEXT("/Game/Materials/M_GlassTile.M_GlassTile"));
+	if (GlassMat.Succeeded())
+	{
+		TileMesh->SetMaterial(0, GlassMat.Object);
 	}
 
 	Tags.AddUnique(TEXT("BreakableTile"));

@@ -55,7 +55,7 @@ public:
 	float ThrowSpeedCmPerSec = 1400.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw", meta = (ClampMin = "0.0", ClampMax = "1.5"))
-	float ThrowInheritVelocityFactor = 1.0f;
+	float ThrowInheritVelocityFactor = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw", meta = (ClampMin = "100.0", Units = "cm"))
 	float TrajectoryTraceDistanceCm = 100000.0f;
