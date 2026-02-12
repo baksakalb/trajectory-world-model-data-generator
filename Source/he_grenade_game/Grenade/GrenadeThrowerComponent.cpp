@@ -7,6 +7,11 @@
 
 namespace
 {
+	constexpr float MinBreakableVelocityDamping = 0.90f;
+	constexpr float MinRestSpeedCmPerSec = 55.0f;
+	constexpr float MinCrouchSpawnDropCm = 16.0f;
+	constexpr float MinCrouchPitchOffsetDegrees = -7.0f;
+
 	static TAutoConsoleVariable<int32> CVarGGGrenadeStateDebug(
 		TEXT("gg.Grenade.DebugState"),
 		0,
@@ -22,7 +27,25 @@ UGrenadeThrowerComponent::UGrenadeThrowerComponent()
 void UGrenadeThrowerComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	SimulationConfig.BreakableVelocityDamping = FMath::Clamp(
+		FMath::Max(SimulationConfig.BreakableVelocityDamping, MinBreakableVelocityDamping),
+		0.0f,
+		0.95f);
+	SimulationConfig.RestSpeedCmPerSec = FMath::Max(SimulationConfig.RestSpeedCmPerSec, MinRestSpeedCmPerSec);
+	CrouchThrowPitchOffsetDegrees = FMath::Min(CrouchThrowPitchOffsetDegrees, MinCrouchPitchOffsetDegrees);
+	CrouchThrowSpawnDropCm = FMath::Max(CrouchThrowSpawnDropCm, MinCrouchSpawnDropCm);
+
 	SetThrowState(EGrenadeThrowState::Ready);
+
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("Grenade tuning active: BreakableDamping=%.2f RestSpeed=%.1f CrouchPitchOffset=%.1f CrouchSpawnDrop=%.1f"),
+		SimulationConfig.BreakableVelocityDamping,
+		SimulationConfig.RestSpeedCmPerSec,
+		CrouchThrowPitchOffsetDegrees,
+		CrouchThrowSpawnDropCm);
 }
 
 void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)

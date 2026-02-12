@@ -177,7 +177,7 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 			}
 		}
 
-		if (SimState.bExploded || StepResult.bExplodedThisStep)
+		if (SimState.bMotionStopped || StepResult.bStoppedThisStep || SimState.bExploded || StepResult.bExplodedThisStep)
 		{
 			break;
 		}

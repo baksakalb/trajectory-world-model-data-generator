@@ -3,6 +3,70 @@
 #include "Grenade/Breakables/BreakableTile.h"
 #include "Engine/World.h"
 
+namespace
+{
+	bool HasStableSupport(
+		UWorld* World,
+		const FGrenadeSimConfig& Config,
+		const FGrenadeSimState& State,
+		AActor* PrimaryIgnoredActor)
+	{
+		if (!World)
+		{
+			return false;
+		}
+
+		const float ProbeDistanceCm = FMath::Max(0.0f, Config.SupportProbeDistanceCm);
+		if (ProbeDistanceCm <= KINDA_SMALL_NUMBER)
+		{
+			return false;
+		}
+
+		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrenadeSimSupportProbe), false);
+		if (PrimaryIgnoredActor)
+		{
+			QueryParams.AddIgnoredActor(PrimaryIgnoredActor);
+		}
+
+		for (const TWeakObjectPtr<ABreakableTile>& TilePtr : State.VirtualBrokenTiles)
+		{
+			if (ABreakableTile* Tile = TilePtr.Get())
+			{
+				QueryParams.AddIgnoredActor(Tile);
+			}
+		}
+
+		const FVector ProbeStart = State.Position;
+		const FVector ProbeEnd = ProbeStart - FVector(0.0f, 0.0f, ProbeDistanceCm);
+
+		FHitResult SupportHit;
+		const bool bHitSupport = World->SweepSingleByChannel(
+			SupportHit,
+			ProbeStart,
+			ProbeEnd,
+			FQuat::Identity,
+			Config.TraceChannel,
+			FCollisionShape::MakeSphere(Config.RadiusCm),
+			QueryParams);
+
+		if (!bHitSupport || !SupportHit.bBlockingHit)
+		{
+			return false;
+		}
+
+		const FVector SupportNormal = SupportHit.ImpactNormal.IsNearlyZero()
+			? SupportHit.Normal.GetSafeNormal()
+			: SupportHit.ImpactNormal.GetSafeNormal();
+
+		if (SupportNormal.IsNearlyZero())
+		{
+			return false;
+		}
+
+		return SupportNormal.Z >= FMath::Clamp(Config.SupportMinNormalZ, 0.0f, 1.0f);
+	}
+}
+
 void FGrenadeSim::InitializeState(FGrenadeSimState& OutState, const FVector& StartPosition, const FVector& StartVelocity, float FuseSeconds)
 {
 	OutState.Position = StartPosition;
@@ -10,6 +74,7 @@ void FGrenadeSim::InitializeState(FGrenadeSimState& OutState, const FVector& Sta
 	OutState.RemainingFuseSeconds = FMath::Max(0.0f, FuseSeconds);
 	OutState.BounceCount = 0;
 	OutState.bMotionStopped = false;
+	OutState.ConsecutiveSupportedSteps = 0;
 	OutState.bExploded = false;
 	OutState.TraveledDistanceCm = 0.0f;
 	OutState.VirtualBrokenTiles.Reset();
@@ -37,7 +102,36 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 	}
 
 	const FVector GravityVector(0.0f, 0.0f, Config.GravityZ);
+	const float RestSpeedSq = FMath::Square(FMath::Max(0.0f, Config.RestSpeedCmPerSec));
+	const int32 RequiredSupportedSteps = FMath::Max(1, Config.SupportRequiredConsecutiveSteps);
 	float RemainingStepTime = ClampedStepDt;
+
+	auto TryEnterRestState = [&](const FVector& CandidateVelocity) -> bool
+		{
+			if (CandidateVelocity.SizeSquared() > RestSpeedSq)
+			{
+				InOutState.ConsecutiveSupportedSteps = 0;
+				return false;
+			}
+
+			if (!HasStableSupport(World, Config, InOutState, PrimaryIgnoredActor))
+			{
+				InOutState.ConsecutiveSupportedSteps = 0;
+				return false;
+			}
+
+			InOutState.ConsecutiveSupportedSteps = FMath::Min(InOutState.ConsecutiveSupportedSteps + 1, RequiredSupportedSteps);
+			if (InOutState.ConsecutiveSupportedSteps < RequiredSupportedSteps)
+			{
+				return false;
+			}
+
+			InOutState.Velocity = FVector::ZeroVector;
+			InOutState.bMotionStopped = true;
+			Result.bStoppedThisStep = true;
+			RemainingStepTime = 0.0f;
+			return true;
+		};
 
 	constexpr int32 MaxCollisionIterations = 8;
 	for (int32 Iteration = 0; Iteration < MaxCollisionIterations && RemainingStepTime > KINDA_SMALL_NUMBER; ++Iteration)
@@ -83,6 +177,7 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 		if (MovementDelta.IsNearlyZero())
 		{
 			InOutState.Velocity = EndVelocity;
+			TryEnterRestState(EndVelocity);
 			RemainingStepTime = 0.0f;
 			break;
 		}
@@ -118,6 +213,12 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 			InOutState.Position = EndPosition;
 			InOutState.Velocity = EndVelocity;
 			InOutState.TraveledDistanceCm += MovementDelta.Size();
+
+			if (TryEnterRestState(EndVelocity))
+			{
+				break;
+			}
+
 			RemainingStepTime -= EffectiveStepTime;
 			continue;
 		}
@@ -178,16 +279,12 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 				ForwardDirection = FVector::ForwardVector;
 			}
 
-			const float ForwardPushOut = FMath::Max(2.0f, Config.RadiusCm * 0.4f);
+			const float ForwardPushOut = FMath::Max(1.5f, Config.RadiusCm * 0.2f);
 			InOutState.Position = ImpactCenter + (ForwardDirection * ForwardPushOut);
 			InOutState.Velocity = PostBreakVelocity;
 
-			if (PostBreakVelocity.SizeSquared() <= FMath::Square(Config.StopSpeedCmPerSec))
+			if (TryEnterRestState(PostBreakVelocity))
 			{
-				InOutState.Velocity = FVector::ZeroVector;
-				InOutState.bMotionStopped = true;
-				Result.bStoppedThisStep = true;
-				RemainingStepTime = 0.0f;
 				break;
 			}
 
@@ -217,12 +314,8 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 		InOutState.Position = ImpactCenter + (HitNormal * SurfacePushOut);
 		Result.bBounced = true;
 
-		if (BouncedVelocity.SizeSquared() <= FMath::Square(Config.StopSpeedCmPerSec))
+		if (TryEnterRestState(BouncedVelocity))
 		{
-			InOutState.Velocity = FVector::ZeroVector;
-			InOutState.bMotionStopped = true;
-			Result.bStoppedThisStep = true;
-			RemainingStepTime = 0.0f;
 			break;
 		}
 

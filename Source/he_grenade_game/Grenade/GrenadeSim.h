@@ -31,6 +31,18 @@ struct FGrenadeSimConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float StopSpeedCmPerSec = 45.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Rest", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float RestSpeedCmPerSec = 55.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Rest", meta = (ClampMin = "0.0", Units = "cm"))
+	float SupportProbeDistanceCm = 6.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Rest", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SupportMinNormalZ = 0.55f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Rest", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 SupportRequiredConsecutiveSteps = 2;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxBounces = 8;
 
@@ -41,7 +53,7 @@ struct FGrenadeSimConfig
 	float BreakableVelocityDamping = 0.95f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Breakable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float BreakableNormalDeflection = 0.2f;
+	float BreakableNormalDeflection = 0.25f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation")
 	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
@@ -66,6 +78,9 @@ struct FGrenadeSimState
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grenade|Simulation")
 	bool bMotionStopped = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grenade|Simulation")
+	int32 ConsecutiveSupportedSteps = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grenade|Simulation")
 	bool bExploded = false;
