@@ -47,12 +47,16 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
+	void ClearHighlightedTiles();
+	void SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles);
 	ABreakableTile* ResolveBreakableTile(const FHitResult& Hit) const;
 	void DrawPredictedPath();
 
 	TWeakObjectPtr<UGrenadeThrowerComponent> ThrowerComponent;
+	TSet<TWeakObjectPtr<ABreakableTile>> HighlightedTiles;
 	bool bAimModeActive = false;
 };

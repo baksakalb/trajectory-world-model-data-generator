@@ -2,6 +2,7 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Grenade/GrenadeActor.h"
 
 namespace
@@ -151,14 +152,29 @@ bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation,
 	FRotator ViewRotation = FRotator::ZeroRotator;
 	OwnerCharacter->GetActorEyesViewPoint(ViewLocation, ViewRotation);
 
-	const FVector ViewForward = ViewRotation.Vector();
-	const FVector ViewRight = FRotationMatrix(ViewRotation).GetScaledAxis(EAxis::Y);
-	const FVector ViewUp = FRotationMatrix(ViewRotation).GetScaledAxis(EAxis::Z);
+	const bool bIsCrouched = OwnerCharacter->GetCharacterMovement() && OwnerCharacter->GetCharacterMovement()->IsCrouching();
+	const bool bApplyCrouchAdjustment = bEnableCrouchThrowAdjustment && bIsCrouched;
+
+	FRotator EffectiveViewRotation = ViewRotation;
+	if (bApplyCrouchAdjustment)
+	{
+		EffectiveViewRotation.Pitch += CrouchThrowPitchOffsetDegrees;
+	}
+
+	const FRotationMatrix ViewBasis(EffectiveViewRotation);
+	const FVector ViewForward = ViewBasis.GetScaledAxis(EAxis::X);
+	const FVector ViewRight = ViewBasis.GetScaledAxis(EAxis::Y);
+	const FVector ViewUp = ViewBasis.GetScaledAxis(EAxis::Z);
 
 	OutSpawnLocation = ViewLocation
 		+ (ViewForward * ThrowSpawnOffset.X)
 		+ (ViewRight * ThrowSpawnOffset.Y)
 		+ (ViewUp * ThrowSpawnOffset.Z);
+
+	if (bApplyCrouchAdjustment)
+	{
+		OutSpawnLocation.Z -= FMath::Max(0.0f, CrouchThrowSpawnDropCm);
+	}
 
 	const FVector TraceStart = ViewLocation;
 	const FVector TraceEnd = TraceStart + (ViewForward * TrajectoryTraceDistanceCm);

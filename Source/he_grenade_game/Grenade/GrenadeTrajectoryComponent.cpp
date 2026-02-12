@@ -30,12 +30,19 @@ void UGrenadeTrajectoryComponent::BeginPlay()
 	}
 }
 
+void UGrenadeTrajectoryComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	ClearHighlightedTiles();
+	Super::EndPlay(EndPlayReason);
+}
+
 void UGrenadeTrajectoryComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	if (!bTrajectoryEnabled || !bAimModeActive || CVarGGTrajectoryEnabled.GetValueOnGameThread() == 0)
 	{
+		ClearHighlightedTiles();
 		return;
 	}
 
@@ -45,6 +52,59 @@ void UGrenadeTrajectoryComponent::TickComponent(float DeltaTime, ELevelTick Tick
 void UGrenadeTrajectoryComponent::SetAimModeActive(bool bActive)
 {
 	bAimModeActive = bActive;
+	if (!bAimModeActive)
+	{
+		ClearHighlightedTiles();
+	}
+}
+
+void UGrenadeTrajectoryComponent::ClearHighlightedTiles()
+{
+	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : HighlightedTiles)
+	{
+		if (ABreakableTile* Tile = TilePtr.Get())
+		{
+			Tile->SetTrajectoryHighlighted(false);
+		}
+	}
+
+	HighlightedTiles.Reset();
+}
+
+void UGrenadeTrajectoryComponent::SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles)
+{
+	TArray<TWeakObjectPtr<ABreakableTile>> TilesToRemove;
+	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : HighlightedTiles)
+	{
+		if (!TilePtr.IsValid() || !DesiredTiles.Contains(TilePtr))
+		{
+			TilesToRemove.Add(TilePtr);
+		}
+	}
+
+	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : TilesToRemove)
+	{
+		if (ABreakableTile* Tile = TilePtr.Get())
+		{
+			Tile->SetTrajectoryHighlighted(false);
+		}
+		HighlightedTiles.Remove(TilePtr);
+	}
+
+	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : DesiredTiles)
+	{
+		ABreakableTile* Tile = TilePtr.Get();
+		if (!Tile)
+		{
+			continue;
+		}
+
+		if (!HighlightedTiles.Contains(TilePtr))
+		{
+			Tile->SetTrajectoryHighlighted(true);
+			HighlightedTiles.Add(TilePtr);
+		}
+	}
 }
 
 ABreakableTile* UGrenadeTrajectoryComponent::ResolveBreakableTile(const FHitResult& Hit) const
@@ -71,18 +131,21 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	AActor* OwnerActor = GetOwner();
 	if (!Thrower || !World || !OwnerActor)
 	{
+		ClearHighlightedTiles();
 		return;
 	}
 
 	FGrenadeLaunchParams LaunchParams;
 	if (!Thrower->BuildLaunchParams(LaunchParams))
 	{
+		ClearHighlightedTiles();
 		return;
 	}
 
 	const FGrenadeSimConfig& SimConfig = Thrower->GetSimulationConfig();
 	FGrenadeSimState SimState;
 	FGrenadeSim::InitializeState(SimState, LaunchParams.SpawnLocation, LaunchParams.InitialVelocity, LaunchParams.FuseSeconds);
+	TSet<TWeakObjectPtr<ABreakableTile>> HitTilesThisFrame;
 
 	TArray<FVector> TrajectoryPoints;
 	TrajectoryPoints.Reserve(MaxSimulationSteps + 1);
@@ -93,7 +156,7 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	{
 		const FVector PreviousPosition = SimState.Position;
 
-		FGrenadeSim::Step(
+		const FGrenadeSimStepResult StepResult = FGrenadeSim::Step(
 			World,
 			SimConfig,
 			SimState,
@@ -106,11 +169,21 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 			TrajectoryPoints.Add(SimState.Position);
 		}
 
-		if (SimState.bExploded)
+		if (StepResult.bBrokeTile)
+		{
+			if (ABreakableTile* Tile = StepResult.BrokenTile.Get())
+			{
+				HitTilesThisFrame.Add(Tile);
+			}
+		}
+
+		if (SimState.bExploded || StepResult.bExplodedThisStep)
 		{
 			break;
 		}
 	}
+
+	SyncHighlightedTiles(HitTilesThisFrame);
 
 	if (TrajectoryPoints.Num() < 2)
 	{

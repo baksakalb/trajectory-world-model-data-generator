@@ -63,6 +63,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw", meta = (Units = "cm"))
 	FVector ThrowSpawnOffset = FVector(30.0f, 10.0f, -10.0f);
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Crouch")
+	bool bEnableCrouchThrowAdjustment = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Crouch", meta = (ClampMin = "-45.0", ClampMax = "45.0", Units = "deg"))
+	float CrouchThrowPitchOffsetDegrees = -8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Crouch", meta = (ClampMin = "0.0", Units = "cm"))
+	float CrouchThrowSpawnDropCm = 18.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation")
 	FGrenadeSimConfig SimulationConfig;
 

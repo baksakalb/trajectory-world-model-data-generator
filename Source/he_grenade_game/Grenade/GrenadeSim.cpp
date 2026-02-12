@@ -145,7 +145,30 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 			Result.bBrokeTile = true;
 			Result.BrokenTile = ResolvedTile;
 
-			FVector ForwardDirection = VelocityAtImpact.GetSafeNormal();
+			FVector HitNormal = Hit.ImpactNormal.IsNearlyZero() ? Hit.Normal.GetSafeNormal() : Hit.ImpactNormal.GetSafeNormal();
+			if (HitNormal.IsNearlyZero())
+			{
+				HitNormal = (StartPosition - EndPosition).GetSafeNormal();
+				if (HitNormal.IsNearlyZero())
+				{
+					HitNormal = FVector::UpVector;
+				}
+			}
+
+			const float RetainedSpeedFactor = FMath::Clamp(1.0f - Config.BreakableVelocityDamping, 0.0f, 1.0f);
+			FVector PostBreakVelocity = VelocityAtImpact * RetainedSpeedFactor;
+
+			const float IncomingNormalSpeed = FVector::DotProduct(VelocityAtImpact, HitNormal);
+			if (IncomingNormalSpeed < 0.0f)
+			{
+				PostBreakVelocity += HitNormal * ((-IncomingNormalSpeed) * FMath::Clamp(Config.BreakableNormalDeflection, 0.0f, 1.0f));
+			}
+
+			FVector ForwardDirection = PostBreakVelocity.GetSafeNormal();
+			if (ForwardDirection.IsNearlyZero())
+			{
+				ForwardDirection = VelocityAtImpact.GetSafeNormal();
+			}
 			if (ForwardDirection.IsNearlyZero())
 			{
 				ForwardDirection = (EndPosition - StartPosition).GetSafeNormal();
@@ -155,9 +178,19 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 				ForwardDirection = FVector::ForwardVector;
 			}
 
-			const float ForwardPushOut = FMath::Max(2.0f, Config.RadiusCm * 0.35f);
+			const float ForwardPushOut = FMath::Max(2.0f, Config.RadiusCm * 0.4f);
 			InOutState.Position = ImpactCenter + (ForwardDirection * ForwardPushOut);
-			InOutState.Velocity = VelocityAtImpact;
+			InOutState.Velocity = PostBreakVelocity;
+
+			if (PostBreakVelocity.SizeSquared() <= FMath::Square(Config.StopSpeedCmPerSec))
+			{
+				InOutState.Velocity = FVector::ZeroVector;
+				InOutState.bMotionStopped = true;
+				Result.bStoppedThisStep = true;
+				RemainingStepTime = 0.0f;
+				break;
+			}
+
 			RemainingStepTime -= TimeUsed;
 			continue;
 		}

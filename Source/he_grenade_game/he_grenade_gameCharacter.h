@@ -64,7 +64,7 @@ protected:
 	bool bCrouchInputHeld = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Crouch", meta = (AllowPrivateAccess = "true", ClampMin = "0.0", Units = "cm"))
-	float CrouchCameraDropCm = 18.0f;
+	float CrouchCameraDropCm = 30.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Crouch", meta = (AllowPrivateAccess = "true", ClampMin = "1.0"))
 	float CrouchCameraInterpSpeed = 14.0f;

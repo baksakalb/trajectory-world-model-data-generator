@@ -37,6 +37,12 @@ struct FGrenadeSimConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation", meta = (ClampMin = "10.0", Units = "cm"))
 	float MaxTraceDistanceCm = 100000.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Breakable", meta = (ClampMin = "0.0", ClampMax = "0.95"))
+	float BreakableVelocityDamping = 0.95f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Breakable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BreakableNormalDeflection = 0.2f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation")
 	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
 };

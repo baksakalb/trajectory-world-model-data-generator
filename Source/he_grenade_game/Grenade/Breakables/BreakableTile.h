@@ -5,6 +5,7 @@
 #include "BreakableTile.generated.h"
 
 class UStaticMeshComponent;
+class UMaterialInstanceDynamic;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBreakableTileBroken, ABreakableTile*, Tile);
 
@@ -34,10 +35,34 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tile")
 	bool IsBroken() const { return bBroken; }
 
+	UFUNCTION(BlueprintCallable, Category = "Tile|Trajectory")
+	void SetTrajectoryHighlighted(bool bHighlighted);
+
+	UFUNCTION(BlueprintPure, Category = "Tile|Trajectory")
+	bool IsTrajectoryHighlighted() const { return bTrajectoryHighlighted; }
+
 protected:
 	virtual void BeginPlay() override;
 
 private:
+	void InitializeTileMaterial();
+	void ApplyTrajectoryHighlightState();
+
+	UPROPERTY(EditAnywhere, Category = "Tile|Trajectory")
+	FLinearColor TrajectoryHighlightColor = FLinearColor(1.0f, 0.15f, 0.15f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category = "Tile|Trajectory", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TrajectoryHighlightOpacity = 0.35f;
+
 	UPROPERTY(VisibleAnywhere, Category = "Tile")
 	bool bBroken = false;
+
+	UPROPERTY(VisibleAnywhere, Category = "Tile|Trajectory")
+	bool bTrajectoryHighlighted = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> TileMaterialMID;
+
+	FLinearColor DefaultBaseColor = FLinearColor(0.0f, 0.75f, 1.0f, 1.0f);
+	float DefaultOpacity = 0.35f;
 };

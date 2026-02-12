@@ -3,7 +3,14 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
+
+namespace
+{
+	const FName BaseColorParameterName(TEXT("BaseColor"));
+	const FName OpacityParameterName(TEXT("Opacity"));
+}
 
 ABreakableTile::ABreakableTile()
 {
@@ -34,6 +41,7 @@ ABreakableTile::ABreakableTile()
 void ABreakableTile::BeginPlay()
 {
 	Super::BeginPlay();
+	InitializeTileMaterial();
 
 	if (bStartBroken)
 	{
@@ -47,6 +55,8 @@ void ABreakableTile::BreakTile()
 	{
 		return;
 	}
+
+	SetTrajectoryHighlighted(false);
 
 	bBroken = true;
 	SetActorHiddenInGame(true);
@@ -64,6 +74,7 @@ void ABreakableTile::BreakTile()
 void ABreakableTile::ResetTile()
 {
 	bBroken = false;
+	bTrajectoryHighlighted = false;
 	SetActorHiddenInGame(false);
 	SetActorEnableCollision(true);
 
@@ -72,4 +83,71 @@ void ABreakableTile::ResetTile()
 		TileMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 		TileMesh->SetVisibility(true, true);
 	}
+
+	ApplyTrajectoryHighlightState();
+}
+
+void ABreakableTile::SetTrajectoryHighlighted(bool bHighlighted)
+{
+	const bool bShouldHighlight = bHighlighted && !bBroken;
+	if (bTrajectoryHighlighted == bShouldHighlight)
+	{
+		return;
+	}
+
+	bTrajectoryHighlighted = bShouldHighlight;
+	ApplyTrajectoryHighlightState();
+}
+
+void ABreakableTile::InitializeTileMaterial()
+{
+	if (!TileMesh)
+	{
+		return;
+	}
+
+	UMaterialInterface* CurrentMaterial = TileMesh->GetMaterial(0);
+	if (!CurrentMaterial)
+	{
+		return;
+	}
+
+	TileMaterialMID = UMaterialInstanceDynamic::Create(CurrentMaterial, this);
+	if (!TileMaterialMID)
+	{
+		return;
+	}
+
+	TileMesh->SetMaterial(0, TileMaterialMID);
+
+	const FLinearColor MaterialBaseColor = TileMaterialMID->K2_GetVectorParameterValue(BaseColorParameterName);
+	if (MaterialBaseColor.R > KINDA_SMALL_NUMBER
+		|| MaterialBaseColor.G > KINDA_SMALL_NUMBER
+		|| MaterialBaseColor.B > KINDA_SMALL_NUMBER
+		|| MaterialBaseColor.A > KINDA_SMALL_NUMBER)
+	{
+		DefaultBaseColor = MaterialBaseColor;
+	}
+
+	const float MaterialOpacity = TileMaterialMID->K2_GetScalarParameterValue(OpacityParameterName);
+	if (MaterialOpacity > KINDA_SMALL_NUMBER)
+	{
+		DefaultOpacity = MaterialOpacity;
+	}
+
+	ApplyTrajectoryHighlightState();
+}
+
+void ABreakableTile::ApplyTrajectoryHighlightState()
+{
+	if (!TileMaterialMID)
+	{
+		return;
+	}
+
+	const FLinearColor BaseColor = bTrajectoryHighlighted ? TrajectoryHighlightColor : DefaultBaseColor;
+	const float Opacity = bTrajectoryHighlighted ? TrajectoryHighlightOpacity : DefaultOpacity;
+
+	TileMaterialMID->SetVectorParameterValue(BaseColorParameterName, BaseColor);
+	TileMaterialMID->SetScalarParameterValue(OpacityParameterName, FMath::Clamp(Opacity, 0.0f, 1.0f));
 }
