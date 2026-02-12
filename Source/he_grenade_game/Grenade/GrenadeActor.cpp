@@ -18,6 +18,12 @@ namespace
 		0,
 		TEXT("Draw runtime grenade path segments. 0=off, 1=on"),
 		ECVF_Default);
+
+	static TAutoConsoleVariable<int32> CVarGGGrenadeThrowLockDebug(
+		TEXT("gg.Grenade.DebugThrowLock"),
+		0,
+		TEXT("Logs grenade initialization launch params. 0=off, 1=on"),
+		ECVF_Default);
 }
 
 AGrenadeActor::AGrenadeActor()
@@ -84,6 +90,21 @@ void AGrenadeActor::InitializeGrenade(const FVector& StartPosition, const FVecto
 	FixedStepAccumulator = 0.0f;
 	bExploded = false;
 	bInitialized = true;
+
+	if (CVarGGGrenadeThrowLockDebug.GetValueOnGameThread() != 0)
+	{
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("GrenadeInitialize T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f)"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0f,
+			StartPosition.X,
+			StartPosition.Y,
+			StartPosition.Z,
+			InitialVelocity.X,
+			InitialVelocity.Y,
+			InitialVelocity.Z);
+	}
 }
 
 void AGrenadeActor::ForceExplode()

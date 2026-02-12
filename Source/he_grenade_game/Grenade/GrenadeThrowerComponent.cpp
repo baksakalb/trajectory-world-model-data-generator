@@ -1,9 +1,11 @@
 #include "Grenade/GrenadeThrowerComponent.h"
 
 #include "Engine/World.h"
+#include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Grenade/GrenadeActor.h"
+#include "he_grenade_gameCharacter.h"
 
 namespace
 {
@@ -17,11 +19,19 @@ namespace
 		0,
 		TEXT("Logs grenade throw state transitions. 0=off, 1=on"),
 		ECVF_Default);
+
+	static TAutoConsoleVariable<int32> CVarGGGrenadeThrowLockDebug(
+		TEXT("gg.Grenade.DebugThrowLock"),
+		0,
+		TEXT("Logs release-snapshot launch params and actual spawned launch params. 0=off, 1=on"),
+		ECVF_Default);
 }
 
 UGrenadeThrowerComponent::UGrenadeThrowerComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 }
 
 void UGrenadeThrowerComponent::BeginPlay()
@@ -56,11 +66,41 @@ void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(CooldownTimerHandle);
 	}
+
+	bHasHeldLaunchSnapshot = false;
+	SetComponentTickEnabled(false);
+}
+
+void UGrenadeThrowerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (!bThrowInputHeld)
+	{
+		return;
+	}
+
+	FGrenadeLaunchParams LaunchSnapshot;
+	if (BuildCurrentLaunchParams(LaunchSnapshot))
+	{
+		HeldLaunchSnapshot = LaunchSnapshot;
+		bHasHeldLaunchSnapshot = true;
+	}
 }
 
 void UGrenadeThrowerComponent::OnThrowPressed()
 {
 	bThrowInputHeld = true;
+	bHasHeldLaunchSnapshot = false;
+	SetComponentTickEnabled(true);
+
+	// Capture immediately as a fallback for edge cases where release-time sampling fails.
+	FGrenadeLaunchParams ImmediateSnapshot;
+	if (BuildCurrentLaunchParams(ImmediateSnapshot))
+	{
+		HeldLaunchSnapshot = ImmediateSnapshot;
+		bHasHeldLaunchSnapshot = true;
+	}
 }
 
 void UGrenadeThrowerComponent::OnThrowReleased()
@@ -71,7 +111,38 @@ void UGrenadeThrowerComponent::OnThrowReleased()
 	}
 
 	bThrowInputHeld = false;
-	TryThrowGrenade();
+	SetComponentTickEnabled(false);
+
+	FGrenadeLaunchParams ReleaseLaunchParams;
+	bool bHasReleaseLaunch = false;
+	if (bHasHeldLaunchSnapshot)
+	{
+		ReleaseLaunchParams = HeldLaunchSnapshot;
+		bHasReleaseLaunch = true;
+	}
+	else
+	{
+		bHasReleaseLaunch = BuildCurrentLaunchParams(ReleaseLaunchParams);
+	}
+
+	TryThrowGrenade(bHasReleaseLaunch ? &ReleaseLaunchParams : nullptr);
+
+	if (CVarGGGrenadeThrowLockDebug.GetValueOnGameThread() != 0 && bHasReleaseLaunch)
+	{
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("ThrowReleaseSnapshot T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f)"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0f,
+			ReleaseLaunchParams.SpawnLocation.X,
+			ReleaseLaunchParams.SpawnLocation.Y,
+			ReleaseLaunchParams.SpawnLocation.Z,
+			ReleaseLaunchParams.InitialVelocity.X,
+			ReleaseLaunchParams.InitialVelocity.Y,
+			ReleaseLaunchParams.InitialVelocity.Z);
+	}
+
+	bHasHeldLaunchSnapshot = false;
 }
 
 void UGrenadeThrowerComponent::SetAimModeActive(bool bActiveAimMode)
@@ -85,6 +156,11 @@ bool UGrenadeThrowerComponent::IsStateGreen() const
 }
 
 bool UGrenadeThrowerComponent::BuildLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const
+{
+	return BuildCurrentLaunchParams(OutLaunchParams);
+}
+
+bool UGrenadeThrowerComponent::BuildCurrentLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const
 {
 	FVector SpawnLocation = FVector::ZeroVector;
 	FVector InitialVelocity = FVector::ZeroVector;
@@ -100,19 +176,48 @@ bool UGrenadeThrowerComponent::BuildLaunchParams(FGrenadeLaunchParams& OutLaunch
 	return true;
 }
 
-void UGrenadeThrowerComponent::TryThrowGrenade()
+void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* LaunchParamsOverride)
 {
 	if (ThrowState != EGrenadeThrowState::Ready || !GetWorld())
 	{
 		return;
 	}
 
-	FVector SpawnLocation = FVector::ZeroVector;
-	FVector InitialVelocity = FVector::ZeroVector;
-	if (!ComputeLaunchTransform(SpawnLocation, InitialVelocity))
+	FGrenadeLaunchParams LaunchParams;
+	if (LaunchParamsOverride)
+	{
+		LaunchParams = *LaunchParamsOverride;
+	}
+	else if (!BuildCurrentLaunchParams(LaunchParams))
 	{
 		EnterCooldown();
 		return;
+	}
+
+	if (CVarGGGrenadeThrowLockDebug.GetValueOnGameThread() != 0)
+	{
+		FGrenadeLaunchParams CurrentNow;
+		const bool bHasCurrentNow = BuildCurrentLaunchParams(CurrentNow);
+		const float SpawnDelta = bHasCurrentNow
+			? FVector::Distance(CurrentNow.SpawnLocation, LaunchParams.SpawnLocation)
+			: -1.0f;
+		const float VelocityDelta = bHasCurrentNow
+			? FVector::Distance(CurrentNow.InitialVelocity, LaunchParams.InitialVelocity)
+			: -1.0f;
+
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("ThrowSpawnParams T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f) DeltaNow[Spawn=%.3f Vel=%.3f]"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0f,
+			LaunchParams.SpawnLocation.X,
+			LaunchParams.SpawnLocation.Y,
+			LaunchParams.SpawnLocation.Z,
+			LaunchParams.InitialVelocity.X,
+			LaunchParams.InitialVelocity.Y,
+			LaunchParams.InitialVelocity.Z,
+			SpawnDelta,
+			VelocityDelta);
 	}
 
 	FActorSpawnParameters SpawnParams;
@@ -121,9 +226,14 @@ void UGrenadeThrowerComponent::TryThrowGrenade()
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	UClass* SpawnClass = GrenadeClass ? GrenadeClass.Get() : AGrenadeActor::StaticClass();
-	if (AGrenadeActor* Grenade = GetWorld()->SpawnActor<AGrenadeActor>(SpawnClass, SpawnLocation, FRotator::ZeroRotator, SpawnParams))
+	if (AGrenadeActor* Grenade = GetWorld()->SpawnActor<AGrenadeActor>(SpawnClass, LaunchParams.SpawnLocation, FRotator::ZeroRotator, SpawnParams))
 	{
-		Grenade->InitializeGrenade(SpawnLocation, InitialVelocity, FuseSeconds, SimulationConfig, GetOwner());
+		Grenade->InitializeGrenade(
+			LaunchParams.SpawnLocation,
+			LaunchParams.InitialVelocity,
+			LaunchParams.FuseSeconds,
+			SimulationConfig,
+			GetOwner());
 	}
 
 	EnterCooldown();
@@ -173,7 +283,21 @@ bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation,
 
 	FVector ViewLocation = FVector::ZeroVector;
 	FRotator ViewRotation = FRotator::ZeroRotator;
-	OwnerCharacter->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+	bool bHasViewTransform = false;
+	if (const Ahe_grenade_gameCharacter* GGCharacter = Cast<Ahe_grenade_gameCharacter>(OwnerCharacter))
+	{
+		if (const UCameraComponent* FirstPersonCamera = GGCharacter->GetFirstPersonCameraComponent())
+		{
+			ViewLocation = FirstPersonCamera->GetComponentLocation();
+			ViewRotation = FirstPersonCamera->GetComponentRotation();
+			bHasViewTransform = true;
+		}
+	}
+
+	if (!bHasViewTransform)
+	{
+		OwnerCharacter->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+	}
 
 	const bool bIsCrouched = OwnerCharacter->GetCharacterMovement() && OwnerCharacter->GetCharacterMovement()->IsCrouching();
 	const bool bApplyCrouchAdjustment = bEnableCrouchThrowAdjustment && bIsCrouched;

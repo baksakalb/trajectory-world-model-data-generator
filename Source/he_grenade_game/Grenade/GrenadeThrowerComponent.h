@@ -108,13 +108,15 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
-	void TryThrowGrenade();
+	void TryThrowGrenade(const FGrenadeLaunchParams* LaunchParamsOverride = nullptr);
 	void EnterCooldown();
 	void ExitCooldown();
 	void SetThrowState(EGrenadeThrowState NewState);
 
+	bool BuildCurrentLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const;
 	bool ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity) const;
 
 	FTimerHandle CooldownTimerHandle;
@@ -122,4 +124,6 @@ private:
 	EGrenadeThrowState ThrowState = EGrenadeThrowState::Ready;
 	bool bThrowInputHeld = false;
 	bool bAimModeActive = false;
+	bool bHasHeldLaunchSnapshot = false;
+	FGrenadeLaunchParams HeldLaunchSnapshot;
 };
