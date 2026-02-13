@@ -69,6 +69,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Crouch", meta = (AllowPrivateAccess = "true", ClampMin = "1.0"))
 	float CrouchCameraInterpSpeed = 14.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Crouch", meta = (AllowPrivateAccess = "true", ClampMin = "0.0", Units = "cm"))
+	float SlideCameraExtraDropCm = 32.0f;
+
 public:
 	Ahe_grenade_gameCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 

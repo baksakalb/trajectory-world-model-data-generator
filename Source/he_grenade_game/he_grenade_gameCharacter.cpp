@@ -53,6 +53,9 @@ Ahe_grenade_gameCharacter::Ahe_grenade_gameCharacter(const FObjectInitializer& O
 	// Crouch support
 	GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
 	GetCharacterMovement()->SetCrouchedHalfHeight(88.0f);
+
+	// Keep jump taps consistent and non-floaty by disabling hold-to-extend behavior.
+	JumpMaxHoldTime = 0.0f;
 }
 
 void Ahe_grenade_gameCharacter::BeginPlay()
@@ -63,6 +66,12 @@ void Ahe_grenade_gameCharacter::BeginPlay()
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
+
+		if (const UGGMovementComponent* GGMovement = Cast<UGGMovementComponent>(Movement))
+		{
+			Movement->JumpZVelocity = GGMovement->JumpVelocityCmPerSec;
+			Movement->GravityScale = GGMovement->JumpGravityScale;
+		}
 	}
 
 	if (FirstPersonMesh)
@@ -225,11 +234,22 @@ void Ahe_grenade_gameCharacter::DoCrouchStart()
 	bCrouchInputHeld = true;
 	RefreshCrouchFromInput();
 	UpdateMovementStates();
+
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		MovementComponent->TryStartSlide();
+	}
 }
 
 void Ahe_grenade_gameCharacter::DoCrouchEnd()
 {
 	bCrouchInputHeld = false;
+
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		MovementComponent->StopSlide();
+	}
+
 	RefreshCrouchFromInput();
 	UpdateMovementStates();
 }
@@ -293,8 +313,25 @@ void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
 		return;
 	}
 
-	const float TargetOffsetCm = bIsCrouched ? -FMath::Max(0.0f, CrouchCameraDropCm) : 0.0f;
-	CurrentCrouchCameraOffsetCm = FMath::FInterpTo(CurrentCrouchCameraOffsetCm, TargetOffsetCm, DeltaSeconds, FMath::Max(1.0f, CrouchCameraInterpSpeed));
+	bool bSliding = false;
+	if (const UGGMovementComponent* GGMovement = GetGGMovementComponent())
+	{
+		bSliding = GGMovement->IsSliding();
+	}
+
+	float TargetOffsetCm = bIsCrouched ? -FMath::Max(0.0f, CrouchCameraDropCm) : 0.0f;
+	if (bSliding)
+	{
+		TargetOffsetCm -= FMath::Max(0.0f, SlideCameraExtraDropCm);
+	}
+
+	float InterpSpeed = FMath::Max(1.0f, CrouchCameraInterpSpeed);
+	if (bSliding)
+	{
+		InterpSpeed *= 2.2f;
+	}
+
+	CurrentCrouchCameraOffsetCm = FMath::FInterpTo(CurrentCrouchCameraOffsetCm, TargetOffsetCm, DeltaSeconds, InterpSpeed);
 
 	// Offset the entire first-person mesh in Z. Since it's attached to GetMesh()
 	// (which has at most a yaw rotation), local Z is always world-vertical.

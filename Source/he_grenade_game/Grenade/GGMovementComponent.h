@@ -30,6 +30,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float AirSpeedCapCmPerSec = 1500.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Jump", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float JumpVelocityCmPerSec = 570.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Jump", meta = (ClampMin = "0.1"))
+	float JumpGravityScale = 1.8f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Slide", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float SlideEnterMinSpeedCmPerSec = 550.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Slide", meta = (ClampMin = "0.0", Units = "cm/s^2"))
+	float SlideBrakingDecelerationCmPerSec2 = 700.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Slide", meta = (ClampMin = "0.0"))
+	float SlideFrictionAmount = 0.55f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Slide", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float SlideStopSpeedCmPerSec = 140.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Slide", meta = (ClampMin = "0.0"))
+	float SlideSteeringResponsiveness = 1.5f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float WalkSpeedCmPerSec = 700.0f;
 
@@ -51,6 +72,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Movement")
 	void SetAimMode(bool bEnableAimMode);
 
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	void TryStartSlide();
+
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	void StopSlide();
+
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool IsSprintAllowed() const;
 
@@ -60,6 +87,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool IsAimModeActive() const { return bAimMode; }
 
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsSliding() const { return bIsSliding; }
+
 	virtual float GetMaxSpeed() const override;
 	virtual bool CanCrouchInCurrentState() const override;
 	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
@@ -67,4 +97,6 @@ public:
 private:
 	bool bWantsSprint = false;
 	bool bAimMode = false;
+	bool bIsSliding = false;
+	FVector SlideDirection = FVector::ZeroVector;
 };
