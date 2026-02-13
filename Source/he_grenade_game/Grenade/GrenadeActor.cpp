@@ -19,7 +19,7 @@ namespace
 		TEXT("Draw runtime grenade path segments. 0=off, 1=on"),
 		ECVF_Default);
 
-	static TAutoConsoleVariable<int32> CVarGGGrenadeThrowLockDebug(
+	static TAutoConsoleVariable<int32> CVarGGGrenadeActorThrowLockDebug(
 		TEXT("gg.Grenade.DebugThrowLock"),
 		0,
 		TEXT("Logs grenade initialization launch params. 0=off, 1=on"),
@@ -91,7 +91,7 @@ void AGrenadeActor::InitializeGrenade(const FVector& StartPosition, const FVecto
 	bExploded = false;
 	bInitialized = true;
 
-	if (CVarGGGrenadeThrowLockDebug.GetValueOnGameThread() != 0)
+	if (CVarGGGrenadeActorThrowLockDebug.GetValueOnGameThread() != 0)
 	{
 		UE_LOG(
 			LogTemp,

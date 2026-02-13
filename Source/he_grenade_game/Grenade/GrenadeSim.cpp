@@ -259,10 +259,22 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 			const float RetainedSpeedFactor = FMath::Clamp(1.0f - Config.BreakableVelocityDamping, 0.0f, 1.0f);
 			FVector PostBreakVelocity = VelocityAtImpact * RetainedSpeedFactor;
 
-			const float IncomingNormalSpeed = FVector::DotProduct(VelocityAtImpact, HitNormal);
-			if (IncomingNormalSpeed < 0.0f)
+			const float BreakDeflection = FMath::Clamp(Config.BreakableNormalDeflection, 0.0f, 1.0f);
+			const float PostBreakNormalSpeed = FVector::DotProduct(PostBreakVelocity, HitNormal);
+			if (PostBreakNormalSpeed < 0.0f)
 			{
-				PostBreakVelocity += HitNormal * ((-IncomingNormalSpeed) * FMath::Clamp(Config.BreakableNormalDeflection, 0.0f, 1.0f));
+				PostBreakVelocity += HitNormal * ((-PostBreakNormalSpeed) * BreakDeflection);
+			}
+
+			// Breaking an upward-facing floor tile should not create an upward rebound.
+			const float ImpactNormalSpeed = FVector::DotProduct(VelocityAtImpact, HitNormal);
+			if (HitNormal.Z > 0.5f && ImpactNormalSpeed < 0.0f)
+			{
+				const float OutwardNormalSpeed = FVector::DotProduct(PostBreakVelocity, HitNormal);
+				if (OutwardNormalSpeed > 0.0f)
+				{
+					PostBreakVelocity -= HitNormal * OutwardNormalSpeed;
+				}
 			}
 
 			FVector ForwardDirection = PostBreakVelocity.GetSafeNormal();

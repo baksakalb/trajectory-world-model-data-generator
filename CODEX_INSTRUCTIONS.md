@@ -54,9 +54,11 @@ bRequireCapabilityToken=False
 ```
 
 ## Startup Sequence (Reliable)
-1. Open Unreal Editor with this project and wait until the level is loaded.
-2. Start or refresh Codex.
-3. Run the Mandatory Read-Time Health Check sequence.
+1. Open Unreal Editor on this exact `.uproject` (never launch bare editor without project arg):
+   `C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject"`
+2. Confirm the window title/project is `he_grenade_game` and wait until the level is loaded.
+3. Start or refresh Codex.
+4. Run the Mandatory Read-Time Health Check sequence.
 
 ## Execution Responsibility
 - Codex should run compile, reload, and editor reset/restart actions itself via MCP/tool commands whenever possible.
@@ -68,9 +70,10 @@ bRequireCapabilityToken=False
 2. Wait until `UnrealEditor.exe` process exits.
 3. Build from shell:
    `C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat he_grenade_gameEditor Win64 Development "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject" -waitmutex`
-4. Reopen editor from shell:
+4. Reopen editor from shell on this exact project path (quoted):
    `C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject"`
-5. Wait for bridge readiness (port `8091`) and run the Mandatory Read-Time Health Check sequence.
+5. If the Project Browser opens instead of the project, close it and relaunch using the exact quoted command above.
+6. Wait for bridge readiness (port `8091`) and run the Mandatory Read-Time Health Check sequence.
 - If a direct build fails due live coding lock, use the full close/build/reopen flow above.
 
 ## Health and Dead-Server Behavior
