@@ -85,7 +85,8 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		const float InitialSpeed = HorizontalVelocity.Size();
 		if (InitialSpeed > KINDA_SMALL_NUMBER)
 		{
-			const float Control = bHasAcceleration ? FMath::Max(InitialSpeed, GroundBrakingDeceleration) : InitialSpeed;
+			// Keep steering crisp while input is held; apply stronger stop friction only on release.
+			const float Control = bHasAcceleration ? InitialSpeed : FMath::Max(InitialSpeed, GroundBrakingDeceleration);
 			const float Drop = Control * GroundFrictionAmount * DeltaTime;
 			const float NewSpeed = FMath::Max(InitialSpeed - Drop, 0.0f);
 			if (NewSpeed != InitialSpeed)

@@ -16,25 +16,25 @@ public:
 	UGGMovementComponent();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Ground", meta = (ClampMin = "0.0", Units = "cm/s^2"))
-	float GroundAcceleration = 18000.0f;
+	float GroundAcceleration = 24000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Ground", meta = (ClampMin = "0.0"))
-	float GroundFrictionAmount = 8.0f;
+	float GroundFrictionAmount = 7.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Ground", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float GroundBrakingDeceleration = 1800.0f;
+	float GroundBrakingDeceleration = 2200.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s^2"))
-	float AirAcceleration = 6000.0f;
+	float AirAcceleration = 7000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float AirSpeedCapCmPerSec = 1400.0f;
+	float AirSpeedCapCmPerSec = 1500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float WalkSpeedCmPerSec = 600.0f;
+	float WalkSpeedCmPerSec = 700.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float SprintSpeedCmPerSec = 900.0f;
+	float SprintSpeedCmPerSec = 1100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Tuning", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float AimWalkSpeedScalar = 0.8f;
@@ -43,7 +43,7 @@ public:
 	float CrouchSpeedScalar = 0.8f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Tuning", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float BunnyHopSpeedCapCmPerSec = 1700.0f;
+	float BunnyHopSpeedCapCmPerSec = 1900.0f;
 
 	UFUNCTION(BlueprintCallable, Category = "Movement")
 	void SetSprinting(bool bEnableSprint);
