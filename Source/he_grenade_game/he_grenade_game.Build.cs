@@ -28,8 +28,6 @@ public class he_grenade_game : ModuleRules
 			"he_grenade_game",
 			"he_grenade_game/Grenade",
 			"he_grenade_game/Grenade/Breakables",
-			"he_grenade_game/Variant_Horror",
-			"he_grenade_game/Variant_Horror/UI",
 			"he_grenade_game/Variant_Shooter",
 			"he_grenade_game/Variant_Shooter/AI",
 			"he_grenade_game/Variant_Shooter/UI",
