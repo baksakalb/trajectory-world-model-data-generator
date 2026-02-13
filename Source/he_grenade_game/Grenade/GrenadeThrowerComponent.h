@@ -46,13 +46,19 @@ public:
 	TSubclassOf<AGrenadeActor> GrenadeClass;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Lifetime", meta = (ClampMin = "0.1", Units = "s"))
-	float FuseSeconds = 2.5f;
+	float FuseSeconds = 3.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Timing", meta = (ClampMin = "0.0", Units = "s"))
 	float ReloadCooldownSeconds = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float ThrowSpeedCmPerSec = 1400.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Charge", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float MinThrowSpeedCmPerSec = 450.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Charge", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float MaxThrowSpeedCmPerSec = 1400.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Charge", meta = (ClampMin = "0.01", Units = "s"))
+	float ChargeDurationSeconds = 0.75f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw", meta = (ClampMin = "0.0", ClampMax = "1.5"))
 	float ThrowInheritVelocityFactor = 0.0f;
@@ -91,6 +97,15 @@ public:
 	bool IsAimModeActive() const { return bAimModeActive; }
 
 	UFUNCTION(BlueprintPure, Category = "Grenade")
+	float GetCurrentChargeAlpha() const;
+
+	UFUNCTION(BlueprintPure, Category = "Grenade")
+	float GetCurrentThrowSpeedCmPerSec() const;
+
+	UFUNCTION(BlueprintPure, Category = "Grenade")
+	float GetRemainingFuseSeconds() const;
+
+	UFUNCTION(BlueprintPure, Category = "Grenade")
 	bool IsStateGreen() const;
 
 	UFUNCTION(BlueprintPure, Category = "Grenade")
@@ -115,15 +130,20 @@ private:
 	void EnterCooldown();
 	void ExitCooldown();
 	void SetThrowState(EGrenadeThrowState NewState);
+	void DetonateInHand();
+	float GetHeldDurationSeconds() const;
 
 	bool BuildCurrentLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const;
-	bool ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity) const;
+	bool ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity, float ThrowSpeedCmPerSec) const;
 
 	FTimerHandle CooldownTimerHandle;
 
 	EGrenadeThrowState ThrowState = EGrenadeThrowState::Ready;
 	bool bThrowInputHeld = false;
 	bool bAimModeActive = false;
+	bool bDetonatedInHandThisHold = false;
 	bool bHasHeldLaunchSnapshot = false;
+	float HoldStartWorldTimeSeconds = 0.0f;
+	float LastHeldDurationSeconds = 0.0f;
 	FGrenadeLaunchParams HeldLaunchSnapshot;
 };

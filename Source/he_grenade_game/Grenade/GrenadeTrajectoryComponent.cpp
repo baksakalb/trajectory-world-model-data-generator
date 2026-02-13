@@ -1,9 +1,13 @@
 #include "Grenade/GrenadeTrajectoryComponent.h"
 
 #include "DrawDebugHelpers.h"
+#include "Camera/CameraComponent.h"
+#include "GameFramework/Controller.h"
+#include "GameFramework/Pawn.h"
 #include "Grenade/GrenadeSim.h"
 #include "Grenade/GrenadeThrowerComponent.h"
 #include "Grenade/Breakables/BreakableTile.h"
+#include "he_grenade_gameCharacter.h"
 
 namespace
 {
@@ -124,6 +128,117 @@ ABreakableTile* UGrenadeTrajectoryComponent::ResolveBreakableTile(const FHitResu
 	return Tile;
 }
 
+bool UGrenadeTrajectoryComponent::ResolveViewLocation(FVector& OutViewLocation) const
+{
+	const AActor* OwnerActor = GetOwner();
+	if (!OwnerActor)
+	{
+		return false;
+	}
+
+	if (const Ahe_grenade_gameCharacter* Character = Cast<Ahe_grenade_gameCharacter>(OwnerActor))
+	{
+		if (const UCameraComponent* FirstPersonCamera = Character->GetFirstPersonCameraComponent())
+		{
+			OutViewLocation = FirstPersonCamera->GetComponentLocation();
+			return true;
+		}
+	}
+
+	if (const APawn* OwnerPawn = Cast<APawn>(OwnerActor))
+	{
+		if (const AController* Controller = OwnerPawn->GetController())
+		{
+			FRotator ViewRotation;
+			Controller->GetPlayerViewPoint(OutViewLocation, ViewRotation);
+			return true;
+		}
+	}
+
+	FRotator ViewRotation;
+	OwnerActor->GetActorEyesViewPoint(OutViewLocation, ViewRotation);
+	return true;
+}
+
+bool UGrenadeTrajectoryComponent::ResolveFloorZ(float& OutFloorZ)
+{
+	UWorld* World = GetWorld();
+	AActor* OwnerActor = GetOwner();
+	if (!World || !OwnerActor)
+	{
+		return false;
+	}
+
+	const FVector OwnerLocation = OwnerActor->GetActorLocation();
+	const FVector TraceStart = OwnerLocation + FVector(0.0f, 0.0f, 100.0f);
+	const FVector TraceEnd = OwnerLocation - FVector(0.0f, 0.0f, 20000.0f);
+
+	FHitResult FloorHit;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrenadeTrajectoryFloorProbe), false);
+	QueryParams.AddIgnoredActor(OwnerActor);
+
+	const bool bHitFloor = World->LineTraceSingleByChannel(
+		FloorHit,
+		TraceStart,
+		TraceEnd,
+		VisibilityTraceChannel,
+		QueryParams);
+
+	if (bHitFloor && FloorHit.bBlockingHit)
+	{
+		OutFloorZ = FloorHit.ImpactPoint.Z;
+		LastKnownFloorZ = OutFloorZ;
+		bHasLastKnownFloorZ = true;
+		return true;
+	}
+
+	if (bHasLastKnownFloorZ)
+	{
+		OutFloorZ = LastKnownFloorZ;
+		return true;
+	}
+
+	return false;
+}
+
+bool UGrenadeTrajectoryComponent::IsPointVisibleFromView(const FVector& ViewLocation, const FVector& Point, AActor* OwnerActor, UWorld* World) const
+{
+	if (!World)
+	{
+		return false;
+	}
+
+	const FVector ToPoint = Point - ViewLocation;
+	if (ToPoint.SizeSquared() <= KINDA_SMALL_NUMBER)
+	{
+		return true;
+	}
+
+	FHitResult VisibilityHit;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrenadeTrajectoryVisibility), false);
+	if (OwnerActor)
+	{
+		QueryParams.AddIgnoredActor(OwnerActor);
+	}
+
+	const bool bBlockingHit = World->LineTraceSingleByChannel(
+		VisibilityHit,
+		ViewLocation,
+		Point,
+		VisibilityTraceChannel,
+		QueryParams);
+
+	if (!bBlockingHit || !VisibilityHit.bBlockingHit)
+	{
+		return true;
+	}
+
+	const float HitDistanceSq = FVector::DistSquared(ViewLocation, VisibilityHit.ImpactPoint);
+	const float PointDistanceSq = FVector::DistSquared(ViewLocation, Point);
+	const float VisibilityToleranceSq = FMath::Square(2.0f);
+	return HitDistanceSq + VisibilityToleranceSq >= PointDistanceSq;
+}
+
 void UGrenadeTrajectoryComponent::DrawPredictedPath()
 {
 	UGrenadeThrowerComponent* Thrower = ThrowerComponent.Get();
@@ -151,6 +266,9 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	TrajectoryPoints.Reserve(MaxSimulationSteps + 1);
 	TrajectoryPoints.Add(SimState.Position);
 
+	bool bEndedByExplosion = false;
+	FVector ExplosionPoint = SimState.Position;
+
 	const float StepTime = FMath::Max(0.001f, SimConfig.FixedStepSeconds);
 	for (int32 StepIndex = 0; StepIndex < MaxSimulationSteps; ++StepIndex)
 	{
@@ -177,23 +295,36 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 			}
 		}
 
-		if (SimState.bMotionStopped || StepResult.bStoppedThisStep || SimState.bExploded || StepResult.bExplodedThisStep)
+		const bool bExplodedThisStep = SimState.bExploded || StepResult.bExplodedThisStep;
+		if (SimState.bMotionStopped || StepResult.bStoppedThisStep || bExplodedThisStep)
 		{
+			if (bExplodedThisStep)
+			{
+				bEndedByExplosion = true;
+				ExplosionPoint = SimState.Position;
+			}
 			break;
 		}
 	}
 
 	SyncHighlightedTiles(HitTilesThisFrame);
 
-	if (TrajectoryPoints.Num() < 2)
-	{
-		return;
-	}
-
 	const FColor DrawColor = (Thrower->IsStateGreen() ? AvailableColor : CooldownColor).ToFColor(true);
+	const FColor ExplosionColor = ExplosionTipColor.ToFColor(true);
 	const float SegmentLengthLimitCm = FMath::Max(1.0f, MaxRenderSegmentLengthCm);
 	const float DrawDuration = FMath::Max(0.0f, DrawDurationSeconds);
 	const uint8 DrawDepthPriority = static_cast<uint8>(DepthPriority);
+
+	FVector ViewLocation = FVector::ZeroVector;
+	const bool bHasViewLocation = ResolveViewLocation(ViewLocation);
+	const bool bUseVisibilityFilter = bHideNonVisibleSegments && bHasViewLocation;
+
+	float FloorZ = 0.0f;
+	const bool bUseFloorFilter = bHideBelowFloorSegments && ResolveFloorZ(FloorZ);
+
+	bool bHasVisibleEndpoint = false;
+	FVector VisibleEndpoint = FVector::ZeroVector;
+	bool bStoppedByFloor = false;
 
 	for (int32 Index = 0; Index < TrajectoryPoints.Num() - 1; ++Index)
 	{
@@ -206,9 +337,93 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 		for (int32 SubIndex = 1; SubIndex <= SubSegmentCount; ++SubIndex)
 		{
 			const float Alpha = static_cast<float>(SubIndex) / static_cast<float>(SubSegmentCount);
-			const FVector DrawEnd = FMath::Lerp(SegmentStart, SegmentEnd, Alpha);
-			DrawDebugLine(World, DrawStart, DrawEnd, DrawColor, false, DrawDuration, DrawDepthPriority, LineThickness);
-			DrawStart = DrawEnd;
+			const FVector RawDrawEnd = FMath::Lerp(SegmentStart, SegmentEnd, Alpha);
+
+			FVector DrawEnd = RawDrawEnd;
+			bool bSegmentClippedToFloor = false;
+
+			if (bUseFloorFilter)
+			{
+				const bool bStartBelowFloor = DrawStart.Z < FloorZ;
+				if (bStartBelowFloor)
+				{
+					bStoppedByFloor = true;
+					break;
+				}
+
+				if (DrawEnd.Z < FloorZ)
+				{
+					const float ZDelta = DrawEnd.Z - DrawStart.Z;
+					if (FMath::Abs(ZDelta) > KINDA_SMALL_NUMBER)
+					{
+						const float FloorT = FMath::Clamp((FloorZ - DrawStart.Z) / ZDelta, 0.0f, 1.0f);
+						DrawEnd = FMath::Lerp(DrawStart, DrawEnd, FloorT);
+						bSegmentClippedToFloor = true;
+					}
+					else
+					{
+						bStoppedByFloor = true;
+						break;
+					}
+				}
+			}
+
+			const FVector MidPoint = (DrawStart + DrawEnd) * 0.5f;
+			const bool bVisible = !bUseVisibilityFilter
+				|| IsPointVisibleFromView(ViewLocation, MidPoint, OwnerActor, World);
+
+			if (bVisible && !DrawStart.Equals(DrawEnd, 0.01f))
+			{
+				DrawDebugLine(World, DrawStart, DrawEnd, DrawColor, false, DrawDuration, DrawDepthPriority, LineThickness);
+				bHasVisibleEndpoint = true;
+				VisibleEndpoint = DrawEnd;
+			}
+
+			DrawStart = RawDrawEnd;
+
+			if (bSegmentClippedToFloor)
+			{
+				bStoppedByFloor = true;
+				break;
+			}
+		}
+
+		if (bStoppedByFloor)
+		{
+			break;
+		}
+	}
+
+	FVector CandidateEndpoint = VisibleEndpoint;
+	bool bHasCandidateEndpoint = bHasVisibleEndpoint;
+
+	if (!bHasCandidateEndpoint && bEndedByExplosion)
+	{
+		const bool bExplosionAboveFloor = !bUseFloorFilter || ExplosionPoint.Z >= FloorZ;
+		const bool bExplosionVisible = !bUseVisibilityFilter
+			|| IsPointVisibleFromView(ViewLocation, ExplosionPoint, OwnerActor, World);
+		if (bExplosionAboveFloor && bExplosionVisible)
+		{
+			CandidateEndpoint = ExplosionPoint;
+			bHasCandidateEndpoint = true;
+		}
+	}
+
+	if (bEndedByExplosion && bHasCandidateEndpoint)
+	{
+		const float EndpointEpsilon = FMath::Max(2.0f, ExplosionTipSizeCm);
+		if (FVector::DistSquared(CandidateEndpoint, ExplosionPoint) <= FMath::Square(EndpointEpsilon))
+		{
+			DrawDebugSphere(
+				World,
+				CandidateEndpoint,
+				FMath::Max(1.0f, ExplosionTipSizeCm),
+				10,
+				ExplosionColor,
+				false,
+				DrawDuration,
+				DrawDepthPriority,
+				1.5f);
 		}
 	}
 }

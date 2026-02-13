@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/EngineTypes.h"
 #include "Components/ActorComponent.h"
 #include "GrenadeTrajectoryComponent.generated.h"
 
@@ -28,16 +29,31 @@ public:
 	float DrawDurationSeconds = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory")
-	TEnumAsByte<ESceneDepthPriorityGroup> DepthPriority = SDPG_Foreground;
+	TEnumAsByte<ESceneDepthPriorityGroup> DepthPriority = SDPG_World;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "1.0", Units = "cm"))
 	float MaxRenderSegmentLengthCm = 20.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility")
+	bool bHideNonVisibleSegments = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility")
+	bool bHideBelowFloorSegments = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility")
+	TEnumAsByte<ECollisionChannel> VisibilityTraceChannel = ECC_Visibility;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory")
 	FLinearColor AvailableColor = FLinearColor(0.1f, 1.0f, 0.1f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory")
 	FLinearColor CooldownColor = FLinearColor(1.0f, 0.15f, 0.15f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Explosion")
+	FLinearColor ExplosionTipColor = FLinearColor(1.0f, 0.5f, 0.0f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Explosion", meta = (ClampMin = "1.0", Units = "cm"))
+	float ExplosionTipSizeCm = 6.0f;
 
 	UFUNCTION(BlueprintCallable, Category = "Trajectory")
 	void SetAimModeActive(bool bActive);
@@ -55,8 +71,13 @@ private:
 	void SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles);
 	ABreakableTile* ResolveBreakableTile(const FHitResult& Hit) const;
 	void DrawPredictedPath();
+	bool ResolveViewLocation(FVector& OutViewLocation) const;
+	bool ResolveFloorZ(float& OutFloorZ);
+	bool IsPointVisibleFromView(const FVector& ViewLocation, const FVector& Point, AActor* OwnerActor, UWorld* World) const;
 
 	TWeakObjectPtr<UGrenadeThrowerComponent> ThrowerComponent;
 	TSet<TWeakObjectPtr<ABreakableTile>> HighlightedTiles;
 	bool bAimModeActive = false;
+	bool bHasLastKnownFloorZ = false;
+	float LastKnownFloorZ = 0.0f;
 };

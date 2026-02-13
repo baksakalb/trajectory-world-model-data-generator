@@ -4,6 +4,7 @@
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Pawn.h"
 #include "Grenade/GrenadeActor.h"
 #include "he_grenade_gameCharacter.h"
 
@@ -46,16 +47,29 @@ void UGrenadeThrowerComponent::BeginPlay()
 	CrouchThrowPitchOffsetDegrees = FMath::Min(CrouchThrowPitchOffsetDegrees, MinCrouchPitchOffsetDegrees);
 	CrouchThrowSpawnDropCm = FMath::Max(CrouchThrowSpawnDropCm, MinCrouchSpawnDropCm);
 
+	MinThrowSpeedCmPerSec = FMath::Max(0.0f, MinThrowSpeedCmPerSec);
+	MaxThrowSpeedCmPerSec = FMath::Max(MinThrowSpeedCmPerSec, MaxThrowSpeedCmPerSec);
+	ChargeDurationSeconds = FMath::Max(0.01f, ChargeDurationSeconds);
+	FuseSeconds = FMath::Max(0.1f, FuseSeconds);
+
+	bThrowInputHeld = false;
+	bDetonatedInHandThisHold = false;
+	bHasHeldLaunchSnapshot = false;
+	HoldStartWorldTimeSeconds = 0.0f;
+	LastHeldDurationSeconds = 0.0f;
+
 	SetThrowState(EGrenadeThrowState::Ready);
 
 	UE_LOG(
 		LogTemp,
 		Log,
-		TEXT("Grenade tuning active: BreakableDamping=%.2f RestSpeed=%.1f CrouchPitchOffset=%.1f CrouchSpawnDrop=%.1f"),
+		TEXT("Grenade tuning active: BreakableDamping=%.2f RestSpeed=%.1f MinThrow=%.1f MaxThrow=%.1f Charge=%.2fs Fuse=%.2fs"),
 		SimulationConfig.BreakableVelocityDamping,
 		SimulationConfig.RestSpeedCmPerSec,
-		CrouchThrowPitchOffsetDegrees,
-		CrouchThrowSpawnDropCm);
+		MinThrowSpeedCmPerSec,
+		MaxThrowSpeedCmPerSec,
+		ChargeDurationSeconds,
+		FuseSeconds);
 }
 
 void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -67,7 +81,11 @@ void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(CooldownTimerHandle);
 	}
 
+	bThrowInputHeld = false;
+	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
+	HoldStartWorldTimeSeconds = 0.0f;
+	LastHeldDurationSeconds = 0.0f;
 	SetComponentTickEnabled(false);
 }
 
@@ -77,6 +95,14 @@ void UGrenadeThrowerComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
 	if (!bThrowInputHeld)
 	{
+		return;
+	}
+
+	LastHeldDurationSeconds = GetHeldDurationSeconds();
+
+	if (GetRemainingFuseSeconds() <= KINDA_SMALL_NUMBER)
+	{
+		DetonateInHand();
 		return;
 	}
 
@@ -90,9 +116,23 @@ void UGrenadeThrowerComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
 void UGrenadeThrowerComponent::OnThrowPressed()
 {
+	if (ThrowState != EGrenadeThrowState::Ready || bThrowInputHeld)
+	{
+		return;
+	}
+
 	bThrowInputHeld = true;
+	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
+	LastHeldDurationSeconds = 0.0f;
+	HoldStartWorldTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	SetComponentTickEnabled(true);
+
+	if (GetRemainingFuseSeconds() <= KINDA_SMALL_NUMBER)
+	{
+		DetonateInHand();
+		return;
+	}
 
 	// Capture immediately as a fallback for edge cases where release-time sampling fails.
 	FGrenadeLaunchParams ImmediateSnapshot;
@@ -110,8 +150,12 @@ void UGrenadeThrowerComponent::OnThrowReleased()
 		return;
 	}
 
-	bThrowInputHeld = false;
-	SetComponentTickEnabled(false);
+	LastHeldDurationSeconds = GetHeldDurationSeconds();
+	if (GetRemainingFuseSeconds() <= KINDA_SMALL_NUMBER)
+	{
+		DetonateInHand();
+		return;
+	}
 
 	FGrenadeLaunchParams ReleaseLaunchParams;
 	bool bHasReleaseLaunch = false;
@@ -132,22 +176,58 @@ void UGrenadeThrowerComponent::OnThrowReleased()
 		UE_LOG(
 			LogTemp,
 			Log,
-			TEXT("ThrowReleaseSnapshot T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f)"),
+			TEXT("ThrowReleaseSnapshot T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f) Fuse=%.3f"),
 			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0f,
 			ReleaseLaunchParams.SpawnLocation.X,
 			ReleaseLaunchParams.SpawnLocation.Y,
 			ReleaseLaunchParams.SpawnLocation.Z,
 			ReleaseLaunchParams.InitialVelocity.X,
 			ReleaseLaunchParams.InitialVelocity.Y,
-			ReleaseLaunchParams.InitialVelocity.Z);
+			ReleaseLaunchParams.InitialVelocity.Z,
+			ReleaseLaunchParams.FuseSeconds);
 	}
 
+	bThrowInputHeld = false;
+	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
+	HoldStartWorldTimeSeconds = 0.0f;
+	LastHeldDurationSeconds = 0.0f;
+	SetComponentTickEnabled(false);
 }
 
 void UGrenadeThrowerComponent::SetAimModeActive(bool bActiveAimMode)
 {
 	bAimModeActive = bActiveAimMode;
+}
+
+float UGrenadeThrowerComponent::GetCurrentChargeAlpha() const
+{
+	if (!bThrowInputHeld)
+	{
+		return 0.0f;
+	}
+
+	return FMath::Clamp(GetHeldDurationSeconds() / FMath::Max(0.01f, ChargeDurationSeconds), 0.0f, 1.0f);
+}
+
+float UGrenadeThrowerComponent::GetCurrentThrowSpeedCmPerSec() const
+{
+	if (!bThrowInputHeld)
+	{
+		return MinThrowSpeedCmPerSec;
+	}
+
+	return FMath::Lerp(MinThrowSpeedCmPerSec, MaxThrowSpeedCmPerSec, GetCurrentChargeAlpha());
+}
+
+float UGrenadeThrowerComponent::GetRemainingFuseSeconds() const
+{
+	if (!bThrowInputHeld)
+	{
+		return FuseSeconds;
+	}
+
+	return FMath::Max(0.0f, FuseSeconds - GetHeldDurationSeconds());
 }
 
 bool UGrenadeThrowerComponent::IsStateGreen() const
@@ -162,17 +242,20 @@ bool UGrenadeThrowerComponent::BuildLaunchParams(FGrenadeLaunchParams& OutLaunch
 
 bool UGrenadeThrowerComponent::BuildCurrentLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const
 {
+	const float ThrowSpeedForSnapshot = GetCurrentThrowSpeedCmPerSec();
+	const float RemainingFuseForSnapshot = GetRemainingFuseSeconds();
+
 	FVector SpawnLocation = FVector::ZeroVector;
 	FVector InitialVelocity = FVector::ZeroVector;
-	if (!ComputeLaunchTransform(SpawnLocation, InitialVelocity))
+	if (!ComputeLaunchTransform(SpawnLocation, InitialVelocity, ThrowSpeedForSnapshot))
 	{
 		return false;
 	}
 
 	OutLaunchParams.SpawnLocation = SpawnLocation;
 	OutLaunchParams.InitialVelocity = InitialVelocity;
-	OutLaunchParams.FuseSeconds = FuseSeconds;
-	OutLaunchParams.bCanThrowNow = IsThrowAvailableNow();
+	OutLaunchParams.FuseSeconds = RemainingFuseForSnapshot;
+	OutLaunchParams.bCanThrowNow = IsThrowAvailableNow() && RemainingFuseForSnapshot > KINDA_SMALL_NUMBER;
 	return true;
 }
 
@@ -194,6 +277,12 @@ void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* Launc
 		return;
 	}
 
+	if (LaunchParams.FuseSeconds <= KINDA_SMALL_NUMBER)
+	{
+		DetonateInHand();
+		return;
+	}
+
 	if (CVarGGGrenadeThrowLockDebug.GetValueOnGameThread() != 0)
 	{
 		FGrenadeLaunchParams CurrentNow;
@@ -208,7 +297,7 @@ void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* Launc
 		UE_LOG(
 			LogTemp,
 			Log,
-			TEXT("ThrowSpawnParams T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f) DeltaNow[Spawn=%.3f Vel=%.3f]"),
+			TEXT("ThrowSpawnParams T=%.4f Spawn=(%.2f,%.2f,%.2f) Vel=(%.2f,%.2f,%.2f) Fuse=%.3f DeltaNow[Spawn=%.3f Vel=%.3f]"),
 			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0f,
 			LaunchParams.SpawnLocation.X,
 			LaunchParams.SpawnLocation.Y,
@@ -216,6 +305,7 @@ void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* Launc
 			LaunchParams.InitialVelocity.X,
 			LaunchParams.InitialVelocity.Y,
 			LaunchParams.InitialVelocity.Z,
+			LaunchParams.FuseSeconds,
 			SpawnDelta,
 			VelocityDelta);
 	}
@@ -273,7 +363,74 @@ void UGrenadeThrowerComponent::SetThrowState(EGrenadeThrowState NewState)
 	}
 }
 
-bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity) const
+void UGrenadeThrowerComponent::DetonateInHand()
+{
+	if (bDetonatedInHandThisHold)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		bThrowInputHeld = false;
+		bHasHeldLaunchSnapshot = false;
+		SetComponentTickEnabled(false);
+		return;
+	}
+
+	FVector ExplosionOrigin = GetOwner() ? GetOwner()->GetActorLocation() : FVector::ZeroVector;
+	if (bHasHeldLaunchSnapshot)
+	{
+		ExplosionOrigin = HeldLaunchSnapshot.SpawnLocation;
+	}
+	else
+	{
+		FGrenadeLaunchParams Snapshot;
+		if (BuildCurrentLaunchParams(Snapshot))
+		{
+			ExplosionOrigin = Snapshot.SpawnLocation;
+		}
+	}
+
+	float ExplosionRadius = 300.0f;
+	UClass* SpawnClass = GrenadeClass ? GrenadeClass.Get() : AGrenadeActor::StaticClass();
+	if (SpawnClass)
+	{
+		if (const AGrenadeActor* GrenadeDefaults = Cast<AGrenadeActor>(SpawnClass->GetDefaultObject()))
+		{
+			ExplosionRadius = FMath::Max(0.0f, GrenadeDefaults->ExplosionRadiusCm);
+		}
+	}
+
+	AGrenadeActor::ApplyInstantKillBlast(World, ExplosionOrigin, ExplosionRadius, nullptr, GetOwner());
+
+	bDetonatedInHandThisHold = true;
+	bThrowInputHeld = false;
+	bHasHeldLaunchSnapshot = false;
+	HoldStartWorldTimeSeconds = 0.0f;
+	LastHeldDurationSeconds = 0.0f;
+	SetComponentTickEnabled(false);
+	EnterCooldown();
+}
+
+float UGrenadeThrowerComponent::GetHeldDurationSeconds() const
+{
+	if (!bThrowInputHeld)
+	{
+		return FMath::Max(0.0f, LastHeldDurationSeconds);
+	}
+
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return FMath::Max(0.0f, LastHeldDurationSeconds);
+	}
+
+	return FMath::Max(0.0f, World->GetTimeSeconds() - HoldStartWorldTimeSeconds);
+}
+
+bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity, float ThrowSpeedCmPerSec) const
 {
 	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
 	if (!OwnerCharacter)
@@ -339,6 +496,7 @@ bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation,
 		ThrowDirection = ViewForward;
 	}
 
-	OutInitialVelocity = (ThrowDirection * ThrowSpeedCmPerSec) + (OwnerCharacter->GetVelocity() * ThrowInheritVelocityFactor);
+	OutInitialVelocity = (ThrowDirection * FMath::Max(0.0f, ThrowSpeedCmPerSec))
+		+ (OwnerCharacter->GetVelocity() * ThrowInheritVelocityFactor);
 	return true;
 }
