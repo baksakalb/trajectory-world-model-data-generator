@@ -46,6 +46,7 @@ void UGrenadeThrowerComponent::BeginPlay()
 	SimulationConfig.RestSpeedCmPerSec = FMath::Max(SimulationConfig.RestSpeedCmPerSec, MinRestSpeedCmPerSec);
 	CrouchThrowPitchOffsetDegrees = FMath::Min(CrouchThrowPitchOffsetDegrees, MinCrouchPitchOffsetDegrees);
 	CrouchThrowSpawnDropCm = FMath::Max(CrouchThrowSpawnDropCm, MinCrouchSpawnDropCm);
+	ControlArcRaiseMaxPitchOffsetDegrees = FMath::Clamp(ControlArcRaiseMaxPitchOffsetDegrees, 0.0f, 60.0f);
 
 	MinThrowSpeedCmPerSec = FMath::Max(0.0f, MinThrowSpeedCmPerSec);
 	MaxThrowSpeedCmPerSec = FMath::Max(MinThrowSpeedCmPerSec, MaxThrowSpeedCmPerSec);
@@ -53,9 +54,11 @@ void UGrenadeThrowerComponent::BeginPlay()
 	FuseSeconds = FMath::Max(0.1f, FuseSeconds);
 
 	bThrowInputHeld = false;
+	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
 	HoldStartWorldTimeSeconds = 0.0f;
+	ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	LastHeldDurationSeconds = 0.0f;
 
 	SetThrowState(EGrenadeThrowState::Ready);
@@ -82,9 +85,11 @@ void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	bThrowInputHeld = false;
+	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
 	HoldStartWorldTimeSeconds = 0.0f;
+	ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	LastHeldDurationSeconds = 0.0f;
 	SetComponentTickEnabled(false);
 }
@@ -122,10 +127,12 @@ void UGrenadeThrowerComponent::OnThrowPressed()
 	}
 
 	bThrowInputHeld = true;
+	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
 	LastHeldDurationSeconds = 0.0f;
 	HoldStartWorldTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	SetComponentTickEnabled(true);
 
 	if (GetRemainingFuseSeconds() <= KINDA_SMALL_NUMBER)
@@ -188,9 +195,11 @@ void UGrenadeThrowerComponent::OnThrowReleased()
 	}
 
 	bThrowInputHeld = false;
+	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
 	HoldStartWorldTimeSeconds = 0.0f;
+	ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	LastHeldDurationSeconds = 0.0f;
 	SetComponentTickEnabled(false);
 }
@@ -198,6 +207,39 @@ void UGrenadeThrowerComponent::OnThrowReleased()
 void UGrenadeThrowerComponent::SetAimModeActive(bool bActiveAimMode)
 {
 	bAimModeActive = bActiveAimMode;
+	if (!bAimModeActive)
+	{
+		bControlArcRaiseInputHeld = false;
+		ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
+	}
+}
+
+void UGrenadeThrowerComponent::SetControlArcRaiseInputActive(bool bActive)
+{
+	if (!bEnableControlArcRaise)
+	{
+		bControlArcRaiseInputHeld = false;
+		ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
+		return;
+	}
+
+	if (!bActive)
+	{
+		bControlArcRaiseInputHeld = false;
+		ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
+		return;
+	}
+
+	if (!IsControlArcRaiseContextActive())
+	{
+		return;
+	}
+
+	if (!bControlArcRaiseInputHeld)
+	{
+		bControlArcRaiseInputHeld = true;
+		ControlArcRaiseHoldStartWorldTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	}
 }
 
 float UGrenadeThrowerComponent::GetCurrentChargeAlpha() const
@@ -374,7 +416,9 @@ void UGrenadeThrowerComponent::DetonateInHand()
 	if (!World)
 	{
 		bThrowInputHeld = false;
+		bControlArcRaiseInputHeld = false;
 		bHasHeldLaunchSnapshot = false;
+		ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 		SetComponentTickEnabled(false);
 		return;
 	}
@@ -407,8 +451,10 @@ void UGrenadeThrowerComponent::DetonateInHand()
 
 	bDetonatedInHandThisHold = true;
 	bThrowInputHeld = false;
+	bControlArcRaiseInputHeld = false;
 	bHasHeldLaunchSnapshot = false;
 	HoldStartWorldTimeSeconds = 0.0f;
+	ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	LastHeldDurationSeconds = 0.0f;
 	SetComponentTickEnabled(false);
 	EnterCooldown();
@@ -428,6 +474,38 @@ float UGrenadeThrowerComponent::GetHeldDurationSeconds() const
 	}
 
 	return FMath::Max(0.0f, World->GetTimeSeconds() - HoldStartWorldTimeSeconds);
+}
+
+float UGrenadeThrowerComponent::GetControlArcRaiseHeldDurationSeconds() const
+{
+	if (!bControlArcRaiseInputHeld || !IsControlArcRaiseContextActive())
+	{
+		return 0.0f;
+	}
+
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return 0.0f;
+	}
+
+	return FMath::Max(0.0f, World->GetTimeSeconds() - ControlArcRaiseHoldStartWorldTimeSeconds);
+}
+
+float UGrenadeThrowerComponent::GetControlArcRaiseAlpha() const
+{
+	if (!bEnableControlArcRaise)
+	{
+		return 0.0f;
+	}
+
+	const float FuseDuration = FMath::Max(0.1f, FuseSeconds);
+	return FMath::Clamp(GetControlArcRaiseHeldDurationSeconds() / FuseDuration, 0.0f, 1.0f);
+}
+
+bool UGrenadeThrowerComponent::IsControlArcRaiseContextActive() const
+{
+	return bAimModeActive && bThrowInputHeld;
 }
 
 bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity, float ThrowSpeedCmPerSec) const
@@ -459,29 +537,42 @@ bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation,
 	const bool bIsCrouched = OwnerCharacter->GetCharacterMovement() && OwnerCharacter->GetCharacterMovement()->IsCrouching();
 	const bool bApplyCrouchAdjustment = bEnableCrouchThrowAdjustment && bIsCrouched;
 
-	FRotator EffectiveViewRotation = ViewRotation;
+	// Spawn basis should stay stable while charging arc raise; only throw direction changes.
+	FRotator SpawnReferenceRotation = ViewRotation;
 	if (bApplyCrouchAdjustment)
 	{
-		EffectiveViewRotation.Pitch += CrouchThrowPitchOffsetDegrees;
+		SpawnReferenceRotation.Pitch += CrouchThrowPitchOffsetDegrees;
 	}
 
-	const FRotationMatrix ViewBasis(EffectiveViewRotation);
-	const FVector ViewForward = ViewBasis.GetScaledAxis(EAxis::X);
-	const FVector ViewRight = ViewBasis.GetScaledAxis(EAxis::Y);
-	const FVector ViewUp = ViewBasis.GetScaledAxis(EAxis::Z);
+	const FRotationMatrix SpawnBasis(SpawnReferenceRotation);
+	const FVector SpawnForward = SpawnBasis.GetScaledAxis(EAxis::X);
+	const FVector SpawnRight = SpawnBasis.GetScaledAxis(EAxis::Y);
+	const FVector SpawnUp = SpawnBasis.GetScaledAxis(EAxis::Z);
 
 	OutSpawnLocation = ViewLocation
-		+ (ViewForward * ThrowSpawnOffset.X)
-		+ (ViewRight * ThrowSpawnOffset.Y)
-		+ (ViewUp * ThrowSpawnOffset.Z);
+		+ (SpawnForward * ThrowSpawnOffset.X)
+		+ (SpawnRight * ThrowSpawnOffset.Y)
+		+ (SpawnUp * ThrowSpawnOffset.Z);
 
 	if (bApplyCrouchAdjustment)
 	{
 		OutSpawnLocation.Z -= FMath::Max(0.0f, CrouchThrowSpawnDropCm);
 	}
 
+	FRotator ThrowAimRotation = SpawnReferenceRotation;
+	if (bEnableControlArcRaise)
+	{
+		const float ArcRaiseAlpha = GetControlArcRaiseAlpha();
+		if (ArcRaiseAlpha > 0.0f)
+		{
+			ThrowAimRotation.Pitch += (ControlArcRaiseMaxPitchOffsetDegrees * ArcRaiseAlpha);
+		}
+	}
+
+	const FVector ThrowAimForward = FRotationMatrix(ThrowAimRotation).GetScaledAxis(EAxis::X);
+
 	const FVector TraceStart = ViewLocation;
-	const FVector TraceEnd = TraceStart + (ViewForward * TrajectoryTraceDistanceCm);
+	const FVector TraceEnd = TraceStart + (ThrowAimForward * TrajectoryTraceDistanceCm);
 
 	FHitResult Hit;
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrenadeThrowAim), false);
@@ -493,7 +584,7 @@ bool UGrenadeThrowerComponent::ComputeLaunchTransform(FVector& OutSpawnLocation,
 	FVector ThrowDirection = (AimTarget - OutSpawnLocation).GetSafeNormal();
 	if (ThrowDirection.IsNearlyZero())
 	{
-		ThrowDirection = ViewForward;
+		ThrowDirection = ThrowAimForward;
 	}
 
 	OutInitialVelocity = (ThrowDirection * FMath::Max(0.0f, ThrowSpeedCmPerSec))

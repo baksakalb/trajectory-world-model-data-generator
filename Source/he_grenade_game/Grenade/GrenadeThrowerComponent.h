@@ -78,6 +78,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Crouch", meta = (ClampMin = "0.0", Units = "cm"))
 	float CrouchThrowSpawnDropCm = 18.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Arc Raise")
+	bool bEnableControlArcRaise = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Throw|Arc Raise", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "deg"))
+	float ControlArcRaiseMaxPitchOffsetDegrees = 40.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation")
 	FGrenadeSimConfig SimulationConfig;
 
@@ -92,6 +98,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Grenade")
 	void SetAimModeActive(bool bActiveAimMode);
+
+	UFUNCTION(BlueprintCallable, Category = "Grenade")
+	void SetControlArcRaiseInputActive(bool bActive);
 
 	UFUNCTION(BlueprintPure, Category = "Grenade")
 	bool IsAimModeActive() const { return bAimModeActive; }
@@ -132,6 +141,9 @@ private:
 	void SetThrowState(EGrenadeThrowState NewState);
 	void DetonateInHand();
 	float GetHeldDurationSeconds() const;
+	float GetControlArcRaiseHeldDurationSeconds() const;
+	float GetControlArcRaiseAlpha() const;
+	bool IsControlArcRaiseContextActive() const;
 
 	bool BuildCurrentLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const;
 	bool ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity, float ThrowSpeedCmPerSec) const;
@@ -141,9 +153,11 @@ private:
 	EGrenadeThrowState ThrowState = EGrenadeThrowState::Ready;
 	bool bThrowInputHeld = false;
 	bool bAimModeActive = false;
+	bool bControlArcRaiseInputHeld = false;
 	bool bDetonatedInHandThisHold = false;
 	bool bHasHeldLaunchSnapshot = false;
 	float HoldStartWorldTimeSeconds = 0.0f;
+	float ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	float LastHeldDurationSeconds = 0.0f;
 	FGrenadeLaunchParams HeldLaunchSnapshot;
 };

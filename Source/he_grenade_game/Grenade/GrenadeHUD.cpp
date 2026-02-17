@@ -1,6 +1,11 @@
 #include "Grenade/GrenadeHUD.h"
 
 #include "Engine/Canvas.h"
+#include "Engine/Engine.h"
+#include "Engine/Font.h"
+#include "CanvasItem.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "Grenade/GGMovementComponent.h"
 #include "he_grenade_gameCharacter.h"
 
 void AGrenadeHUD::DrawHUD()
@@ -19,16 +24,50 @@ void AGrenadeHUD::DrawHUD()
 		return;
 	}
 
-	if (Character->IsAimModeActive())
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float CenterY = Canvas->ClipY * 0.5f;
+
+	if (!Character->IsAimModeActive())
+	{
+		const FLinearColor CrosshairColor = Character->IsGrenadeStateGreen() ? AvailableColor : CooldownColor;
+
+		DrawLine(CenterX - CrosshairSize, CenterY, CenterX + CrosshairSize, CenterY, CrosshairColor, CrosshairThickness);
+		DrawLine(CenterX, CenterY - CrosshairSize, CenterX, CenterY + CrosshairSize, CrosshairColor, CrosshairThickness);
+	}
+
+	float HorizontalSpeedCmPerSec = FVector(Character->GetVelocity().X, Character->GetVelocity().Y, 0.0f).Size();
+	bool bHopActive = false;
+	int32 HopChainCount = 0;
+	if (const UGGMovementComponent* GGMovement = Cast<UGGMovementComponent>(Character->GetCharacterMovement()))
+	{
+		HorizontalSpeedCmPerSec = GGMovement->GetCurrentHorizontalSpeedCmPerSec();
+		bHopActive = GGMovement->IsCrouchHopFeedbackActive();
+		HopChainCount = GGMovement->GetCrouchHopChainCount();
+	}
+
+	UFont* HudFont = GEngine ? GEngine->GetSmallFont() : nullptr;
+	if (!HudFont)
 	{
 		return;
 	}
 
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float CenterY = Canvas->ClipY * 0.5f;
+	const FVector2D StatusOrigin(22.0f, Canvas->ClipY - 76.0f);
+	const FLinearColor HopColor = bHopActive ? HopActiveColor : HopInactiveColor;
+	const FString HopText = bHopActive
+		? FString::Printf(TEXT("HOP x%d"), FMath::Max(1, HopChainCount))
+		: TEXT("HOP");
+	FCanvasTextItem HopTextItem(StatusOrigin, FText::FromString(HopText), HudFont, HopColor);
+	HopTextItem.Scale = FVector2D(StatusTextScale, StatusTextScale);
+	HopTextItem.EnableShadow(FLinearColor::Black);
+	Canvas->DrawItem(HopTextItem);
 
-	const FLinearColor CrosshairColor = Character->IsGrenadeStateGreen() ? AvailableColor : CooldownColor;
-
-	DrawLine(CenterX - CrosshairSize, CenterY, CenterX + CrosshairSize, CenterY, CrosshairColor, CrosshairThickness);
-	DrawLine(CenterX, CenterY - CrosshairSize, CenterX, CenterY + CrosshairSize, CrosshairColor, CrosshairThickness);
+	const FString SpeedText = FString::Printf(TEXT("Speed %.0f"), HorizontalSpeedCmPerSec);
+	FCanvasTextItem SpeedTextItem(
+		FVector2D(StatusOrigin.X + 120.0f, StatusOrigin.Y),
+		FText::FromString(SpeedText),
+		HudFont,
+		SpeedTextColor);
+	SpeedTextItem.Scale = FVector2D(StatusTextScale, StatusTextScale);
+	SpeedTextItem.EnableShadow(FLinearColor::Black);
+	Canvas->DrawItem(SpeedTextItem);
 }

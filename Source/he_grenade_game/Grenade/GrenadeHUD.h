@@ -22,5 +22,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crosshair")
 	FLinearColor CooldownColor = FLinearColor(1.0f, 0.15f, 0.15f, 1.0f);
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status")
+	FLinearColor HopActiveColor = FLinearColor(0.15f, 1.0f, 0.25f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status")
+	FLinearColor HopInactiveColor = FLinearColor(0.25f, 0.25f, 0.25f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status")
+	FLinearColor SpeedTextColor = FLinearColor(0.95f, 0.95f, 0.95f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status", meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float StatusTextScale = 1.1f;
+
 	virtual void DrawHUD() override;
 };

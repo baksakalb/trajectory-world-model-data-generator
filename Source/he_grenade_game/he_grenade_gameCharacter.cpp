@@ -119,13 +119,11 @@ void Ahe_grenade_gameCharacter::SetupPlayerInputComponent(UInputComponent* Playe
 		PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoAimStart);
 		PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Released, this, &Ahe_grenade_gameCharacter::DoAimEnd);
 
-		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoSprintStart);
-		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Released, this, &Ahe_grenade_gameCharacter::DoSprintEnd);
+		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoTrajectoryHeightStart);
+		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Released, this, &Ahe_grenade_gameCharacter::DoTrajectoryHeightEnd);
 
-		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoCrouchStart);
-		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Released, this, &Ahe_grenade_gameCharacter::DoCrouchEnd);
-		PlayerInputComponent->BindKey(EKeys::C, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoCrouchStart);
-		PlayerInputComponent->BindKey(EKeys::C, IE_Released, this, &Ahe_grenade_gameCharacter::DoCrouchEnd);
+		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoCrouchStart);
+		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Released, this, &Ahe_grenade_gameCharacter::DoCrouchEnd);
 	}
 }
 
@@ -161,6 +159,11 @@ void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
 
 void Ahe_grenade_gameCharacter::DoJumpStart()
 {
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		MovementComponent->TryConsumeCrouchJumpBoost();
+	}
+
 	Jump();
 }
 
@@ -182,6 +185,22 @@ void Ahe_grenade_gameCharacter::DoThrowReleased()
 	if (GrenadeThrowerComponent)
 	{
 		GrenadeThrowerComponent->OnThrowReleased();
+	}
+}
+
+void Ahe_grenade_gameCharacter::DoTrajectoryHeightStart()
+{
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->SetControlArcRaiseInputActive(true);
+	}
+}
+
+void Ahe_grenade_gameCharacter::DoTrajectoryHeightEnd()
+{
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->SetControlArcRaiseInputActive(false);
 	}
 }
 
@@ -217,28 +236,17 @@ void Ahe_grenade_gameCharacter::DoAimEnd()
 	UpdateMovementStates();
 }
 
-void Ahe_grenade_gameCharacter::DoSprintStart()
-{
-	bSprintInputHeld = true;
-	UpdateMovementStates();
-}
-
-void Ahe_grenade_gameCharacter::DoSprintEnd()
-{
-	bSprintInputHeld = false;
-	UpdateMovementStates();
-}
-
 void Ahe_grenade_gameCharacter::DoCrouchStart()
 {
 	bCrouchInputHeld = true;
-	RefreshCrouchFromInput();
-	UpdateMovementStates();
 
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
 	{
-		MovementComponent->TryStartSlide();
+		MovementComponent->NotifyCrouchPressed();
 	}
+
+	RefreshCrouchFromInput();
+	UpdateMovementStates();
 }
 
 void Ahe_grenade_gameCharacter::DoCrouchEnd()
@@ -247,7 +255,7 @@ void Ahe_grenade_gameCharacter::DoCrouchEnd()
 
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
 	{
-		MovementComponent->StopSlide();
+		MovementComponent->NotifyCrouchReleased();
 	}
 
 	RefreshCrouchFromInput();
@@ -273,7 +281,6 @@ void Ahe_grenade_gameCharacter::UpdateMovementStates()
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
 	{
 		MovementComponent->SetAimMode(bAimModeActive);
-		MovementComponent->SetSprinting(bSprintInputHeld && !bAimModeActive);
 	}
 }
 
@@ -284,13 +291,12 @@ void Ahe_grenade_gameCharacter::RefreshCrouchFromInput()
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		bWantsCrouchInput = bWantsCrouchInput
-			|| PC->IsInputKeyDown(EKeys::LeftControl)
-			|| PC->IsInputKeyDown(EKeys::C);
+			|| PC->IsInputKeyDown(EKeys::LeftShift);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
-		const bool bShouldCrouch = bWantsCrouchInput;
+		const bool bShouldCrouch = bWantsCrouchInput && Movement->IsMovingOnGround();
 
 		Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
 		Movement->bWantsToCrouch = bShouldCrouch;
@@ -313,23 +319,8 @@ void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
 		return;
 	}
 
-	bool bSliding = false;
-	if (const UGGMovementComponent* GGMovement = GetGGMovementComponent())
-	{
-		bSliding = GGMovement->IsSliding();
-	}
-
 	float TargetOffsetCm = bIsCrouched ? -FMath::Max(0.0f, CrouchCameraDropCm) : 0.0f;
-	if (bSliding)
-	{
-		TargetOffsetCm -= FMath::Max(0.0f, SlideCameraExtraDropCm);
-	}
-
-	float InterpSpeed = FMath::Max(1.0f, CrouchCameraInterpSpeed);
-	if (bSliding)
-	{
-		InterpSpeed *= 2.2f;
-	}
+	const float InterpSpeed = FMath::Max(1.0f, CrouchCameraInterpSpeed);
 
 	CurrentCrouchCameraOffsetCm = FMath::FInterpTo(CurrentCrouchCameraOffsetCm, TargetOffsetCm, DeltaSeconds, InterpSpeed);
 
