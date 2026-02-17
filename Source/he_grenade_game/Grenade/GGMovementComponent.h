@@ -25,10 +25,19 @@ public:
 	float GroundBrakingDeceleration = 2600.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s^2"))
-	float AirAcceleration = 9000.0f;
+	float AirAcceleration = 12000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float AirSpeedCapCmPerSec = 1500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s^2"))
+	float AirOppositeInputBrakeDecelerationCmPerSec2 = 2600.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float AirInputKickStartSpeedCmPerSec = 340.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float AirInputKickStartThresholdCmPerSec = 120.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Jump", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float JumpVelocityCmPerSec = 570.0f;
@@ -54,11 +63,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float CrouchHopSpeedCapCmPerSec = 2100.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s^2"))
-	float AirShiftHoldDragDecelerationCmPerSec2 = 350.0f;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CrosshairInfluenceOnMomentum = 0.75f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CrosshairInfluenceOnMomentumAir = 0.25f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float CrouchHopChainAdditiveIncrementCmPerSec = 70.0f;
@@ -114,6 +123,7 @@ private:
 	bool bAimMode = false;
 	bool bShiftHeld = false;
 	float LastShiftPressTimeSeconds = -1.0f;
+	float LastShiftReleaseTimeSeconds = -1.0f;
 	float LastLandingTimeSeconds = -1.0f;
 	float BoostJumpWindowEndTimeSeconds = -1.0f;
 	float LastCrouchHopTimeSeconds = -1.0f;
@@ -122,6 +132,6 @@ private:
 	bool IsWithinWindow(float CurrentTimeSeconds, float EventTimeSeconds, float WindowSeconds) const;
 	void ArmCrouchHopWindow(float CurrentTimeSeconds);
 	FVector GetFacingDirection2D() const;
-	FVector BlendWithFacingDirection(const FVector& BaseDirection) const;
+	FVector BlendWithFacingDirection(const FVector& BaseDirection, float FacingWeightOverride = -1.0f) const;
 	FVector ResolveBoostDirection(const FVector& HorizontalVelocity) const;
 };

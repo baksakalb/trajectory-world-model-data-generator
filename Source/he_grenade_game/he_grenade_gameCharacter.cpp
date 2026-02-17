@@ -159,6 +159,16 @@ void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
 
 void Ahe_grenade_gameCharacter::DoJumpStart()
 {
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->bWantsToCrouch = false;
+	}
+
+	if (bIsCrouched)
+	{
+		UnCrouch(false);
+	}
+
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
 	{
 		MovementComponent->TryConsumeCrouchJumpBoost();

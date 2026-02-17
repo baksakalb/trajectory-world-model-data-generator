@@ -32,6 +32,11 @@ void UGGMovementComponent::NotifyCrouchPressed()
 void UGGMovementComponent::NotifyCrouchReleased()
 {
 	bShiftHeld = false;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		LastShiftReleaseTimeSeconds = World->GetTimeSeconds();
+	}
 }
 
 bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
@@ -49,6 +54,12 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 
 	const float CurrentTimeSeconds = World->GetTimeSeconds();
 	if (BoostJumpWindowEndTimeSeconds < 0.0f || CurrentTimeSeconds > BoostJumpWindowEndTimeSeconds)
+	{
+		return false;
+	}
+
+	const bool bReleasedAfterLanding = LastShiftReleaseTimeSeconds >= LastLandingTimeSeconds;
+	if (bShiftHeld || !bReleasedAfterLanding)
 	{
 		return false;
 	}
@@ -247,16 +258,36 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 
 	if (IsFalling())
 	{
-		if (bShiftHeld)
+		if (bHasAcceleration)
+		{
+			const float CurrentSpeed = HorizontalVelocity.Size();
+			if (CurrentSpeed < FMath::Max(0.0f, AirInputKickStartThresholdCmPerSec))
+			{
+				const float KickStartSpeed = FMath::Clamp(
+					FMath::Max(0.0f, AirInputKickStartSpeedCmPerSec),
+					0.0f,
+					FMath::Max(0.0f, AirSpeedCapCmPerSec));
+				HorizontalVelocity = AccelDirection * FMath::Max(CurrentSpeed, KickStartSpeed);
+			}
+		}
+
+		if (bHasAcceleration)
 		{
 			const float InitialSpeed = HorizontalVelocity.Size();
 			if (InitialSpeed > KINDA_SMALL_NUMBER)
 			{
-				const float SpeedDrop = FMath::Max(0.0f, AirShiftHoldDragDecelerationCmPerSec2) * DeltaTime;
-				const float NewSpeed = FMath::Max(0.0f, InitialSpeed - SpeedDrop);
-				if (NewSpeed != InitialSpeed)
+				const FVector VelocityDirection = HorizontalVelocity / InitialSpeed;
+				const float AlignmentWithInput = FVector::DotProduct(VelocityDirection, AccelDirection);
+				if (AlignmentWithInput < 0.0f)
 				{
-					HorizontalVelocity *= (NewSpeed / InitialSpeed);
+					const float OppositeBrakeAmount = FMath::Max(0.0f, AirOppositeInputBrakeDecelerationCmPerSec2)
+						* (-AlignmentWithInput)
+						* DeltaTime;
+					const float NewSpeed = FMath::Max(0.0f, InitialSpeed - OppositeBrakeAmount);
+					if (NewSpeed != InitialSpeed)
+					{
+						HorizontalVelocity *= (NewSpeed / InitialSpeed);
+					}
 				}
 			}
 		}
@@ -288,7 +319,7 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 			{
 				BaseDirection = GetFacingDirection2D();
 			}
-			const FVector ExcessDirection = BlendWithFacingDirection(BaseDirection);
+			const FVector ExcessDirection = BlendWithFacingDirection(BaseDirection, CrosshairInfluenceOnMomentumAir);
 			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (ExcessDirection * ExcessSpeed);
 			const float RecombinedSpeed = RecombinedVelocity.Size();
 			if (RecombinedSpeed > CurrentSpeed && RecombinedSpeed > KINDA_SMALL_NUMBER)
@@ -318,7 +349,7 @@ void UGGMovementComponent::OnMovementModeChanged(EMovementMode PreviousMovementM
 				CurrentTimeSeconds,
 				LastShiftPressTimeSeconds,
 				CrouchHopLandingQualifyWindowSeconds);
-			if (bShiftHeld || bPressedRecently)
+			if (bPressedRecently)
 			{
 				ArmCrouchHopWindow(CurrentTimeSeconds);
 			}
@@ -422,7 +453,7 @@ FVector UGGMovementComponent::GetFacingDirection2D() const
 	return FVector::ForwardVector;
 }
 
-FVector UGGMovementComponent::BlendWithFacingDirection(const FVector& BaseDirection) const
+FVector UGGMovementComponent::BlendWithFacingDirection(const FVector& BaseDirection, float FacingWeightOverride) const
 {
 	FVector InputDir = BaseDirection.GetSafeNormal2D();
 	FVector FacingDir = GetFacingDirection2D();
@@ -436,7 +467,10 @@ FVector UGGMovementComponent::BlendWithFacingDirection(const FVector& BaseDirect
 		return FacingDir;
 	}
 
-	const float FacingWeight = FMath::Clamp(CrosshairInfluenceOnMomentum, 0.0f, 1.0f);
+	const float FacingWeight = FMath::Clamp(
+		FacingWeightOverride >= 0.0f ? FacingWeightOverride : CrosshairInfluenceOnMomentum,
+		0.0f,
+		1.0f);
 	FVector BlendedDirection = (InputDir * (1.0f - FacingWeight)) + (FacingDir * FacingWeight);
 	if (BlendedDirection.IsNearlyZero())
 	{
