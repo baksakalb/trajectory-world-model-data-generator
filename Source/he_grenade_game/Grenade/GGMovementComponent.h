@@ -57,6 +57,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s^2"))
 	float AirShiftHoldDragDecelerationCmPerSec2 = 350.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CrosshairInfluenceOnMomentum = 0.75f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float CrouchHopChainAdditiveIncrementCmPerSec = 70.0f;
 
@@ -119,5 +122,6 @@ private:
 	bool IsWithinWindow(float CurrentTimeSeconds, float EventTimeSeconds, float WindowSeconds) const;
 	void ArmCrouchHopWindow(float CurrentTimeSeconds);
 	FVector GetFacingDirection2D() const;
+	FVector BlendWithFacingDirection(const FVector& BaseDirection) const;
 	FVector ResolveBoostDirection(const FVector& HorizontalVelocity) const;
 };

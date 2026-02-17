@@ -84,12 +84,13 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 	// Preserve momentum on hop redirects: even a full reverse redirect keeps at least current speed.
 	const float TargetSpeedCmPerSec = FMath::Max(CurrentSpeedCmPerSec, DesiredBoostSpeedCmPerSec);
 	const float AddedBoostSpeedCmPerSec = FMath::Max(0.0f, TargetSpeedCmPerSec - CurrentSpeedCmPerSec);
-	FVector FacingDirection = GetFacingDirection2D();
-	if (FacingDirection.IsNearlyZero())
+	FVector BaseBoostDirection = Acceleration.GetSafeNormal2D();
+	if (BaseBoostDirection.IsNearlyZero())
 	{
-		FacingDirection = ResolveBoostDirection(HorizontalVelocity);
+		BaseBoostDirection = ResolveBoostDirection(HorizontalVelocity);
 	}
-	FVector BoostedHorizontalVelocity = HorizontalVelocity + (FacingDirection * AddedBoostSpeedCmPerSec);
+	const FVector BoostDirection = BlendWithFacingDirection(BaseBoostDirection);
+	FVector BoostedHorizontalVelocity = HorizontalVelocity + (BoostDirection * AddedBoostSpeedCmPerSec);
 	const float BoostedHorizontalSpeed = BoostedHorizontalVelocity.Size();
 	if (HardCapCmPerSec > 0.0f && BoostedHorizontalSpeed > HardCapCmPerSec && BoostedHorizontalSpeed > KINDA_SMALL_NUMBER)
 	{
@@ -229,14 +230,8 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 			{
 				BaseDirection = GetFacingDirection2D();
 			}
-
-			FVector FacingDirection = GetFacingDirection2D();
-			if (FacingDirection.IsNearlyZero())
-			{
-				FacingDirection = BaseDirection;
-			}
-
-			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (FacingDirection * ExcessSpeed);
+			const FVector ExcessDirection = BlendWithFacingDirection(BaseDirection);
+			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (ExcessDirection * ExcessSpeed);
 			const float RecombinedSpeed = RecombinedVelocity.Size();
 			if (RecombinedSpeed > CurrentSpeed && RecombinedSpeed > KINDA_SMALL_NUMBER)
 			{
@@ -293,14 +288,8 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 			{
 				BaseDirection = GetFacingDirection2D();
 			}
-
-			FVector FacingDirection = GetFacingDirection2D();
-			if (FacingDirection.IsNearlyZero())
-			{
-				FacingDirection = BaseDirection;
-			}
-
-			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (FacingDirection * ExcessSpeed);
+			const FVector ExcessDirection = BlendWithFacingDirection(BaseDirection);
+			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (ExcessDirection * ExcessSpeed);
 			const float RecombinedSpeed = RecombinedVelocity.Size();
 			if (RecombinedSpeed > CurrentSpeed && RecombinedSpeed > KINDA_SMALL_NUMBER)
 			{
@@ -431,4 +420,27 @@ FVector UGGMovementComponent::GetFacingDirection2D() const
 	}
 
 	return FVector::ForwardVector;
+}
+
+FVector UGGMovementComponent::BlendWithFacingDirection(const FVector& BaseDirection) const
+{
+	FVector InputDir = BaseDirection.GetSafeNormal2D();
+	FVector FacingDir = GetFacingDirection2D();
+	if (FacingDir.IsNearlyZero())
+	{
+		FacingDir = InputDir;
+	}
+
+	if (InputDir.IsNearlyZero())
+	{
+		return FacingDir;
+	}
+
+	const float FacingWeight = FMath::Clamp(CrosshairInfluenceOnMomentum, 0.0f, 1.0f);
+	FVector BlendedDirection = (InputDir * (1.0f - FacingWeight)) + (FacingDir * FacingWeight);
+	if (BlendedDirection.IsNearlyZero())
+	{
+		BlendedDirection = InputDir;
+	}
+	return BlendedDirection.GetSafeNormal2D();
 }
