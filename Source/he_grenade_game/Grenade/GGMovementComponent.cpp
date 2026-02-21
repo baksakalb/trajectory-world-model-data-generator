@@ -39,6 +39,25 @@ void UGGMovementComponent::NotifyCrouchReleased()
 	}
 }
 
+void UGGMovementComponent::CancelCrouchHopChain()
+{
+	CrouchHopChainCount = 0;
+	LastCrouchHopTimeSeconds = -1.0f;
+	BoostJumpWindowEndTimeSeconds = -1.0f;
+}
+
+bool UGGMovementComponent::IsCrouchHopChainActive() const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	return CrouchHopChainCount > 0
+		&& IsWithinWindow(World->GetTimeSeconds(), LastCrouchHopTimeSeconds, CrouchHopChainWindowSeconds);
+}
+
 bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 {
 	if (!IsMovingOnGround())
@@ -100,8 +119,26 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 	{
 		BaseBoostDirection = ResolveBoostDirection(HorizontalVelocity);
 	}
-	const FVector BoostDirection = BlendWithFacingDirection(BaseBoostDirection);
-	FVector BoostedHorizontalVelocity = HorizontalVelocity + (BoostDirection * AddedBoostSpeedCmPerSec);
+	FVector BoostDirection = BaseBoostDirection.GetSafeNormal2D();
+	if (BoostDirection.IsNearlyZero())
+	{
+		BoostDirection = HorizontalVelocity.GetSafeNormal2D();
+	}
+	if (BoostDirection.IsNearlyZero())
+	{
+		BoostDirection = GetFacingDirection2D();
+	}
+	FVector RedirectedHorizontalVelocity = HorizontalVelocity;
+	if (CurrentSpeedCmPerSec > KINDA_SMALL_NUMBER)
+	{
+		const float RedirectAlpha = FMath::Clamp(CrouchHopRedirectStrength, 0.0f, 1.0f);
+		FVector RedirectedDirection = FMath::Lerp(HorizontalVelocity / CurrentSpeedCmPerSec, BoostDirection, RedirectAlpha);
+		if (!RedirectedDirection.IsNearlyZero())
+		{
+			RedirectedHorizontalVelocity = RedirectedDirection.GetSafeNormal2D() * CurrentSpeedCmPerSec;
+		}
+	}
+	FVector BoostedHorizontalVelocity = RedirectedHorizontalVelocity + (BoostDirection * AddedBoostSpeedCmPerSec);
 	const float BoostedHorizontalSpeed = BoostedHorizontalVelocity.Size();
 	if (HardCapCmPerSec > 0.0f && BoostedHorizontalSpeed > HardCapCmPerSec && BoostedHorizontalSpeed > KINDA_SMALL_NUMBER)
 	{
@@ -179,6 +216,18 @@ bool UGGMovementComponent::CanCrouchInCurrentState() const
 	return IsMovingOnGround();
 }
 
+FVector UGGMovementComponent::GetFallingLateralAcceleration(float /*DeltaTime*/)
+{
+	// Preserve full lateral input while falling; we intentionally do not scale by AirControl.
+	FVector FallAcceleration = ProjectToGravityFloor(Acceleration);
+	if (!HasAnimRootMotion() && FallAcceleration.SizeSquared() > 0.0f)
+	{
+		FallAcceleration = FallAcceleration.GetClampedToMaxSize(GetMaxAcceleration());
+	}
+
+	return FallAcceleration;
+}
+
 void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration)
 {
 	if (!HasValidData() || HasAnimRootMotion() || DeltaTime < MIN_TICK_TIME)
@@ -192,8 +241,9 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		return;
 	}
 
-	const FVector AccelDirection = Acceleration.GetSafeNormal2D();
-	const bool bHasAcceleration = !AccelDirection.IsNearlyZero();
+	const FVector InputDirection = Acceleration.GetSafeNormal2D();
+	const bool bHasInput = !InputDirection.IsNearlyZero();
+	const FVector DesiredDirection = ComputeDesiredSteerDirection2D(bHasInput, InputDirection);
 
 	FVector HorizontalVelocity = FVector(Velocity.X, Velocity.Y, 0.0f);
 	const float MaxSpeed = GetMaxSpeed();
@@ -204,7 +254,7 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		if (InitialSpeed > KINDA_SMALL_NUMBER)
 		{
 			// Keep steering crisp while input is held; apply stronger stop friction only on release.
-			const float Control = bHasAcceleration ? InitialSpeed : FMath::Max(InitialSpeed, GroundBrakingDeceleration);
+			const float Control = bHasInput ? InitialSpeed : FMath::Max(InitialSpeed, GroundBrakingDeceleration);
 			const float Drop = Control * GroundFrictionAmount * DeltaTime;
 			const float NewSpeed = FMath::Max(InitialSpeed - Drop, 0.0f);
 			if (NewSpeed != InitialSpeed)
@@ -213,42 +263,24 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 			}
 		}
 
-		if (bHasAcceleration)
+		if (bHasInput)
 		{
-			const float CurrentSpeedAlongWishDir = FVector::DotProduct(HorizontalVelocity, AccelDirection);
+			const float CurrentSpeedAlongWishDir = FVector::DotProduct(HorizontalVelocity, DesiredDirection);
 			const float AdditionalSpeed = MaxSpeed - CurrentSpeedAlongWishDir;
 			if (AdditionalSpeed > 0.0f)
 			{
 				const float AccelStep = GroundAcceleration * DeltaTime;
-				HorizontalVelocity += AccelDirection * FMath::Min(AdditionalSpeed, AccelStep);
+				HorizontalVelocity += DesiredDirection * FMath::Min(AdditionalSpeed, AccelStep);
 			}
 		}
+
+		ApplySteeringAndReverseBleed(HorizontalVelocity, DesiredDirection, bHasInput, false, DeltaTime);
 
 		const float HorizontalSpeed = HorizontalVelocity.Size();
 		const float HardCap = FMath::Max(MaxSpeed, BunnyHopSpeedCapCmPerSec);
 		if (HorizontalSpeed > HardCap && HorizontalSpeed > KINDA_SMALL_NUMBER)
 		{
 			HorizontalVelocity *= (HardCap / HorizontalSpeed);
-		}
-
-		const float NormalMoveSpeed = FMath::Max(0.0f, WalkSpeedCmPerSec);
-		const float CurrentSpeed = HorizontalVelocity.Size();
-		if (NormalMoveSpeed > 0.0f && CurrentSpeed > (NormalMoveSpeed + KINDA_SMALL_NUMBER))
-		{
-			const float ExcessSpeed = CurrentSpeed - NormalMoveSpeed;
-			FVector BaseDirection = bHasAcceleration ? AccelDirection : HorizontalVelocity.GetSafeNormal2D();
-			if (BaseDirection.IsNearlyZero())
-			{
-				BaseDirection = GetFacingDirection2D();
-			}
-			const FVector ExcessDirection = BlendWithFacingDirection(BaseDirection);
-			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (ExcessDirection * ExcessSpeed);
-			const float RecombinedSpeed = RecombinedVelocity.Size();
-			if (RecombinedSpeed > CurrentSpeed && RecombinedSpeed > KINDA_SMALL_NUMBER)
-			{
-				RecombinedVelocity *= (CurrentSpeed / RecombinedSpeed);
-			}
-			HorizontalVelocity = RecombinedVelocity;
 		}
 
 		Velocity.X = HorizontalVelocity.X;
@@ -258,7 +290,7 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 
 	if (IsFalling())
 	{
-		if (bHasAcceleration)
+		if (bHasInput)
 		{
 			const float CurrentSpeed = HorizontalVelocity.Size();
 			if (CurrentSpeed < FMath::Max(0.0f, AirInputKickStartThresholdCmPerSec))
@@ -267,66 +299,28 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 					FMath::Max(0.0f, AirInputKickStartSpeedCmPerSec),
 					0.0f,
 					FMath::Max(0.0f, AirSpeedCapCmPerSec));
-				HorizontalVelocity = AccelDirection * FMath::Max(CurrentSpeed, KickStartSpeed);
+				HorizontalVelocity = DesiredDirection * FMath::Max(CurrentSpeed, KickStartSpeed);
 			}
 		}
 
-		if (bHasAcceleration)
+		if (bHasInput)
 		{
-			const float InitialSpeed = HorizontalVelocity.Size();
-			if (InitialSpeed > KINDA_SMALL_NUMBER)
-			{
-				const FVector VelocityDirection = HorizontalVelocity / InitialSpeed;
-				const float AlignmentWithInput = FVector::DotProduct(VelocityDirection, AccelDirection);
-				if (AlignmentWithInput < 0.0f)
-				{
-					const float OppositeBrakeAmount = FMath::Max(0.0f, AirOppositeInputBrakeDecelerationCmPerSec2)
-						* (-AlignmentWithInput)
-						* DeltaTime;
-					const float NewSpeed = FMath::Max(0.0f, InitialSpeed - OppositeBrakeAmount);
-					if (NewSpeed != InitialSpeed)
-					{
-						HorizontalVelocity *= (NewSpeed / InitialSpeed);
-					}
-				}
-			}
-		}
-
-		if (bHasAcceleration)
-		{
-			const float CurrentSpeedAlongWishDir = FVector::DotProduct(HorizontalVelocity, AccelDirection);
+			const float CurrentSpeedAlongWishDir = FVector::DotProduct(HorizontalVelocity, DesiredDirection);
 			const float AdditionalSpeed = AirSpeedCapCmPerSec - CurrentSpeedAlongWishDir;
 			if (AdditionalSpeed > 0.0f)
 			{
-				const float AccelStep = AirAcceleration * DeltaTime;
-				HorizontalVelocity += AccelDirection * FMath::Min(AdditionalSpeed, AccelStep);
+				const float AirAccelScale = FMath::Clamp(AirInputAccelerationScale, 0.0f, 1.0f);
+				const float AccelStep = AirAcceleration * AirAccelScale * DeltaTime;
+				HorizontalVelocity += DesiredDirection * FMath::Min(AdditionalSpeed, AccelStep);
 			}
 		}
+
+		ApplySteeringAndReverseBleed(HorizontalVelocity, DesiredDirection, bHasInput, true, DeltaTime);
 
 		const float HorizontalSpeed = HorizontalVelocity.Size();
 		if (HorizontalSpeed > BunnyHopSpeedCapCmPerSec && HorizontalSpeed > KINDA_SMALL_NUMBER)
 		{
 			HorizontalVelocity *= (BunnyHopSpeedCapCmPerSec / HorizontalSpeed);
-		}
-
-		const float NormalMoveSpeed = FMath::Max(0.0f, WalkSpeedCmPerSec);
-		const float CurrentSpeed = HorizontalVelocity.Size();
-		if (NormalMoveSpeed > 0.0f && CurrentSpeed > (NormalMoveSpeed + KINDA_SMALL_NUMBER))
-		{
-			const float ExcessSpeed = CurrentSpeed - NormalMoveSpeed;
-			FVector BaseDirection = bHasAcceleration ? AccelDirection : HorizontalVelocity.GetSafeNormal2D();
-			if (BaseDirection.IsNearlyZero())
-			{
-				BaseDirection = GetFacingDirection2D();
-			}
-			const FVector ExcessDirection = BlendWithFacingDirection(BaseDirection, CrosshairInfluenceOnMomentumAir);
-			FVector RecombinedVelocity = (BaseDirection * NormalMoveSpeed) + (ExcessDirection * ExcessSpeed);
-			const float RecombinedSpeed = RecombinedVelocity.Size();
-			if (RecombinedSpeed > CurrentSpeed && RecombinedSpeed > KINDA_SMALL_NUMBER)
-			{
-				RecombinedVelocity *= (CurrentSpeed / RecombinedSpeed);
-			}
-			HorizontalVelocity = RecombinedVelocity;
 		}
 
 		Velocity.X = HorizontalVelocity.X;
@@ -386,6 +380,108 @@ void UGGMovementComponent::ArmCrouchHopWindow(float CurrentTimeSeconds)
 	}
 
 	BoostJumpWindowEndTimeSeconds = CurrentTimeSeconds + FMath::Max(0.01f, CrouchHopPostLandJumpWindowSeconds);
+}
+
+FVector UGGMovementComponent::ComputeDesiredSteerDirection2D(bool bHasInput, const FVector& InputDir) const
+{
+	if (bHasInput && !InputDir.IsNearlyZero())
+	{
+		// Active key input always defines desired travel direction.
+		return InputDir.GetSafeNormal2D();
+	}
+
+	FVector FacingDir = GetFacingDirection2D();
+	if (FacingDir.IsNearlyZero())
+	{
+		FacingDir = FVector(Velocity.X, Velocity.Y, 0.0f).GetSafeNormal2D();
+	}
+
+	if (!FacingDir.IsNearlyZero())
+	{
+		return FacingDir.GetSafeNormal2D();
+	}
+
+	FVector VelocityDir = FVector(Velocity.X, Velocity.Y, 0.0f).GetSafeNormal2D();
+	if (!VelocityDir.IsNearlyZero())
+	{
+		return VelocityDir;
+	}
+
+	if (bHasInput && !InputDir.IsNearlyZero())
+	{
+		return InputDir;
+	}
+
+	return FVector::ForwardVector;
+}
+
+void UGGMovementComponent::ApplySteeringAndReverseBleed(
+	FVector& HorizontalVelocity,
+	const FVector& DesiredDir,
+	bool bHasInput,
+	bool bIsAir,
+	float DeltaTime) const
+{
+	if (DeltaTime <= 0.0f)
+	{
+		return;
+	}
+
+	const FVector SafeDesiredDir = DesiredDir.GetSafeNormal2D();
+	if (SafeDesiredDir.IsNearlyZero())
+	{
+		return;
+	}
+
+	float Speed = HorizontalVelocity.Size();
+	FVector CurrentDir = Speed > KINDA_SMALL_NUMBER ? (HorizontalVelocity / Speed) : SafeDesiredDir;
+
+	if (Speed <= KINDA_SMALL_NUMBER)
+	{
+		HorizontalVelocity = FVector::ZeroVector;
+		return;
+	}
+
+	float Responsiveness = bIsAir ? SteerResponsivenessAir : SteerResponsivenessGround;
+	if (!bHasInput)
+	{
+		Responsiveness *= FMath::Clamp(LookOnlySteerMultiplier, 0.0f, 1.0f);
+		Responsiveness = FMath::Max(0.0f, Responsiveness);
+
+		const float Alpha = FMath::Clamp(1.0f - FMath::Exp(-Responsiveness * DeltaTime), 0.0f, 1.0f);
+		FVector SteeredDir = FMath::Lerp(CurrentDir, SafeDesiredDir, Alpha);
+		if (SteeredDir.IsNearlyZero())
+		{
+			SteeredDir = SafeDesiredDir;
+		}
+		HorizontalVelocity = SteeredDir.GetSafeNormal2D() * Speed;
+		return;
+	}
+	Responsiveness = FMath::Max(0.0f, Responsiveness);
+
+	// Input-active steering: decompose momentum into desired-axis and perpendicular parts.
+	// This prevents "press back but drift left" artifacts while keeping smooth air steering.
+	float ParallelSpeed = FVector::DotProduct(HorizontalVelocity, SafeDesiredDir);
+	FVector PerpendicularVelocity = HorizontalVelocity - (SafeDesiredDir * ParallelSpeed);
+
+	const float PerpendicularDecay = FMath::Exp(-Responsiveness * DeltaTime);
+	PerpendicularVelocity *= PerpendicularDecay;
+
+	if (ParallelSpeed < 0.0f)
+	{
+		float BrakeRate = FMath::Max(0.0f, ReverseInputBleedCmPerSec);
+		if (bIsAir)
+		{
+			BrakeRate += FMath::Max(0.0f, AirOppositeInputBrakeDecelerationCmPerSec2);
+		}
+		else
+		{
+			BrakeRate += FMath::Max(0.0f, GroundBrakingDeceleration * 0.5f);
+		}
+		ParallelSpeed = FMath::Min(0.0f, ParallelSpeed + (BrakeRate * DeltaTime));
+	}
+
+	HorizontalVelocity = PerpendicularVelocity + (SafeDesiredDir * ParallelSpeed);
 }
 
 FVector UGGMovementComponent::ResolveBoostDirection(const FVector& HorizontalVelocity) const
@@ -451,30 +547,4 @@ FVector UGGMovementComponent::GetFacingDirection2D() const
 	}
 
 	return FVector::ForwardVector;
-}
-
-FVector UGGMovementComponent::BlendWithFacingDirection(const FVector& BaseDirection, float FacingWeightOverride) const
-{
-	FVector InputDir = BaseDirection.GetSafeNormal2D();
-	FVector FacingDir = GetFacingDirection2D();
-	if (FacingDir.IsNearlyZero())
-	{
-		FacingDir = InputDir;
-	}
-
-	if (InputDir.IsNearlyZero())
-	{
-		return FacingDir;
-	}
-
-	const float FacingWeight = FMath::Clamp(
-		FacingWeightOverride >= 0.0f ? FacingWeightOverride : CrosshairInfluenceOnMomentum,
-		0.0f,
-		1.0f);
-	FVector BlendedDirection = (InputDir * (1.0f - FacingWeight)) + (FacingDir * FacingWeight);
-	if (BlendedDirection.IsNearlyZero())
-	{
-		BlendedDirection = InputDir;
-	}
-	return BlendedDirection.GetSafeNormal2D();
 }

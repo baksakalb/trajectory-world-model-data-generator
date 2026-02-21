@@ -39,6 +39,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float AirInputKickStartThresholdCmPerSec = 120.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AirInputAccelerationScale = 0.22f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Jump", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float JumpVelocityCmPerSec = 570.0f;
 
@@ -63,11 +66,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float CrouchHopSpeedCapCmPerSec = 2100.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CrosshairInfluenceOnMomentum = 0.75f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CrouchHopRedirectStrength = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0"))
+	float SteerResponsivenessGround = 18.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0"))
+	float SteerResponsivenessAir = 8.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CrosshairInfluenceOnMomentumAir = 0.25f;
+	float LookOnlySteerMultiplier = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Steering", meta = (ClampMin = "0.0", Units = "cm/s"))
+	float ReverseInputBleedCmPerSec = 500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float CrouchHopChainAdditiveIncrementCmPerSec = 70.0f;
@@ -99,6 +111,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Movement")
 	bool TryConsumeCrouchJumpBoost();
 
+	UFUNCTION(BlueprintCallable, Category = "Movement|Crouch Hop")
+	void CancelCrouchHopChain();
+
+	UFUNCTION(BlueprintPure, Category = "Movement|Crouch Hop")
+	bool IsCrouchHopChainActive() const;
+
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool IsCrouchHopFeedbackActive() const;
 
@@ -116,6 +134,7 @@ public:
 
 	virtual float GetMaxSpeed() const override;
 	virtual bool CanCrouchInCurrentState() const override;
+	virtual FVector GetFallingLateralAcceleration(float DeltaTime) override;
 	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
 	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode = 0) override;
 
@@ -132,6 +151,7 @@ private:
 	bool IsWithinWindow(float CurrentTimeSeconds, float EventTimeSeconds, float WindowSeconds) const;
 	void ArmCrouchHopWindow(float CurrentTimeSeconds);
 	FVector GetFacingDirection2D() const;
-	FVector BlendWithFacingDirection(const FVector& BaseDirection, float FacingWeightOverride = -1.0f) const;
+	FVector ComputeDesiredSteerDirection2D(bool bHasInput, const FVector& InputDir) const;
+	void ApplySteeringAndReverseBleed(FVector& HorizontalVelocity, const FVector& DesiredDir, bool bHasInput, bool bIsAir, float DeltaTime) const;
 	FVector ResolveBoostDirection(const FVector& HorizontalVelocity) const;
 };

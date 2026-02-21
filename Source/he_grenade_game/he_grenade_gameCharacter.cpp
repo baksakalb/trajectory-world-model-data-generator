@@ -150,6 +150,19 @@ void Ahe_grenade_gameCharacter::DoAim(float Yaw, float Pitch)
 
 void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
 {
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		if (MovementComponent->IsCrouchHopChainActive())
+		{
+			constexpr float HopBreakAxisThreshold = 0.2f;
+			const bool bHopBreakInput = FMath::Abs(Right) > HopBreakAxisThreshold || Forward < -HopBreakAxisThreshold;
+			if (bHopBreakInput)
+			{
+				MovementComponent->CancelCrouchHopChain();
+			}
+		}
+	}
+
 	if (GetController())
 	{
 		AddMovementInput(GetActorRightVector(), Right);
@@ -200,6 +213,11 @@ void Ahe_grenade_gameCharacter::DoThrowReleased()
 
 void Ahe_grenade_gameCharacter::DoTrajectoryHeightStart()
 {
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		MovementComponent->CancelCrouchHopChain();
+	}
+
 	if (GrenadeThrowerComponent)
 	{
 		GrenadeThrowerComponent->SetControlArcRaiseInputActive(true);
@@ -217,6 +235,11 @@ void Ahe_grenade_gameCharacter::DoTrajectoryHeightEnd()
 void Ahe_grenade_gameCharacter::DoAimStart()
 {
 	bAimModeActive = true;
+
+	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
+	{
+		MovementComponent->CancelCrouchHopChain();
+	}
 
 	if (GrenadeThrowerComponent)
 	{
