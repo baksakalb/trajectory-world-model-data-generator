@@ -290,6 +290,14 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 
 	if (IsFalling())
 	{
+		const bool bHopAirSpeedAllowed = IsCrouchHopChainActive();
+		const float NonHopAirSpeedCap = FMath::Max(
+			0.0f,
+			GetMaxSpeed() * FMath::Clamp(NonHopAirSpeedCapRunSpeedScalar, 0.0f, 1.0f));
+		const float ActiveAirSpeedCap = bHopAirSpeedAllowed
+			? FMath::Max(0.0f, AirSpeedCapCmPerSec)
+			: NonHopAirSpeedCap;
+
 		if (bHasInput)
 		{
 			const float CurrentSpeed = HorizontalVelocity.Size();
@@ -298,7 +306,7 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 				const float KickStartSpeed = FMath::Clamp(
 					FMath::Max(0.0f, AirInputKickStartSpeedCmPerSec),
 					0.0f,
-					FMath::Max(0.0f, AirSpeedCapCmPerSec));
+					ActiveAirSpeedCap);
 				HorizontalVelocity = DesiredDirection * FMath::Max(CurrentSpeed, KickStartSpeed);
 			}
 		}
@@ -306,7 +314,7 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		if (bHasInput)
 		{
 			const float CurrentSpeedAlongWishDir = FVector::DotProduct(HorizontalVelocity, DesiredDirection);
-			const float AdditionalSpeed = AirSpeedCapCmPerSec - CurrentSpeedAlongWishDir;
+			const float AdditionalSpeed = ActiveAirSpeedCap - CurrentSpeedAlongWishDir;
 			if (AdditionalSpeed > 0.0f)
 			{
 				const float AirAccelScale = FMath::Clamp(AirInputAccelerationScale, 0.0f, 1.0f);
@@ -317,8 +325,14 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 
 		ApplySteeringAndReverseBleed(HorizontalVelocity, DesiredDirection, bHasInput, true, DeltaTime);
 
+		const float SpeedAfterSteer = HorizontalVelocity.Size();
+		if (ActiveAirSpeedCap > 0.0f && SpeedAfterSteer > ActiveAirSpeedCap && SpeedAfterSteer > KINDA_SMALL_NUMBER)
+		{
+			HorizontalVelocity *= (ActiveAirSpeedCap / SpeedAfterSteer);
+		}
+
 		const float HorizontalSpeed = HorizontalVelocity.Size();
-		if (HorizontalSpeed > BunnyHopSpeedCapCmPerSec && HorizontalSpeed > KINDA_SMALL_NUMBER)
+		if (BunnyHopSpeedCapCmPerSec > 0.0f && HorizontalSpeed > BunnyHopSpeedCapCmPerSec && HorizontalSpeed > KINDA_SMALL_NUMBER)
 		{
 			HorizontalVelocity *= (BunnyHopSpeedCapCmPerSec / HorizontalSpeed);
 		}

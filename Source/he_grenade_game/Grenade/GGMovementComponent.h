@@ -30,6 +30,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s"))
 	float AirSpeedCapCmPerSec = 1500.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float NonHopAirSpeedCapRunSpeedScalar = 0.75f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", Units = "cm/s^2"))
 	float AirOppositeInputBrakeDecelerationCmPerSec2 = 2600.0f;
 
@@ -40,13 +43,13 @@ public:
 	float AirInputKickStartThresholdCmPerSec = 120.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Air", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float AirInputAccelerationScale = 0.22f;
+	float AirInputAccelerationScale = 0.18f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Jump", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float JumpVelocityCmPerSec = 570.0f;
+	float JumpVelocityCmPerSec = 550.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Jump", meta = (ClampMin = "0.1"))
-	float JumpGravityScale = 2.2f;
+	float JumpGravityScale = 2.3f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.01", Units = "s"))
 	float CrouchHopLandingQualifyWindowSeconds = 0.45f;
@@ -82,7 +85,7 @@ public:
 	float ReverseInputBleedCmPerSec = 500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float CrouchHopChainAdditiveIncrementCmPerSec = 70.0f;
+	float CrouchHopChainAdditiveIncrementCmPerSec = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement|Crouch Hop", meta = (ClampMin = "0.01", Units = "s"))
 	float CrouchHopChainWindowSeconds = 1.2f;
