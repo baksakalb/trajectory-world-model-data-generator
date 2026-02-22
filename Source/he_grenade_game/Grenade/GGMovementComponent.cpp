@@ -96,12 +96,9 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 	{
 		NextChainCount = CrouchHopChainCount + 1;
 	}
-	const float ChainAdditiveBonus = FMath::Max(0, NextChainCount - 1) * FMath::Max(0.0f, CrouchHopChainAdditiveIncrementCmPerSec);
-	const float ScalarBoostSpeed = CurrentSpeedCmPerSec * FMath::Max(1.0f, CrouchHopBoostSpeedScalar);
-	const float AdditiveBoostSpeed = CurrentSpeedCmPerSec
-		+ FMath::Max(0.0f, CrouchHopBoostAdditiveCmPerSec)
-		+ ChainAdditiveBonus;
-	float DesiredBoostSpeedCmPerSec = FMath::Max(ScalarBoostSpeed, AdditiveBoostSpeed);
+	const int32 HopStepIndex = FMath::Max(0, NextChainCount - 1);
+	float DesiredBoostSpeedCmPerSec = FMath::Max(0.0f, WalkSpeedCmPerSec)
+		+ (FMath::Max(0.0f, CrouchHopChainAdditiveIncrementCmPerSec) * HopStepIndex);
 
 	const float HardCapCmPerSec = FMath::Max(
 		0.0f,
@@ -111,9 +108,8 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 		DesiredBoostSpeedCmPerSec = FMath::Min(DesiredBoostSpeedCmPerSec, HardCapCmPerSec);
 	}
 
-	// Preserve momentum on hop redirects: even a full reverse redirect keeps at least current speed.
-	const float TargetSpeedCmPerSec = FMath::Max(CurrentSpeedCmPerSec, DesiredBoostSpeedCmPerSec);
-	const float AddedBoostSpeedCmPerSec = FMath::Max(0.0f, TargetSpeedCmPerSec - CurrentSpeedCmPerSec);
+	const float TargetSpeedCmPerSec = DesiredBoostSpeedCmPerSec;
+	const float AddedBoostSpeedCmPerSec = TargetSpeedCmPerSec - CurrentSpeedCmPerSec;
 	FVector BaseBoostDirection = Acceleration.GetSafeNormal2D();
 	if (BaseBoostDirection.IsNearlyZero())
 	{
@@ -277,8 +273,12 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		ApplySteeringAndReverseBleed(HorizontalVelocity, DesiredDirection, bHasInput, false, DeltaTime);
 
 		const float HorizontalSpeed = HorizontalVelocity.Size();
-		const float HardCap = FMath::Max(MaxSpeed, BunnyHopSpeedCapCmPerSec);
-		if (HorizontalSpeed > HardCap && HorizontalSpeed > KINDA_SMALL_NUMBER)
+		const bool bHopChainGroundActive = IsCrouchHopChainActive();
+		const float GroundHopHardCap = bHopChainGroundActive && CrouchHopSpeedCapCmPerSec > 0.0f
+			? CrouchHopSpeedCapCmPerSec
+			: BunnyHopSpeedCapCmPerSec;
+		const float HardCap = FMath::Max(MaxSpeed, GroundHopHardCap);
+		if (HardCap > 0.0f && HorizontalSpeed > HardCap && HorizontalSpeed > KINDA_SMALL_NUMBER)
 		{
 			HorizontalVelocity *= (HardCap / HorizontalSpeed);
 		}
@@ -291,11 +291,18 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 	if (IsFalling())
 	{
 		const bool bHopAirSpeedAllowed = IsCrouchHopChainActive();
+		const int32 ActiveHopCount = bHopAirSpeedAllowed ? FMath::Max(1, GetCrouchHopChainCount()) : 0;
 		const float NonHopAirSpeedCap = FMath::Max(
 			0.0f,
 			GetMaxSpeed() * FMath::Clamp(NonHopAirSpeedCapRunSpeedScalar, 0.0f, 1.0f));
+		const float HopLadderSpeedCap = FMath::Max(0.0f, WalkSpeedCmPerSec)
+			+ (FMath::Max(0.0f, CrouchHopChainAdditiveIncrementCmPerSec) * FMath::Max(0, ActiveHopCount - 1));
+		const float HopHardCap = FMath::Max(
+			0.0f,
+			CrouchHopSpeedCapCmPerSec > 0.0f ? CrouchHopSpeedCapCmPerSec : BunnyHopSpeedCapCmPerSec);
+		const float HopAirSpeedCap = HopHardCap > 0.0f ? FMath::Min(HopLadderSpeedCap, HopHardCap) : HopLadderSpeedCap;
 		const float ActiveAirSpeedCap = bHopAirSpeedAllowed
-			? FMath::Max(0.0f, AirSpeedCapCmPerSec)
+			? HopAirSpeedCap
 			: NonHopAirSpeedCap;
 
 		if (bHasInput)
@@ -332,9 +339,12 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		}
 
 		const float HorizontalSpeed = HorizontalVelocity.Size();
-		if (BunnyHopSpeedCapCmPerSec > 0.0f && HorizontalSpeed > BunnyHopSpeedCapCmPerSec && HorizontalSpeed > KINDA_SMALL_NUMBER)
+		const float FinalAirHardCap = bHopAirSpeedAllowed && CrouchHopSpeedCapCmPerSec > 0.0f
+			? CrouchHopSpeedCapCmPerSec
+			: BunnyHopSpeedCapCmPerSec;
+		if (FinalAirHardCap > 0.0f && HorizontalSpeed > FinalAirHardCap && HorizontalSpeed > KINDA_SMALL_NUMBER)
 		{
-			HorizontalVelocity *= (BunnyHopSpeedCapCmPerSec / HorizontalSpeed);
+			HorizontalVelocity *= (FinalAirHardCap / HorizontalSpeed);
 		}
 
 		Velocity.X = HorizontalVelocity.X;
