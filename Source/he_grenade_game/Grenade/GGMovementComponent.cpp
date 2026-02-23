@@ -326,7 +326,9 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		const float GroundHopHardCap = bHopChainGroundActive && CrouchHopSpeedCapCmPerSec > 0.0f
 			? CrouchHopSpeedCapCmPerSec
 			: BunnyHopSpeedCapCmPerSec;
-		const float HardCap = FMath::Max(MaxSpeed, GroundHopHardCap);
+		const float HardCap = bHopChainGroundActive
+			? FMath::Max(MaxSpeed, GroundHopHardCap)
+			: MaxSpeed;
 		if (HardCap > 0.0f && HorizontalSpeed > HardCap && HorizontalSpeed > KINDA_SMALL_NUMBER)
 		{
 			HorizontalVelocity *= (HardCap / HorizontalSpeed);
