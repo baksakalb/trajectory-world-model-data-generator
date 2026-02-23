@@ -108,8 +108,9 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 		DesiredBoostSpeedCmPerSec = FMath::Min(DesiredBoostSpeedCmPerSec, HardCapCmPerSec);
 	}
 
-	const float TargetSpeedCmPerSec = DesiredBoostSpeedCmPerSec;
-	const float AddedBoostSpeedCmPerSec = TargetSpeedCmPerSec - CurrentSpeedCmPerSec;
+	// Hop consume can add speed, but should never reduce existing momentum.
+	const float TargetSpeedCmPerSec = FMath::Max(CurrentSpeedCmPerSec, DesiredBoostSpeedCmPerSec);
+	const float AddedBoostSpeedCmPerSec = FMath::Max(0.0f, TargetSpeedCmPerSec - CurrentSpeedCmPerSec);
 	FVector BaseBoostDirection = Acceleration.GetSafeNormal2D();
 	if (BaseBoostDirection.IsNearlyZero())
 	{
