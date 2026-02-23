@@ -125,7 +125,6 @@ protected:
 
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 
-	void UpdateMovementStates();
 	void RefreshCrouchFromInput();
 	void UpdateCrouchCamera(float DeltaSeconds);
 	UGGMovementComponent* GetGGMovementComponent() const;

@@ -192,11 +192,6 @@ float UGGMovementComponent::GetMaxSpeed() const
 {
 	float MaxSpeedCmPerSec = WalkSpeedCmPerSec;
 
-	if (bAimMode)
-	{
-		MaxSpeedCmPerSec *= AimWalkSpeedScalar;
-	}
-
 	if (IsCrouching())
 	{
 		MaxSpeedCmPerSec *= CrouchSpeedScalar;

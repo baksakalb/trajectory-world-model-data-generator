@@ -236,11 +236,6 @@ void Ahe_grenade_gameCharacter::DoAimStart()
 {
 	bAimModeActive = true;
 
-	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
-	{
-		MovementComponent->CancelCrouchHopChain();
-	}
-
 	if (GrenadeThrowerComponent)
 	{
 		GrenadeThrowerComponent->SetAimModeActive(true);
@@ -249,8 +244,6 @@ void Ahe_grenade_gameCharacter::DoAimStart()
 	{
 		GrenadeTrajectoryComponent->SetAimModeActive(true);
 	}
-
-	UpdateMovementStates();
 }
 
 void Ahe_grenade_gameCharacter::DoAimEnd()
@@ -265,8 +258,6 @@ void Ahe_grenade_gameCharacter::DoAimEnd()
 	{
 		GrenadeTrajectoryComponent->SetAimModeActive(false);
 	}
-
-	UpdateMovementStates();
 }
 
 void Ahe_grenade_gameCharacter::DoCrouchStart()
@@ -279,7 +270,6 @@ void Ahe_grenade_gameCharacter::DoCrouchStart()
 	}
 
 	RefreshCrouchFromInput();
-	UpdateMovementStates();
 }
 
 void Ahe_grenade_gameCharacter::DoCrouchEnd()
@@ -292,7 +282,6 @@ void Ahe_grenade_gameCharacter::DoCrouchEnd()
 	}
 
 	RefreshCrouchFromInput();
-	UpdateMovementStates();
 }
 
 void Ahe_grenade_gameCharacter::FellOutOfWorld(const UDamageType& DmgType)
@@ -306,14 +295,6 @@ void Ahe_grenade_gameCharacter::FellOutOfWorld(const UDamageType& DmgType)
 		{
 			GameMode->RestartPlayer(PawnController);
 		}
-	}
-}
-
-void Ahe_grenade_gameCharacter::UpdateMovementStates()
-{
-	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
-	{
-		MovementComponent->SetAimMode(bAimModeActive);
 	}
 }
 
