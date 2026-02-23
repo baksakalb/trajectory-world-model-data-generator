@@ -54,6 +54,7 @@ void UGrenadeThrowerComponent::BeginPlay()
 	FuseSeconds = FMath::Max(0.1f, FuseSeconds);
 
 	bThrowInputHeld = false;
+	bBufferedThrowPress = false;
 	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
@@ -85,6 +86,7 @@ void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	bThrowInputHeld = false;
+	bBufferedThrowPress = false;
 	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
@@ -121,11 +123,29 @@ void UGrenadeThrowerComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
 void UGrenadeThrowerComponent::OnThrowPressed()
 {
+	if (bThrowInputHeld)
+	{
+		return;
+	}
+
+	if (ThrowState != EGrenadeThrowState::Ready)
+	{
+		// Buffer press while cooling down; hold will auto-start once state becomes Ready.
+		bBufferedThrowPress = true;
+		return;
+	}
+
+	BeginThrowHold();
+}
+
+void UGrenadeThrowerComponent::BeginThrowHold()
+{
 	if (ThrowState != EGrenadeThrowState::Ready || bThrowInputHeld)
 	{
 		return;
 	}
 
+	bBufferedThrowPress = false;
 	bThrowInputHeld = true;
 	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
@@ -152,6 +172,8 @@ void UGrenadeThrowerComponent::OnThrowPressed()
 
 void UGrenadeThrowerComponent::OnThrowReleased()
 {
+	bBufferedThrowPress = false;
+
 	if (!bThrowInputHeld)
 	{
 		return;
@@ -195,6 +217,7 @@ void UGrenadeThrowerComponent::OnThrowReleased()
 	}
 
 	bThrowInputHeld = false;
+	bBufferedThrowPress = false;
 	bControlArcRaiseInputHeld = false;
 	bDetonatedInHandThisHold = false;
 	bHasHeldLaunchSnapshot = false;
@@ -403,6 +426,11 @@ void UGrenadeThrowerComponent::SetThrowState(EGrenadeThrowState NewState)
 	{
 		UE_LOG(LogTemp, Log, TEXT("Grenade throw state changed: %d"), static_cast<int32>(ThrowState));
 	}
+
+	if (ThrowState == EGrenadeThrowState::Ready && bBufferedThrowPress && !bThrowInputHeld)
+	{
+		BeginThrowHold();
+	}
 }
 
 void UGrenadeThrowerComponent::DetonateInHand()
@@ -451,6 +479,7 @@ void UGrenadeThrowerComponent::DetonateInHand()
 
 	bDetonatedInHandThisHold = true;
 	bThrowInputHeld = false;
+	bBufferedThrowPress = false;
 	bControlArcRaiseInputHeld = false;
 	bHasHeldLaunchSnapshot = false;
 	HoldStartWorldTimeSeconds = 0.0f;

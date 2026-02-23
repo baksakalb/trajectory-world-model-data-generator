@@ -135,6 +135,7 @@ protected:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
+	void BeginThrowHold();
 	void TryThrowGrenade(const FGrenadeLaunchParams* LaunchParamsOverride = nullptr);
 	void EnterCooldown();
 	void ExitCooldown();
@@ -152,6 +153,7 @@ private:
 
 	EGrenadeThrowState ThrowState = EGrenadeThrowState::Ready;
 	bool bThrowInputHeld = false;
+	bool bBufferedThrowPress = false;
 	bool bAimModeActive = false;
 	bool bControlArcRaiseInputHeld = false;
 	bool bDetonatedInHandThisHold = false;
