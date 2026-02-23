@@ -44,6 +44,7 @@ void UGGMovementComponent::CancelCrouchHopChain()
 	CrouchHopChainCount = 0;
 	LastCrouchHopTimeSeconds = -1.0f;
 	BoostJumpWindowEndTimeSeconds = -1.0f;
+	CrouchHopProtectedSpeedFloorCmPerSec = -1.0f;
 }
 
 bool UGGMovementComponent::IsCrouchHopChainActive() const
@@ -145,6 +146,7 @@ bool UGGMovementComponent::TryConsumeCrouchJumpBoost()
 	Velocity.Y = BoostedHorizontalVelocity.Y;
 	LastCrouchHopTimeSeconds = CurrentTimeSeconds;
 	CrouchHopChainCount = NextChainCount;
+	CrouchHopProtectedSpeedFloorCmPerSec = FMath::Max(CrouchHopProtectedSpeedFloorCmPerSec, TargetSpeedCmPerSec);
 	BoostJumpWindowEndTimeSeconds = -1.0f;
 	return true;
 }
@@ -244,6 +246,57 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 
 	FVector HorizontalVelocity = FVector(Velocity.X, Velocity.Y, 0.0f);
 	const float MaxSpeed = GetMaxSpeed();
+	UWorld* World = GetWorld();
+	const float CurrentTimeSeconds = World ? World->GetTimeSeconds() : 0.0f;
+
+	if (IsMovingOnGround() && BoostJumpWindowEndTimeSeconds >= 0.0f && CurrentTimeSeconds > BoostJumpWindowEndTimeSeconds)
+	{
+		// Missing the post-land jump window breaks the hop chain and releases speed protection.
+		CancelCrouchHopChain();
+	}
+
+	const bool bBoostWindowActive = BoostJumpWindowEndTimeSeconds >= 0.0f && CurrentTimeSeconds <= BoostJumpWindowEndTimeSeconds;
+	const bool bHopSpeedProtectionActive = IsCrouchHopChainActive() || bBoostWindowActive;
+	if (!bHopSpeedProtectionActive)
+	{
+		CrouchHopProtectedSpeedFloorCmPerSec = -1.0f;
+	}
+
+	const auto ApplyHopSpeedFloor = [&](FVector& InOutHorizontalVelocity, float ModeSpeedCapCmPerSec)
+	{
+		if (!bHopSpeedProtectionActive || CrouchHopProtectedSpeedFloorCmPerSec <= 0.0f)
+		{
+			return;
+		}
+
+		float ProtectedSpeedFloor = CrouchHopProtectedSpeedFloorCmPerSec;
+		if (ModeSpeedCapCmPerSec > 0.0f)
+		{
+			ProtectedSpeedFloor = FMath::Min(ProtectedSpeedFloor, ModeSpeedCapCmPerSec);
+		}
+
+		const float CurrentHorizontalSpeed = InOutHorizontalVelocity.Size();
+		if (CurrentHorizontalSpeed + KINDA_SMALL_NUMBER >= ProtectedSpeedFloor)
+		{
+			return;
+		}
+
+		FVector FloorDirection = InOutHorizontalVelocity.GetSafeNormal2D();
+		if (FloorDirection.IsNearlyZero())
+		{
+			FloorDirection = DesiredDirection.GetSafeNormal2D();
+		}
+		if (FloorDirection.IsNearlyZero())
+		{
+			FloorDirection = GetFacingDirection2D();
+		}
+		if (FloorDirection.IsNearlyZero())
+		{
+			FloorDirection = FVector::ForwardVector;
+		}
+
+		InOutHorizontalVelocity = FloorDirection * ProtectedSpeedFloor;
+	};
 
 	if (IsMovingOnGround())
 	{
@@ -283,6 +336,8 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 		{
 			HorizontalVelocity *= (HardCap / HorizontalSpeed);
 		}
+
+		ApplyHopSpeedFloor(HorizontalVelocity, HardCap);
 
 		Velocity.X = HorizontalVelocity.X;
 		Velocity.Y = HorizontalVelocity.Y;
@@ -348,6 +403,8 @@ void UGGMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bF
 			HorizontalVelocity *= (FinalAirHardCap / HorizontalSpeed);
 		}
 
+		ApplyHopSpeedFloor(HorizontalVelocity, ActiveAirSpeedCap);
+
 		Velocity.X = HorizontalVelocity.X;
 		Velocity.Y = HorizontalVelocity.Y;
 	}
@@ -404,6 +461,8 @@ void UGGMovementComponent::ArmCrouchHopWindow(float CurrentTimeSeconds)
 		return;
 	}
 
+	const float BaseProtectedSpeedFloor = FMath::Max(CurrentHorizontalSpeedCmPerSec, FMath::Max(0.0f, WalkSpeedCmPerSec));
+	CrouchHopProtectedSpeedFloorCmPerSec = FMath::Max(CrouchHopProtectedSpeedFloorCmPerSec, BaseProtectedSpeedFloor);
 	BoostJumpWindowEndTimeSeconds = CurrentTimeSeconds + FMath::Max(0.01f, CrouchHopPostLandJumpWindowSeconds);
 }
 

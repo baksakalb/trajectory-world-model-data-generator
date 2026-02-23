@@ -150,6 +150,7 @@ private:
 	float BoostJumpWindowEndTimeSeconds = -1.0f;
 	float LastCrouchHopTimeSeconds = -1.0f;
 	int32 CrouchHopChainCount = 0;
+	float CrouchHopProtectedSpeedFloorCmPerSec = -1.0f;
 
 	bool IsWithinWindow(float CurrentTimeSeconds, float EventTimeSeconds, float WindowSeconds) const;
 	void ArmCrouchHopWindow(float CurrentTimeSeconds);
