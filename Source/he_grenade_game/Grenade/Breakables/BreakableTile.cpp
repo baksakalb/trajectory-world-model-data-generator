@@ -2,15 +2,7 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
-#include "Materials/MaterialInterface.h"
-#include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
-
-namespace
-{
-	const FName BaseColorParameterName(TEXT("BaseColor"));
-	const FName OpacityParameterName(TEXT("Opacity"));
-}
 
 ABreakableTile::ABreakableTile()
 {
@@ -29,19 +21,13 @@ ABreakableTile::ABreakableTile()
 		TileMesh->SetStaticMesh(TileMeshAsset.Object);
 	}
 
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> GlassMat(TEXT("/Game/Materials/M_GlassTile.M_GlassTile"));
-	if (GlassMat.Succeeded())
-	{
-		TileMesh->SetMaterial(0, GlassMat.Object);
-	}
-
 	Tags.AddUnique(TEXT("BreakableTile"));
 }
 
 void ABreakableTile::BeginPlay()
 {
 	Super::BeginPlay();
-	InitializeTileMaterial();
+	ApplyTrajectoryHighlightState();
 
 	if (bStartBroken)
 	{
@@ -99,55 +85,123 @@ void ABreakableTile::SetTrajectoryHighlighted(bool bHighlighted)
 	ApplyTrajectoryHighlightState();
 }
 
-void ABreakableTile::InitializeTileMaterial()
+void ABreakableTile::SetMeshAndTransformStyle(UStaticMesh* InStaticMesh, FRotator InMeshRelativeRotation, FVector InMeshRelativeScale)
 {
 	if (!TileMesh)
 	{
 		return;
 	}
 
-	UMaterialInterface* CurrentMaterial = TileMesh->GetMaterial(0);
-	if (!CurrentMaterial)
+	if (InStaticMesh)
 	{
-		return;
+		TileMesh->SetStaticMesh(InStaticMesh);
 	}
 
-	TileMaterialMID = UMaterialInstanceDynamic::Create(CurrentMaterial, this);
-	if (!TileMaterialMID)
+	if (BaseTileMaterial)
 	{
-		return;
+		ApplyTrajectoryHighlightState();
 	}
 
-	TileMesh->SetMaterial(0, TileMaterialMID);
+	const FVector SafeRelativeScale(
+		FMath::Max(0.01f, InMeshRelativeScale.X),
+		FMath::Max(0.01f, InMeshRelativeScale.Y),
+		FMath::Max(0.01f, InMeshRelativeScale.Z));
 
-	const FLinearColor MaterialBaseColor = TileMaterialMID->K2_GetVectorParameterValue(BaseColorParameterName);
-	if (MaterialBaseColor.R > KINDA_SMALL_NUMBER
-		|| MaterialBaseColor.G > KINDA_SMALL_NUMBER
-		|| MaterialBaseColor.B > KINDA_SMALL_NUMBER
-		|| MaterialBaseColor.A > KINDA_SMALL_NUMBER)
-	{
-		DefaultBaseColor = MaterialBaseColor;
-	}
-
-	const float MaterialOpacity = TileMaterialMID->K2_GetScalarParameterValue(OpacityParameterName);
-	if (MaterialOpacity > KINDA_SMALL_NUMBER)
-	{
-		DefaultOpacity = MaterialOpacity;
-	}
+	TileMesh->SetRelativeRotation(InMeshRelativeRotation);
+	TileMesh->SetRelativeScale3D(SafeRelativeScale);
 
 	ApplyTrajectoryHighlightState();
 }
 
-void ABreakableTile::ApplyTrajectoryHighlightState()
+void ABreakableTile::SetVisualMaterials(
+	UMaterialInterface* InNormalMaterial,
+	UMaterialInterface* InTrajectoryHighlightMaterial)
 {
-	if (!TileMaterialMID)
+	BaseTileMaterial = InNormalMaterial;
+	TrajectoryHighlightMaterial = InTrajectoryHighlightMaterial;
+	ApplyTrajectoryHighlightState();
+}
+
+void ABreakableTile::BeginCompositeShape()
+{
+	for (UStaticMeshComponent* ShapeMesh : CompositeShapeMeshes)
 	{
-		return;
+		if (IsValid(ShapeMesh))
+		{
+			ShapeMesh->DestroyComponent();
+		}
+	}
+	CompositeShapeMeshes.Reset();
+
+	if (TileMesh)
+	{
+		TileMesh->SetMobility(EComponentMobility::Movable);
+		TileMesh->SetStaticMesh(nullptr);
+		TileMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
 
-	const FLinearColor BaseColor = bTrajectoryHighlighted ? TrajectoryHighlightColor : DefaultBaseColor;
-	const float Opacity = bTrajectoryHighlighted ? TrajectoryHighlightOpacity : DefaultOpacity;
+}
 
-	TileMaterialMID->SetVectorParameterValue(BaseColorParameterName, BaseColor);
-	TileMaterialMID->SetScalarParameterValue(OpacityParameterName, FMath::Clamp(Opacity, 0.0f, 1.0f));
+UStaticMeshComponent* ABreakableTile::AddCompositeShapePiece(
+	UStaticMesh* InStaticMesh,
+	const FVector& RelativeLocation,
+	const FRotator& RelativeRotation,
+	const FVector& RelativeScale)
+{
+	if (!TileMesh || !InStaticMesh)
+	{
+		return nullptr;
+	}
+
+	UStaticMeshComponent* ShapeMesh = NewObject<UStaticMeshComponent>(this);
+	if (!ShapeMesh)
+	{
+		return nullptr;
+	}
+
+	AddInstanceComponent(ShapeMesh);
+	ShapeMesh->SetupAttachment(TileMesh);
+	ShapeMesh->SetMobility(EComponentMobility::Movable);
+	ShapeMesh->SetStaticMesh(InStaticMesh);
+	ShapeMesh->SetRelativeLocation(RelativeLocation);
+	ShapeMesh->SetRelativeRotation(RelativeRotation);
+	ShapeMesh->SetRelativeScale3D(FVector(
+		FMath::Max(0.01f, RelativeScale.X),
+		FMath::Max(0.01f, RelativeScale.Y),
+		FMath::Max(0.01f, RelativeScale.Z)));
+	ShapeMesh->SetCollisionProfileName(TEXT("BlockAll"));
+	ShapeMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	ShapeMesh->SetCollisionResponseToAllChannels(ECR_Block);
+	ShapeMesh->SetGenerateOverlapEvents(false);
+	ShapeMesh->CanCharacterStepUpOn = ECanBeCharacterBase::ECB_No;
+	ShapeMesh->RegisterComponent();
+
+	CompositeShapeMeshes.Add(ShapeMesh);
+	ShapeMesh->SetMaterial(0, GetActiveVisualMaterial());
+	return ShapeMesh;
+}
+
+UMaterialInterface* ABreakableTile::GetActiveVisualMaterial() const
+{
+	return bTrajectoryHighlighted && TrajectoryHighlightMaterial
+		? TrajectoryHighlightMaterial.Get()
+		: BaseTileMaterial.Get();
+}
+
+void ABreakableTile::ApplyTrajectoryHighlightState()
+{
+	UMaterialInterface* ActiveMaterial = GetActiveVisualMaterial();
+
+	if (TileMesh && TileMesh->GetStaticMesh())
+	{
+		TileMesh->SetMaterial(0, ActiveMaterial);
+	}
+
+	for (UStaticMeshComponent* ShapeMesh : CompositeShapeMeshes)
+	{
+		if (IsValid(ShapeMesh))
+		{
+			ShapeMesh->SetMaterial(0, ActiveMaterial);
+		}
+	}
 }

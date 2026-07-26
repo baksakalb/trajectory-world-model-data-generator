@@ -5,7 +5,8 @@
 #include "BreakableTile.generated.h"
 
 class UStaticMeshComponent;
-class UMaterialInstanceDynamic;
+class UMaterialInterface;
+class UStaticMesh;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBreakableTileBroken, ABreakableTile*, Tile);
 
@@ -23,6 +24,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tile")
 	bool bStartBroken = false;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tile|Breakable")
+	bool bBreakOnGrenadeImpact = true;
+
+	/** When true, the tile applies one normal surface bounce and then disappears immediately. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tile|Breakable")
+	bool bBounceGrenadeBeforeBreaking = false;
+
 	UPROPERTY(BlueprintAssignable, Category = "Tile")
 	FOnBreakableTileBroken OnTileBroken;
 
@@ -35,24 +43,40 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tile")
 	bool IsBroken() const { return bBroken; }
 
+	UFUNCTION(BlueprintPure, Category = "Tile|Breakable")
+	bool CanBreakOnGrenadeImpact() const { return bBreakOnGrenadeImpact; }
+
+	UFUNCTION(BlueprintPure, Category = "Tile|Breakable")
+	bool ShouldBounceGrenadeBeforeBreaking() const { return bBounceGrenadeBeforeBreaking; }
+
 	UFUNCTION(BlueprintCallable, Category = "Tile|Trajectory")
 	void SetTrajectoryHighlighted(bool bHighlighted);
 
 	UFUNCTION(BlueprintPure, Category = "Tile|Trajectory")
 	bool IsTrajectoryHighlighted() const { return bTrajectoryHighlighted; }
 
+	UFUNCTION(BlueprintCallable, Category = "Tile|Style")
+	void SetMeshAndTransformStyle(UStaticMesh* InStaticMesh, FRotator InMeshRelativeRotation, FVector InMeshRelativeScale);
+
+	UFUNCTION(BlueprintCallable, Category = "Tile|Style")
+	void SetVisualMaterials(UMaterialInterface* InNormalMaterial, UMaterialInterface* InTrajectoryHighlightMaterial);
+
+	/** Turns the root mesh into an invisible anchor so several mesh pieces can form one breakable shape. */
+	void BeginCompositeShape();
+
+	/** Adds one collidable mesh piece to a composite breakable shape. Dimensions are controlled by relative scale. */
+	UStaticMeshComponent* AddCompositeShapePiece(
+		UStaticMesh* InStaticMesh,
+		const FVector& RelativeLocation,
+		const FRotator& RelativeRotation,
+		const FVector& RelativeScale);
+
 protected:
 	virtual void BeginPlay() override;
 
 private:
-	void InitializeTileMaterial();
 	void ApplyTrajectoryHighlightState();
-
-	UPROPERTY(EditAnywhere, Category = "Tile|Trajectory")
-	FLinearColor TrajectoryHighlightColor = FLinearColor(1.0f, 0.15f, 0.15f, 1.0f);
-
-	UPROPERTY(EditAnywhere, Category = "Tile|Trajectory", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TrajectoryHighlightOpacity = 0.35f;
+	UMaterialInterface* GetActiveVisualMaterial() const;
 
 	UPROPERTY(VisibleAnywhere, Category = "Tile")
 	bool bBroken = false;
@@ -61,8 +85,13 @@ private:
 	bool bTrajectoryHighlighted = false;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> TileMaterialMID;
+	TArray<TObjectPtr<UStaticMeshComponent>> CompositeShapeMeshes;
 
-	FLinearColor DefaultBaseColor = FLinearColor(0.0f, 0.75f, 1.0f, 1.0f);
-	float DefaultOpacity = 0.35f;
+	/** Normal appearance. Edit the referenced material asset or replace it in the UI. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tile|Materials", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UMaterialInterface> BaseTileMaterial;
+
+	/** Appearance while the predicted trajectory touches this object. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tile|Materials", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UMaterialInterface> TrajectoryHighlightMaterial;
 };

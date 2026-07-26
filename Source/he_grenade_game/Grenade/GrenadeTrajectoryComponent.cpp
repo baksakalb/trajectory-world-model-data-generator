@@ -120,7 +120,7 @@ ABreakableTile* UGrenadeTrajectoryComponent::ResolveBreakableTile(const FHitResu
 	}
 
 	ABreakableTile* Tile = Cast<ABreakableTile>(HitActor);
-	if (!Tile || Tile->IsBroken())
+	if (!Tile || Tile->IsBroken() || !Tile->CanBreakOnGrenadeImpact())
 	{
 		return nullptr;
 	}

@@ -14,6 +14,8 @@ AArenaObstacle::AArenaObstacle()
 	ObstacleMesh->SetMobility(EComponentMobility::Static);
 	ObstacleMesh->SetCollisionProfileName(TEXT("BlockAll"));
 	ObstacleMesh->SetGenerateOverlapEvents(false);
+	ObstacleMesh->SetVisibility(true, true);
+	SetActorHiddenInGame(false);
 
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (CubeMesh.Succeeded())

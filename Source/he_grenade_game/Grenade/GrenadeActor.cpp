@@ -9,6 +9,7 @@
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/Pawn.h"
 #include "Grenade/Breakables/BreakableTile.h"
+#include "he_grenade_gameGameMode.h"
 #include "UObject/ConstructorHelpers.h"
 
 namespace
@@ -46,16 +47,40 @@ AGrenadeActor::AGrenadeActor()
 		VisualMesh->SetStaticMesh(SphereMeshAsset.Object);
 		VisualMesh->SetRelativeScale3D(FVector(0.16f));
 	}
+
+}
+
+void AGrenadeActor::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	ApplyVisualMaterial();
 }
 
 void AGrenadeActor::BeginPlay()
 {
 	Super::BeginPlay();
+	ApplyVisualMaterial();
 
 	if (!bInitialized)
 	{
 		FGrenadeSim::InitializeState(SimState, GetActorLocation(), GetActorForwardVector() * 1400.0f, 2.5f);
 		bInitialized = true;
+	}
+}
+
+void AGrenadeActor::ApplyVisualMaterial()
+{
+	if (VisualMesh)
+	{
+		UMaterialInterface* SelectedMaterial = nullptr;
+		if (const UWorld* World = GetWorld())
+		{
+			if (const Ahe_grenade_gameGameMode* GameMode = World->GetAuthGameMode<Ahe_grenade_gameGameMode>())
+			{
+				SelectedMaterial = GameMode->GrenadeMaterial;
+			}
+		}
+		VisualMesh->SetMaterial(0, SelectedMaterial);
 	}
 }
 
@@ -184,7 +209,7 @@ ABreakableTile* AGrenadeActor::ResolveBreakableTile(const FHitResult& Hit) const
 	}
 
 	ABreakableTile* Tile = Cast<ABreakableTile>(HitActor);
-	if (!Tile || Tile->IsBroken())
+	if (!Tile || Tile->IsBroken() || !Tile->CanBreakOnGrenadeImpact())
 	{
 		return nullptr;
 	}

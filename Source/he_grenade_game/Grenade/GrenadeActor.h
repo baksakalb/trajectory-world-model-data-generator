@@ -41,10 +41,12 @@ public:
 	static void ApplyInstantKillBlast(UWorld* World, const FVector& Origin, float RadiusCm, AActor* DamageCauser, AActor* InstigatorActor);
 
 protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 
 private:
+	void ApplyVisualMaterial();
 	ABreakableTile* ResolveBreakableTile(const FHitResult& Hit) const;
 	void SimulateFixedStep(float StepSeconds);
 	void ExplodeNow();

@@ -256,7 +256,32 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 				}
 			}
 
-			const float RetainedSpeedFactor = FMath::Clamp(1.0f - Config.BreakableVelocityDamping, 0.0f, 1.0f);
+			const bool bBounceBeforeBreak = ResolvedTile->ShouldBounceGrenadeBeforeBreaking();
+			if (bBounceBeforeBreak)
+			{
+				const float NormalComponent = FVector::DotProduct(VelocityAtImpact, HitNormal);
+				const FVector VelocityNormal = HitNormal * NormalComponent;
+				const FVector VelocityTangent = VelocityAtImpact - VelocityNormal;
+				const FVector BouncedVelocity =
+					(VelocityTangent * FMath::Clamp(1.0f - Config.TangentialDamping, 0.0f, 1.0f))
+					- (VelocityNormal * Config.BounceRestitution);
+
+				InOutState.BounceCount += 1;
+				InOutState.Velocity = BouncedVelocity;
+				InOutState.Position = ImpactCenter + (HitNormal * FMath::Max(1.5f, Config.RadiusCm * 0.15f));
+				Result.bBounced = true;
+
+				if (TryEnterRestState(BouncedVelocity))
+				{
+					break;
+				}
+
+				RemainingStepTime -= TimeUsed;
+				continue;
+			}
+
+			const float RetainedSpeedFactor =
+				FMath::Clamp(1.0f - Config.BreakableVelocityDamping, 0.0f, 1.0f);
 			FVector PostBreakVelocity = VelocityAtImpact * RetainedSpeedFactor;
 
 			const float BreakDeflection = FMath::Clamp(Config.BreakableNormalDeflection, 0.0f, 1.0f);
