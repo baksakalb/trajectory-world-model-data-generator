@@ -1,9 +1,12 @@
 #include "Grenade/GrenadeTrajectoryComponent.h"
 
-#include "DrawDebugHelpers.h"
+#include "CanvasItem.h"
 #include "Camera/CameraComponent.h"
+#include "Engine/Canvas.h"
+#include "Engine/World.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "Grenade/GrenadeSim.h"
 #include "Grenade/GrenadeThrowerComponent.h"
 #include "Grenade/Breakables/BreakableTile.h"
@@ -16,6 +19,107 @@ namespace
 		1,
 		TEXT("Draw grenade trajectory while aiming. 0=off, 1=on"),
 		ECVF_Default);
+
+	FVector ComputeRenderTangent(const TArray<FVector>& Points, int32 PointIndex)
+	{
+		const int32 PointCount = Points.Num();
+		if (PointCount < 2 || !Points.IsValidIndex(PointIndex))
+		{
+			return FVector::ZeroVector;
+		}
+
+		if (PointIndex > 0 && PointIndex + 1 < PointCount)
+		{
+			return (Points[PointIndex + 1] - Points[PointIndex - 1]) * 0.5f;
+		}
+
+		if (PointCount >= 3)
+		{
+			if (PointIndex == 0)
+			{
+				return ((Points[1] - Points[0]) * 2.0f) - ((Points[2] - Points[0]) * 0.5f);
+			}
+
+			return ((Points[PointCount - 1] - Points[PointCount - 2]) * 2.0f)
+				- ((Points[PointCount - 1] - Points[PointCount - 3]) * 0.5f);
+		}
+
+		return Points[1] - Points[0];
+	}
+
+	void BuildSmoothedRenderPath(
+		const TArray<FVector>& SimulationPoints,
+		const TArray<uint8>& HardCornerFlags,
+		float MaxSegmentLengthCm,
+		int32 MinSmoothSubsteps,
+		TArray<FVector>& OutRenderPoints)
+	{
+		OutRenderPoints.Reset();
+		if (SimulationPoints.IsEmpty())
+		{
+			return;
+		}
+
+		OutRenderPoints.Reserve(
+			SimulationPoints.Num() * FMath::Max(1, MinSmoothSubsteps));
+		OutRenderPoints.Add(SimulationPoints[0]);
+
+		const float SafeMaxSegmentLengthCm = FMath::Max(1.0f, MaxSegmentLengthCm);
+		const int32 SafeMinSmoothSubsteps = FMath::Clamp(MinSmoothSubsteps, 1, 4);
+
+		auto IsHardCorner = [&HardCornerFlags](int32 PointIndex)
+			{
+				return HardCornerFlags.IsValidIndex(PointIndex) && HardCornerFlags[PointIndex] != 0;
+			};
+
+		for (int32 SegmentIndex = 0; SegmentIndex + 1 < SimulationPoints.Num(); ++SegmentIndex)
+		{
+			const FVector& SegmentStart = SimulationPoints[SegmentIndex];
+			const FVector& SegmentEnd = SimulationPoints[SegmentIndex + 1];
+			const float ChordLengthCm = FVector::Distance(SegmentStart, SegmentEnd);
+			if (ChordLengthCm <= KINDA_SMALL_NUMBER)
+			{
+				continue;
+			}
+
+			// A collision can change velocity inside a fixed simulation step. Keep that local area linear
+			// so visual smoothing never rounds a bounce through collision geometry.
+			const bool bCanSmooth =
+				SimulationPoints.Num() >= 3
+				&& !IsHardCorner(SegmentIndex)
+				&& !IsHardCorner(SegmentIndex + 1)
+				&& (SegmentIndex == 0 || !IsHardCorner(SegmentIndex - 1))
+				&& (SegmentIndex + 2 >= SimulationPoints.Num() || !IsHardCorner(SegmentIndex + 2));
+
+			const int32 LengthSubsteps =
+				FMath::Max(1, FMath::CeilToInt(ChordLengthCm / SafeMaxSegmentLengthCm));
+			const int32 SubstepCount = bCanSmooth
+				? FMath::Max(LengthSubsteps, SafeMinSmoothSubsteps)
+				: LengthSubsteps;
+
+			const FVector StartTangent = bCanSmooth
+				? ComputeRenderTangent(SimulationPoints, SegmentIndex)
+				: FVector::ZeroVector;
+			const FVector EndTangent = bCanSmooth
+				? ComputeRenderTangent(SimulationPoints, SegmentIndex + 1)
+				: FVector::ZeroVector;
+
+			for (int32 SubstepIndex = 1; SubstepIndex <= SubstepCount; ++SubstepIndex)
+			{
+				const float Alpha =
+					static_cast<float>(SubstepIndex) / static_cast<float>(SubstepCount);
+				const FVector RenderPoint = bCanSmooth
+					? FMath::CubicInterp(SegmentStart, StartTangent, SegmentEnd, EndTangent, Alpha)
+					: FMath::Lerp(SegmentStart, SegmentEnd, Alpha);
+
+				if (!OutRenderPoints.Last().Equals(RenderPoint, 0.01f))
+				{
+					OutRenderPoints.Add(RenderPoint);
+				}
+			}
+		}
+	}
+
 }
 
 UGrenadeTrajectoryComponent::UGrenadeTrajectoryComponent()
@@ -37,6 +141,7 @@ void UGrenadeTrajectoryComponent::BeginPlay()
 void UGrenadeTrajectoryComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ClearHighlightedTiles();
+	ClearTrajectoryVisual();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -47,6 +152,7 @@ void UGrenadeTrajectoryComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	if (!bTrajectoryEnabled || !bAimModeActive || CVarGGTrajectoryEnabled.GetValueOnGameThread() == 0)
 	{
 		ClearHighlightedTiles();
+		ClearTrajectoryVisual();
 		return;
 	}
 
@@ -59,6 +165,101 @@ void UGrenadeTrajectoryComponent::SetAimModeActive(bool bActive)
 	if (!bAimModeActive)
 	{
 		ClearHighlightedTiles();
+		ClearTrajectoryVisual();
+	}
+}
+
+void UGrenadeTrajectoryComponent::DrawTrajectoryOverlay(
+	UCanvas* Canvas,
+	APlayerController* PlayerController) const
+{
+	if (!Canvas
+		|| !PlayerController
+		|| (CachedTrajectoryRuns.IsEmpty() && !bHasCachedExplosionTip))
+	{
+		return;
+	}
+
+	const float SafeLineThickness = FMath::Max(0.5f, LineThickness);
+	for (const TArray<FVector>& Run : CachedTrajectoryRuns)
+	{
+		if (Run.Num() < 2)
+		{
+			continue;
+		}
+
+		FVector2D PreviousScreenPoint = FVector2D::ZeroVector;
+		bool bPreviousProjected = PlayerController->ProjectWorldLocationToScreen(
+			Run[0],
+			PreviousScreenPoint,
+			true);
+
+		for (int32 PointIndex = 1; PointIndex < Run.Num(); ++PointIndex)
+		{
+			FVector2D ScreenPoint = FVector2D::ZeroVector;
+			const bool bProjected = PlayerController->ProjectWorldLocationToScreen(
+				Run[PointIndex],
+				ScreenPoint,
+				true);
+
+			if (bPreviousProjected && bProjected)
+			{
+				FCanvasLineItem LineItem(PreviousScreenPoint, ScreenPoint);
+				LineItem.SetColor(CachedTrajectoryColor);
+				LineItem.LineThickness = SafeLineThickness;
+				Canvas->DrawItem(LineItem);
+			}
+
+			PreviousScreenPoint = ScreenPoint;
+			bPreviousProjected = bProjected;
+		}
+	}
+
+	if (bHasCachedExplosionTip)
+	{
+		FVector2D TipCenter = FVector2D::ZeroVector;
+		FVector2D TipRadiusPoint = FVector2D::ZeroVector;
+		FVector ViewLocation = FVector::ZeroVector;
+		FRotator ViewRotation = FRotator::ZeroRotator;
+		PlayerController->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		const FVector ViewRight = FRotationMatrix(ViewRotation).GetUnitAxis(EAxis::Y);
+
+		const bool bCenterProjected = PlayerController->ProjectWorldLocationToScreen(
+			CachedExplosionTip,
+			TipCenter,
+			true);
+		const bool bRadiusProjected = PlayerController->ProjectWorldLocationToScreen(
+			CachedExplosionTip + (ViewRight * FMath::Max(1.0f, ExplosionTipSizeCm)),
+			TipRadiusPoint,
+			true);
+
+		if (bCenterProjected && bRadiusProjected)
+		{
+			constexpr int32 TipSideCount = 16;
+			const float TipRadiusPixels = FMath::Max(
+				2.0f,
+				FVector2D::Distance(TipCenter, TipRadiusPoint));
+			FVector2D PreviousTipPoint =
+				TipCenter + FVector2D(TipRadiusPixels, 0.0f);
+
+			for (int32 SideIndex = 1; SideIndex <= TipSideCount; ++SideIndex)
+			{
+				const float AngleRadians =
+					(2.0f * PI * static_cast<float>(SideIndex))
+					/ static_cast<float>(TipSideCount);
+				const FVector2D TipPoint =
+					TipCenter
+					+ FVector2D(
+						FMath::Cos(AngleRadians) * TipRadiusPixels,
+						FMath::Sin(AngleRadians) * TipRadiusPixels);
+
+				FCanvasLineItem TipLineItem(PreviousTipPoint, TipPoint);
+				TipLineItem.SetColor(ExplosionTipColor);
+				TipLineItem.LineThickness = FMath::Max(1.0f, SafeLineThickness);
+				Canvas->DrawItem(TipLineItem);
+				PreviousTipPoint = TipPoint;
+			}
+		}
 	}
 }
 
@@ -73,6 +274,13 @@ void UGrenadeTrajectoryComponent::ClearHighlightedTiles()
 	}
 
 	HighlightedTiles.Reset();
+}
+
+void UGrenadeTrajectoryComponent::ClearTrajectoryVisual()
+{
+	CachedTrajectoryRuns.Reset();
+	bHasCachedExplosionTip = false;
+	CachedExplosionTip = FVector::ZeroVector;
 }
 
 void UGrenadeTrajectoryComponent::SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles)
@@ -136,6 +344,11 @@ bool UGrenadeTrajectoryComponent::ResolveViewLocation(FVector& OutViewLocation) 
 		return false;
 	}
 
+	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
+	const APlayerController* PlayerController = OwnerPawn
+		? Cast<APlayerController>(OwnerPawn->GetController())
+		: nullptr;
+
 	if (const Ahe_grenade_gameCharacter* Character = Cast<Ahe_grenade_gameCharacter>(OwnerActor))
 	{
 		if (const UCameraComponent* FirstPersonCamera = Character->GetFirstPersonCameraComponent())
@@ -145,18 +358,16 @@ bool UGrenadeTrajectoryComponent::ResolveViewLocation(FVector& OutViewLocation) 
 		}
 	}
 
-	if (const APawn* OwnerPawn = Cast<APawn>(OwnerActor))
+	FRotator ViewRotation = FRotator::ZeroRotator;
+	if (PlayerController)
 	{
-		if (const AController* Controller = OwnerPawn->GetController())
-		{
-			FRotator ViewRotation;
-			Controller->GetPlayerViewPoint(OutViewLocation, ViewRotation);
-			return true;
-		}
+		PlayerController->GetPlayerViewPoint(OutViewLocation, ViewRotation);
+	}
+	else
+	{
+		OwnerActor->GetActorEyesViewPoint(OutViewLocation, ViewRotation);
 	}
 
-	FRotator ViewRotation;
-	OwnerActor->GetActorEyesViewPoint(OutViewLocation, ViewRotation);
 	return true;
 }
 
@@ -235,7 +446,7 @@ bool UGrenadeTrajectoryComponent::IsPointVisibleFromView(const FVector& ViewLoca
 
 	const float HitDistanceSq = FVector::DistSquared(ViewLocation, VisibilityHit.ImpactPoint);
 	const float PointDistanceSq = FVector::DistSquared(ViewLocation, Point);
-	const float VisibilityToleranceSq = FMath::Square(2.0f);
+	const float VisibilityToleranceSq = FMath::Square(FMath::Max(0.0f, VisibilityToleranceCm));
 	return HitDistanceSq + VisibilityToleranceSq >= PointDistanceSq;
 }
 
@@ -247,6 +458,7 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	if (!Thrower || !World || !OwnerActor)
 	{
 		ClearHighlightedTiles();
+		ClearTrajectoryVisual();
 		return;
 	}
 
@@ -254,6 +466,7 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	if (!Thrower->BuildLaunchParams(LaunchParams))
 	{
 		ClearHighlightedTiles();
+		ClearTrajectoryVisual();
 		return;
 	}
 
@@ -265,6 +478,9 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	TArray<FVector> TrajectoryPoints;
 	TrajectoryPoints.Reserve(MaxSimulationSteps + 1);
 	TrajectoryPoints.Add(SimState.Position);
+	TArray<uint8> HardCornerFlags;
+	HardCornerFlags.Reserve(MaxSimulationSteps + 1);
+	HardCornerFlags.Add(0);
 
 	bool bEndedByExplosion = false;
 	FVector ExplosionPoint = SimState.Position;
@@ -285,6 +501,11 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 		if (!SimState.Position.Equals(PreviousPosition, 0.01f))
 		{
 			TrajectoryPoints.Add(SimState.Position);
+			HardCornerFlags.Add(StepResult.bHadHit ? 1 : 0);
+		}
+		else if (StepResult.bHadHit && !HardCornerFlags.IsEmpty())
+		{
+			HardCornerFlags.Last() = 1;
 		}
 
 		if (StepResult.bBrokeTile)
@@ -309,11 +530,17 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 
 	SyncHighlightedTiles(HitTilesThisFrame);
 
-	const FColor DrawColor = (Thrower->IsStateGreen() ? AvailableColor : CooldownColor).ToFColor(true);
-	const FColor ExplosionColor = ExplosionTipColor.ToFColor(true);
-	const float SegmentLengthLimitCm = FMath::Max(1.0f, MaxRenderSegmentLengthCm);
-	const float DrawDuration = FMath::Max(0.0f, DrawDurationSeconds);
-	const uint8 DrawDepthPriority = static_cast<uint8>(DepthPriority);
+	TArray<FVector> RenderPoints;
+	BuildSmoothedRenderPath(
+		TrajectoryPoints,
+		HardCornerFlags,
+		MaxRenderSegmentLengthCm,
+		MinRenderSubstepsPerSimulationStep,
+		RenderPoints);
+
+	CachedTrajectoryColor = Thrower->IsStateGreen() ? AvailableColor : CooldownColor;
+	CachedTrajectoryRuns.Reset();
+	bHasCachedExplosionTip = false;
 
 	FVector ViewLocation = FVector::ZeroVector;
 	const bool bHasViewLocation = ResolveViewLocation(ViewLocation);
@@ -324,71 +551,67 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 
 	bool bHasVisibleEndpoint = false;
 	FVector VisibleEndpoint = FVector::ZeroVector;
-	bool bStoppedByFloor = false;
+	CachedTrajectoryRuns.Reserve(1);
+	TArray<FVector>* ActiveTrajectoryRun = nullptr;
 
-	for (int32 Index = 0; Index < TrajectoryPoints.Num() - 1; ++Index)
+	for (int32 Index = 0; Index < RenderPoints.Num() - 1; ++Index)
 	{
-		const FVector SegmentStart = TrajectoryPoints[Index];
-		const FVector SegmentEnd = TrajectoryPoints[Index + 1];
-		const float SegmentLengthCm = FVector::Distance(SegmentStart, SegmentEnd);
-		const int32 SubSegmentCount = FMath::Max(1, FMath::CeilToInt(SegmentLengthCm / SegmentLengthLimitCm));
+		FVector DrawStart = RenderPoints[Index];
+		FVector DrawEnd = RenderPoints[Index + 1];
+		bool bSegmentClippedToFloor = false;
 
-		FVector DrawStart = SegmentStart;
-		for (int32 SubIndex = 1; SubIndex <= SubSegmentCount; ++SubIndex)
+		if (bUseFloorFilter)
 		{
-			const float Alpha = static_cast<float>(SubIndex) / static_cast<float>(SubSegmentCount);
-			const FVector RawDrawEnd = FMath::Lerp(SegmentStart, SegmentEnd, Alpha);
-
-			FVector DrawEnd = RawDrawEnd;
-			bool bSegmentClippedToFloor = false;
-
-			if (bUseFloorFilter)
+			if (DrawStart.Z < FloorZ)
 			{
-				const bool bStartBelowFloor = DrawStart.Z < FloorZ;
-				if (bStartBelowFloor)
+				break;
+			}
+
+			if (DrawEnd.Z < FloorZ)
+			{
+				const float ZDelta = DrawEnd.Z - DrawStart.Z;
+				if (FMath::Abs(ZDelta) > KINDA_SMALL_NUMBER)
 				{
-					bStoppedByFloor = true;
+					const float FloorT =
+						FMath::Clamp((FloorZ - DrawStart.Z) / ZDelta, 0.0f, 1.0f);
+					DrawEnd = FMath::Lerp(DrawStart, DrawEnd, FloorT);
+					bSegmentClippedToFloor = true;
+				}
+				else
+				{
 					break;
 				}
-
-				if (DrawEnd.Z < FloorZ)
-				{
-					const float ZDelta = DrawEnd.Z - DrawStart.Z;
-					if (FMath::Abs(ZDelta) > KINDA_SMALL_NUMBER)
-					{
-						const float FloorT = FMath::Clamp((FloorZ - DrawStart.Z) / ZDelta, 0.0f, 1.0f);
-						DrawEnd = FMath::Lerp(DrawStart, DrawEnd, FloorT);
-						bSegmentClippedToFloor = true;
-					}
-					else
-					{
-						bStoppedByFloor = true;
-						break;
-					}
-				}
-			}
-
-			const FVector MidPoint = (DrawStart + DrawEnd) * 0.5f;
-			const bool bVisible = !bUseVisibilityFilter
-				|| IsPointVisibleFromView(ViewLocation, MidPoint, OwnerActor, World);
-
-			if (bVisible && !DrawStart.Equals(DrawEnd, 0.01f))
-			{
-				DrawDebugLine(World, DrawStart, DrawEnd, DrawColor, false, DrawDuration, DrawDepthPriority, LineThickness);
-				bHasVisibleEndpoint = true;
-				VisibleEndpoint = DrawEnd;
-			}
-
-			DrawStart = RawDrawEnd;
-
-			if (bSegmentClippedToFloor)
-			{
-				bStoppedByFloor = true;
-				break;
 			}
 		}
 
-		if (bStoppedByFloor)
+		const FVector MidPoint = (DrawStart + DrawEnd) * 0.5f;
+		const bool bVisible = !bUseVisibilityFilter
+			|| IsPointVisibleFromView(ViewLocation, MidPoint, OwnerActor, World);
+
+		if (bVisible && !DrawStart.Equals(DrawEnd, 0.01f))
+		{
+			if (!ActiveTrajectoryRun)
+			{
+				CachedTrajectoryRuns.Emplace();
+				ActiveTrajectoryRun = &CachedTrajectoryRuns.Last();
+				ActiveTrajectoryRun->Reserve(RenderPoints.Num());
+				ActiveTrajectoryRun->Add(DrawStart);
+			}
+			else if (!ActiveTrajectoryRun->Last().Equals(DrawStart, 0.01f))
+			{
+				ActiveTrajectoryRun->Add(DrawStart);
+			}
+
+			ActiveTrajectoryRun->Add(DrawEnd);
+			bHasVisibleEndpoint = true;
+			VisibleEndpoint = DrawEnd;
+		}
+		else
+		{
+			ActiveTrajectoryRun = nullptr;
+		}
+
+		if (bSegmentClippedToFloor)
 		{
 			break;
 		}
@@ -414,16 +637,8 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 		const float EndpointEpsilon = FMath::Max(2.0f, ExplosionTipSizeCm);
 		if (FVector::DistSquared(CandidateEndpoint, ExplosionPoint) <= FMath::Square(EndpointEpsilon))
 		{
-			DrawDebugSphere(
-				World,
-				CandidateEndpoint,
-				FMath::Max(1.0f, ExplosionTipSizeCm),
-				10,
-				ExplosionColor,
-				false,
-				DrawDuration,
-				DrawDepthPriority,
-				1.5f);
+			bHasCachedExplosionTip = true;
+			CachedExplosionTip = CandidateEndpoint;
 		}
 	}
 }

@@ -6,6 +6,8 @@
 #include "GrenadeTrajectoryComponent.generated.h"
 
 class ABreakableTile;
+class APlayerController;
+class UCanvas;
 class UGrenadeThrowerComponent;
 
 UCLASS(ClassGroup = (Grenade), BlueprintType, Blueprintable, meta = (BlueprintSpawnableComponent))
@@ -22,7 +24,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "4", ClampMax = "4096"))
 	int32 MaxSimulationSteps = 512;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+	/** Approximate on-screen width of the trajectory ribbon. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Rendering", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float LineThickness = 2.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "0.0", Units = "s"))
@@ -34,14 +37,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory", meta = (ClampMin = "1.0", Units = "cm"))
 	float MaxRenderSegmentLengthCm = 20.0f;
 
+	/** Minimum visual subdivisions between simulation samples. This smooths only the rendered curve. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Rendering", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 MinRenderSubstepsPerSimulationStep = 2;
+
+	/**
+	 * Optional extra CPU occlusion filter. World-depth rendering already hides the curve behind opaque geometry;
+	 * leave this disabled unless an unusual translucent occluder needs collision-based hiding.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility")
-	bool bHideNonVisibleSegments = true;
+	bool bHideNonVisibleSegments = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility")
 	bool bHideBelowFloorSegments = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility")
 	TEnumAsByte<ECollisionChannel> VisibilityTraceChannel = ECC_Visibility;
+
+	/** Allows an endpoint resting on collision geometry to remain visible when the optional CPU filter is enabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory|Visibility", meta = (ClampMin = "0.0", ClampMax = "100.0", Units = "cm"))
+	float VisibilityToleranceCm = 10.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Trajectory")
 	FLinearColor AvailableColor = FLinearColor(0.1f, 1.0f, 0.1f, 1.0f);
@@ -61,6 +76,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Trajectory")
 	bool IsAimModeActive() const { return bAimModeActive; }
 
+	/** Draws the cached trajectory after the 3D scene so it is unaffected by TAA and motion blur. */
+	void DrawTrajectoryOverlay(UCanvas* Canvas, APlayerController* PlayerController) const;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -68,6 +86,7 @@ protected:
 
 private:
 	void ClearHighlightedTiles();
+	void ClearTrajectoryVisual();
 	void SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles);
 	ABreakableTile* ResolveBreakableTile(const FHitResult& Hit) const;
 	void DrawPredictedPath();
@@ -77,6 +96,10 @@ private:
 
 	TWeakObjectPtr<UGrenadeThrowerComponent> ThrowerComponent;
 	TSet<TWeakObjectPtr<ABreakableTile>> HighlightedTiles;
+	TArray<TArray<FVector>> CachedTrajectoryRuns;
+	FLinearColor CachedTrajectoryColor = FLinearColor::White;
+	bool bHasCachedExplosionTip = false;
+	FVector CachedExplosionTip = FVector::ZeroVector;
 	bool bAimModeActive = false;
 	bool bHasLastKnownFloorZ = false;
 	float LastKnownFloorZ = 0.0f;

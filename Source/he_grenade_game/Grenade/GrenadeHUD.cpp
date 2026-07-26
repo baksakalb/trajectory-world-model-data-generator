@@ -6,6 +6,7 @@
 #include "CanvasItem.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Grenade/GGMovementComponent.h"
+#include "Grenade/GrenadeTrajectoryComponent.h"
 #include "he_grenade_gameCharacter.h"
 
 void AGrenadeHUD::DrawHUD()
@@ -22,6 +23,11 @@ void AGrenadeHUD::DrawHUD()
 	if (!Character)
 	{
 		return;
+	}
+
+	if (const UGrenadeTrajectoryComponent* Trajectory = Character->GetGrenadeTrajectoryComponent())
+	{
+		Trajectory->DrawTrajectoryOverlay(Canvas, PC);
 	}
 
 	const float CenterX = Canvas->ClipX * 0.5f;
