@@ -1,4 +1,8 @@
+/.codex
+/.git
 /.vscode
 /Content
+/DerivedDataCache
 /Intermediate
+/node_modules
 /Saved

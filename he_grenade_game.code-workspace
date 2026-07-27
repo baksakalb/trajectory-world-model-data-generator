@@ -6,16 +6,16 @@
 		},
 		{
 			"name": "UE5",
-			"path": "C:\\Program Files\\Epic Games\\UE_5.7"
+			"path": "C:\\Program Files\\Epic Games\\UE_5.8"
 		}
 	],
 	"settings": {
-		"typescript.tsc.autoDetect": "off",
+		"js/ts.tsc.autoDetect": "off",
 		"npm.autoDetect": "off",
 		"terminal.integrated.env.windows": {
-			"PATH": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64;${env:PATH}",
-			"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64",
-			"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64\\dotnet.exe",
+			"PATH": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\ThirdParty\\DotNet\\10.0\\win-x64;${env:PATH}",
+			"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\ThirdParty\\DotNet\\10.0\\win-x64",
+			"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\ThirdParty\\DotNet\\10.0\\win-x64\\dotnet.exe",
 			"DOTNET_MULTILEVEL_LOOKUP": "0",
 			"DOTNET_ROLL_FORWARD": "LatestMajor"
 		}
@@ -43,7 +43,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -63,7 +63,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -80,7 +80,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -97,7 +97,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -117,7 +117,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -134,7 +134,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -151,7 +151,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -171,7 +171,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -188,7 +188,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -205,7 +205,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -225,7 +225,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -242,7 +242,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -259,7 +259,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -279,7 +279,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -296,7 +296,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -313,7 +313,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -333,7 +333,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -350,7 +350,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -367,7 +367,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -387,7 +387,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -404,7 +404,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -421,7 +421,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -441,7 +441,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -458,7 +458,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			}
 		]
@@ -473,13 +473,16 @@
 				"preLaunchTask": "he_grenade_game Win64 Debug Build",
 				"args": [
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -489,13 +492,16 @@
 				"preLaunchTask": "he_grenade_game Win64 DebugGame Build",
 				"args": [
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -505,13 +511,16 @@
 				"preLaunchTask": "he_grenade_game Win64 Development Build",
 				"args": [
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -521,13 +530,16 @@
 				"preLaunchTask": "he_grenade_game Win64 Test Build",
 				"args": [
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -537,64 +549,76 @@
 				"preLaunchTask": "he_grenade_game Win64 Shipping Build",
 				"args": [
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
 				"name": "Launch he_grenade_gameEditor (Debug)",
 				"request": "launch",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-Debug.exe",
+				"program": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-Debug.exe",
 				"preLaunchTask": "he_grenade_gameEditor Win64 Debug Build",
 				"args": [
 					"C:\\Users\\baris\\Documents\\Unreal Projects\\he_grenade_game\\he_grenade_game.uproject"
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
 				"name": "Launch he_grenade_gameEditor (DebugGame)",
 				"request": "launch",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-DebugGame.exe",
+				"program": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-DebugGame.exe",
 				"preLaunchTask": "he_grenade_gameEditor Win64 DebugGame Build",
 				"args": [
 					"C:\\Users\\baris\\Documents\\Unreal Projects\\he_grenade_game\\he_grenade_game.uproject"
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
 				"name": "Launch he_grenade_gameEditor (Development)",
 				"request": "launch",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\Win64\\UnrealEditor.exe",
+				"program": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\Win64\\UnrealEditor.exe",
 				"preLaunchTask": "he_grenade_gameEditor Win64 Development Build",
 				"args": [
 					"C:\\Users\\baris\\Documents\\Unreal Projects\\he_grenade_game\\he_grenade_game.uproject"
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7",
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.7"
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
+				},
+				"sourceMap": {
+					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.8"
 				}
 			},
 			{
@@ -602,7 +626,7 @@
 				"type": "coreclr",
 				"request": "launch",
 				"preLaunchTask": "UnrealBuildTool Win64 Development Build",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Build\\BatchFiles\\RunUBT.bat",
+				"program": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Build\\BatchFiles\\RunUBT.bat",
 				"args": [
 					"-projectfiles",
 					"-vscode",
@@ -612,15 +636,15 @@
 					"-dotnet"
 				],
 				"env": {
-					"PATH": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64;${env:PATH}",
-					"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64",
-					"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64\\dotnet.exe",
+					"PATH": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\ThirdParty\\DotNet\\10.0\\win-x64;${env:PATH}",
+					"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\ThirdParty\\DotNet\\10.0\\win-x64",
+					"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.8\\Engine\\Binaries\\ThirdParty\\DotNet\\10.0\\win-x64\\dotnet.exe",
 					"DOTNET_MULTILEVEL_LOOKUP": "0",
 					"DOTNET_ROLL_FORWARD": "LatestMajor"
 				},
 				"console": "integratedTerminal",
 				"stopAtEntry": false,
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.7"
+				"cwd": "C:\\Program Files\\Epic Games\\UE_5.8"
 			}
 		]
 	}
