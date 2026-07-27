@@ -1,16 +1,156 @@
+// =============================================================================
+// McpAutomationBridge_AssetWorkflowHandlers.cpp
+// =============================================================================
+// Asset workflow, material authoring, and source control handlers.
+//
+// HANDLERS:
+//   Asset Operations:
+//     - import, duplicate, rename, move, delete, exists, list, search_assets
+//     - create_folder, create_material, create_material_instance
+//     - get_dependencies, get_asset_graph, set_tags, set_metadata, get_metadata
+//     - validate, generate_report, generate_thumbnail, get_material_stats
+//
+//   Material Authoring:
+//     - add_material_node, connect_material_pins, remove_material_node
+//     - break_material_connections, get_material_node_details, rebuild_material
+//     - add_material_parameter, list_instances, reset_instance_parameters
+//
+//   Source Control:
+//     - source_control_checkout, source_control_submit, get_source_control_state
+//     - source_control_enable
+//
+//   Bulk Operations:
+//     - fixup_redirectors, bulk_rename, bulk_delete
+//     - generate_lods, nanite_rebuild_mesh
+//
+// REFACTORING NOTES:
+//   - Uses McpVersionCompatibility.h for UE 5.0-5.7 API abstraction
+//   - Uses McpHandlerUtils for standardized JSON parsing/responses
+//   - Material expression includes grouped by category
+//
+// VERSION COMPATIBILITY:
+//   - MaterialDomain.h: UE 5.1+ (EMaterialDomain in MaterialShared.h for 5.0)
+//   - ClassPaths vs ClassNames: UE 5.1+ uses FTopLevelAssetPath
+//   - AssetRegistry API varies between UE versions
+//
+// Copyright (c) 2024 MCP Automation Bridge Contributors
+// =============================================================================
+
+#include "McpVersionCompatibility.h"
+
+// -----------------------------------------------------------------------------
+// Core Includes
+// -----------------------------------------------------------------------------
 #include "Async/Async.h"
 #include "Dom/JsonObject.h"
-#include "Editor.h"
-#include "EditorAssetLibrary.h"
+#include "HAL/PlatformFilemanager.h"
+#include "Misc/Paths.h"
 #include "McpAutomationBridgeGlobals.h"
 #include "McpAutomationBridgeHelpers.h"
+#include "McpSafeOperations.h"
+
+// -----------------------------------------------------------------------------
+// MCP Handler Utilities (centralized JSON/Asset helpers)
+// -----------------------------------------------------------------------------
+#include "McpHandlerUtils.h"
 #include "McpAutomationBridgeSubsystem.h"
 #include "Misc/EngineVersionComparison.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/MetaData.h"
 
-#include "HAL/PlatformFilemanager.h"
-#include "Misc/Paths.h"
+// -----------------------------------------------------------------------------
+// Material Expression Includes (Basic Operations)
+// -----------------------------------------------------------------------------
+#include "Materials/MaterialExpressionAdd.h"
+#include "Materials/MaterialExpressionMultiply.h"
+
+// -----------------------------------------------------------------------------
+// Material Expression Includes (Constants)
+// -----------------------------------------------------------------------------
+#include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionConstant2Vector.h"
+#include "Materials/MaterialExpressionConstant3Vector.h"
+#include "Materials/MaterialExpressionConstant4Vector.h"
+
+// -----------------------------------------------------------------------------
+// Material Expression Includes (Trigonometry)
+// -----------------------------------------------------------------------------
+#include "Materials/MaterialExpressionCosine.h"
+#include "Materials/MaterialExpressionSine.h"
+
+// -----------------------------------------------------------------------------
+// Material Expression Includes (Texture & Time)
+// -----------------------------------------------------------------------------
+#include "Materials/MaterialExpressionTextureSample.h"
+#include "Materials/MaterialExpressionTime.h"
+#include "Materials/MaterialExpressionVertexColor.h"
+
+#if WITH_EDITOR
+
+// -----------------------------------------------------------------------------
+// Editor-only Includes (Asset Management)
+// -----------------------------------------------------------------------------
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetToolsModule.h"
+#include "AssetViewUtils.h"
+#include "EditorAssetLibrary.h"
+#include "Engine/StaticMesh.h"
+#include "EngineUtils.h"  // TActorIterator
+#include "Factories/MaterialFactoryNew.h"
+#include "Factories/MaterialInstanceConstantFactoryNew.h"
+#include "FileHelpers.h"
+#include "IAssetTools.h"
+
+// -----------------------------------------------------------------------------
+// Editor-only Includes (Source Control)
+// -----------------------------------------------------------------------------
+#include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "SourceControlHelpers.h"
+#include "SourceControlOperations.h"
+
+// -----------------------------------------------------------------------------
+// Editor-only Includes (Material Editing)
+// -----------------------------------------------------------------------------
+#include "ImageUtils.h"
+#include "MaterialEditingLibrary.h"
+#include "Materials/Material.h"
+
+// MaterialDomain.h was introduced in UE 5.1 - in UE 5.0 EMaterialDomain is in MaterialShared.h
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#include "MaterialDomain.h"
+#endif
+
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionStaticSwitchParameter.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "MaterialShared.h"
+
+// -----------------------------------------------------------------------------
+// Editor-only Includes (Utilities)
+// -----------------------------------------------------------------------------
+#include "Misc/FileHelper.h"
+#include "ObjectTools.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
+#include "UObject/ObjectRedirector.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
+
+// -----------------------------------------------------------------------------
+// Editor-only Includes (Graph/Blueprint)
+// -----------------------------------------------------------------------------
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "Blueprint/BlueprintSupport.h"
+
+#endif // WITH_EDITOR
+
+// =============================================================================
+// ASSET ACTION DISPATCHER
+// =============================================================================
 
 bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     const FString &RequestId, const FString &Action,
@@ -32,6 +172,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return false;
 
   // Dispatch to specific handlers
+  // CRITICAL: These actions must match what TS sends as 'action' (not just 'subAction')
+  // When TS calls executeAutomationRequest(tools, 'search_assets', {...}), Action='search_assets'
+  
+  // Asset Operations
   if (Lower == TEXT("import"))
     return HandleImportAsset(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("duplicate"))
@@ -40,11 +184,8 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleRenameAsset(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("move"))
     return HandleMoveAsset(RequestId, Payload, RequestingSocket);
-  if (Lower == TEXT("delete"))
-    return HandleDeleteAssets(
-        RequestId, Payload,
-        RequestingSocket); // Single delete routed to bulk delete logic if
-                           // needed, or specific handler
+  if (Lower == TEXT("delete") || Lower == TEXT("delete_asset") || Lower == TEXT("delete_assets"))
+    return HandleDeleteAssets(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("create_folder"))
     return HandleCreateFolder(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("create_material"))
@@ -68,8 +209,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   if (Lower == TEXT("generate_report"))
     return HandleGenerateReport(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("create_thumbnail") || Lower == TEXT("generate_thumbnail"))
-    return HandleGenerateThumbnail(RequestId, Action, Payload,
-                                   RequestingSocket);
+    return HandleGenerateThumbnail(RequestId, Action, Payload, RequestingSocket);
   if (Lower == TEXT("add_material_parameter"))
     return HandleAddMaterialParameter(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("list_instances"))
@@ -80,9 +220,12 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleDoesAssetExist(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("get_material_stats"))
     return HandleGetMaterialStats(RequestId, Payload, RequestingSocket);
+  
+  // Search (CRITICAL: search_assets must be dispatched - was missing causing timeouts)
+  if (Lower == TEXT("search_assets"))
+    return HandleSearchAssets(RequestId, Action, Payload, RequestingSocket);
 
-  // Workflow handlers are called directly from ProcessAutomationRequest, but we
-  // can fallback here too if needed
+  // Bulk Operations
   if (Lower == TEXT("fixup_redirectors"))
     return HandleFixupRedirectors(RequestId, Action, Payload, RequestingSocket);
   if (Lower == TEXT("bulk_rename"))
@@ -91,49 +234,42 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleBulkDeleteAssets(RequestId, Action, Payload, RequestingSocket);
   if (Lower == TEXT("generate_lods"))
     return HandleGenerateLODs(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("nanite_rebuild_mesh"))
+    return HandleNaniteRebuildMesh(RequestId, Action, Payload, RequestingSocket);
+
+  // Source Control
+  if (Lower == TEXT("source_control_checkout"))
+    return HandleSourceControlCheckout(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("source_control_submit"))
+    return HandleSourceControlSubmit(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("get_source_control_state"))
+    return HandleGetSourceControlState(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("source_control_enable"))
+    return HandleSourceControlEnable(RequestId, Action, Payload, RequestingSocket);
+
+  // Graph & Analysis
+  if (Lower == TEXT("analyze_graph"))
+    return HandleAnalyzeGraph(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("find_by_tag"))
+    return HandleFindByTag(RequestId, Action, Payload, RequestingSocket);
+
+  // Material Authoring
+  if (Lower == TEXT("add_material_node"))
+    return HandleAddMaterialNode(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("connect_material_pins"))
+    return HandleConnectMaterialPins(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("remove_material_node"))
+    return HandleRemoveMaterialNode(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("break_material_connections"))
+    return HandleBreakMaterialConnections(RequestId, Action, Payload, RequestingSocket);
+  if (Lower == TEXT("get_material_node_details"))
+    return HandleGetMaterialNodeDetails(RequestId, Action, Payload, RequestingSocket);
   if (Lower == TEXT("rebuild_material"))
-    return HandleRebuildMaterial(RequestId, Payload, RequestingSocket);
+    return HandleRebuildMaterial(RequestId, Action, Payload, RequestingSocket);
 
   return false;
 }
 
-#if WITH_EDITOR
-#include "AssetRegistry/AssetRegistryModule.h"
-#include "AssetToolsModule.h"
-#include "AssetViewUtils.h"
-#include "EditorAssetLibrary.h"
-#include "Engine/StaticMesh.h"
-#include "Factories/MaterialFactoryNew.h"
-#include "Factories/MaterialInstanceConstantFactoryNew.h"
-#include "FileHelpers.h"
-#include "IAssetTools.h"
-#include "ISourceControlModule.h"
-#include "ISourceControlProvider.h"
-#include "ImageUtils.h"
-#include "MaterialEditingLibrary.h"
-#include "Materials/Material.h"
-// MaterialDomain.h was introduced in UE 5.1 - in UE 5.0 EMaterialDomain is in MaterialShared.h
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-#include "MaterialDomain.h"
-#endif
-#include "Materials/MaterialExpressionScalarParameter.h"
-#include "Materials/MaterialExpressionStaticSwitchParameter.h"
-#include "Materials/MaterialExpressionTextureSample.h"
-#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
-#include "Materials/MaterialExpressionVectorParameter.h"
-#include "Materials/MaterialInstanceConstant.h"
-#include "MaterialShared.h"
-#include "Misc/FileHelper.h"
-#include "ObjectTools.h"
-#include "SourceControlHelpers.h"
-#include "SourceControlOperations.h"
-#include "ThumbnailRendering/ThumbnailManager.h"
-#include "UObject/MetaData.h"
-#include "UObject/ObjectRedirector.h"
-#include "UObject/Package.h"
-#include "UObject/SavePackage.h"
-
-#endif
 
 // ============================================================================
 // 1. FIXUP REDIRECTORS
@@ -158,15 +294,53 @@ bool UMcpAutomationBridgeSubsystem::HandleFixupRedirectors(
     return true;
   }
 
-  // Get optional directory path (if empty, fix all redirectors)
+  // Get directory path - REQUIRED for proper error reporting
   FString DirectoryPath;
   Payload->TryGetStringField(TEXT("directoryPath"), DirectoryPath);
+  
+  // Also check for "path" as alias
+  if (DirectoryPath.IsEmpty()) {
+    Payload->TryGetStringField(TEXT("path"), DirectoryPath);
+  }
 
   bool bCheckoutFiles = false;
   Payload->TryGetBoolField(TEXT("checkoutFiles"), bCheckoutFiles);
 
-  AsyncTask(ENamedThreads::GameThread, [this, RequestId, DirectoryPath,
+  // Validate path is provided
+  if (DirectoryPath.IsEmpty()) {
+    SendAutomationError(RequestingSocket, RequestId,
+                        TEXT("directoryPath or path is required for fixup_redirectors"),
+                        TEXT("MISSING_ARGUMENT"));
+    return true;
+  }
+
+  // SECURITY: Sanitize path to prevent traversal attacks
+  FString SanitizedPath = SanitizeProjectRelativePath(DirectoryPath);
+  if (SanitizedPath.IsEmpty()) {
+    SendAutomationError(RequestingSocket, RequestId,
+        FString::Printf(TEXT("Invalid path (traversal/security violation): %s"), *DirectoryPath),
+        TEXT("SECURITY_VIOLATION"));
+    return true;
+  }
+
+  // Normalize path
+  FString NormalizedPath = SanitizedPath;
+  if (NormalizedPath.StartsWith(TEXT("/Content"), ESearchCase::IgnoreCase)) {
+    NormalizedPath = FString::Printf(TEXT("/Game%s"), *NormalizedPath.RightChop(8));
+  }
+
+  AsyncTask(ENamedThreads::GameThread, [this, RequestId, NormalizedPath,
                                         bCheckoutFiles, RequestingSocket]() {
+    // CRITICAL FIX: Use DoesAssetDirectoryExistOnDisk for strict validation
+    // UEditorAssetLibrary::DoesDirectoryExist() uses AssetRegistry cache which may
+    // contain stale entries. We need to check if the directory ACTUALLY exists on disk.
+    if (!DoesAssetDirectoryExistOnDisk(NormalizedPath)) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          FString::Printf(TEXT("Directory not found: %s"), *NormalizedPath),
+                          TEXT("PATH_NOT_FOUND"));
+      return;
+    }
+
     FAssetRegistryModule &AssetRegistryModule =
         FModuleManager::LoadModuleChecked<FAssetRegistryModule>(
             TEXT("AssetRegistry"));
@@ -181,22 +355,14 @@ bool UMcpAutomationBridgeSubsystem::HandleFixupRedirectors(
     Filter.ClassNames.Add(FName(TEXT("ObjectRedirector")));
 #endif
 
-    if (!DirectoryPath.IsEmpty()) {
-      FString NormalizedPath = DirectoryPath;
-      if (NormalizedPath.StartsWith(TEXT("/Content"),
-                                    ESearchCase::IgnoreCase)) {
-        NormalizedPath =
-            FString::Printf(TEXT("/Game%s"), *NormalizedPath.RightChop(8));
-      }
-      Filter.PackagePaths.Add(FName(*NormalizedPath));
-      Filter.bRecursivePaths = true;
-    }
+    Filter.PackagePaths.Add(FName(*NormalizedPath));
+    Filter.bRecursivePaths = true;
 
     TArray<FAssetData> RedirectorAssets;
     AssetRegistry.GetAssets(Filter, RedirectorAssets);
 
     if (RedirectorAssets.Num() == 0) {
-      TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+      TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
       Result->SetBoolField(TEXT("success"), true);
       Result->SetNumberField(TEXT("redirectorsFound"), 0);
       Result->SetNumberField(TEXT("redirectorsFixed"), 0);
@@ -253,7 +419,7 @@ bool UMcpAutomationBridgeSubsystem::HandleFixupRedirectors(
       DeletedCount = ObjectTools::DeleteObjects(ObjectsToDelete, false);
     }
 
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), true);
     Result->SetNumberField(TEXT("redirectorsFound"), RedirectorAssets.Num());
     Result->SetNumberField(TEXT("redirectorsFixed"), DeletedCount);
@@ -294,24 +460,33 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlCheckout(
     return true;
   }
 
+  // Accept both assetPaths (array) and assetPath (single string)
+  TArray<FString> AssetPaths;
   const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) ||
-      !AssetPathsArray || AssetPathsArray->Num() == 0) {
+  if (Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) &&
+      AssetPathsArray && AssetPathsArray->Num() > 0) {
+    for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
+      if (Val.IsValid() && Val->Type == EJson::String) {
+        AssetPaths.Add(Val->AsString());
+      }
+    }
+  } else {
+    // Try single assetPath
+    FString SinglePath;
+    if (Payload->TryGetStringField(TEXT("assetPath"), SinglePath) && !SinglePath.IsEmpty()) {
+      AssetPaths.Add(SinglePath);
+    }
+  }
+
+  if (AssetPaths.Num() == 0) {
     SendAutomationError(RequestingSocket, RequestId,
-                        TEXT("assetPaths array required"),
+                        TEXT("assetPath (string) or assetPaths (array) required"),
                         TEXT("INVALID_ARGUMENT"));
     return true;
   }
 
-  TArray<FString> AssetPaths;
-  for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
-    if (Val.IsValid() && Val->Type == EJson::String) {
-      AssetPaths.Add(Val->AsString());
-    }
-  }
-
   if (!ISourceControlModule::Get().IsEnabled()) {
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), false);
     Result->SetStringField(TEXT("error"),
                            TEXT("Source control is not enabled"));
@@ -335,7 +510,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlCheckout(
   }
 
   if (PackageNames.Num() == 0) {
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), false);
     Result->SetStringField(TEXT("error"), TEXT("No valid assets found"));
     SendAutomationResponse(RequestingSocket, RequestId, false,
@@ -351,7 +526,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlCheckout(
     CheckedOutPaths.Add(MakeShared<FJsonValueString>(Path));
   }
 
-  TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
   Result->SetBoolField(TEXT("success"), bSuccess);
   Result->SetNumberField(TEXT("checkedOut"), PackageNames.Num());
   Result->SetArrayField(TEXT("assets"), CheckedOutPaths);
@@ -391,11 +566,27 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlSubmit(
     return true;
   }
 
+  // Accept both assetPaths (array) and assetPath (single string)
+  TArray<FString> AssetPaths;
   const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) ||
-      !AssetPathsArray || AssetPathsArray->Num() == 0) {
+  if (Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) &&
+      AssetPathsArray && AssetPathsArray->Num() > 0) {
+    for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
+      if (Val.IsValid() && Val->Type == EJson::String) {
+        AssetPaths.Add(Val->AsString());
+      }
+    }
+  } else {
+    // Try single assetPath
+    FString SinglePath;
+    if (Payload->TryGetStringField(TEXT("assetPath"), SinglePath) && !SinglePath.IsEmpty()) {
+      AssetPaths.Add(SinglePath);
+    }
+  }
+
+  if (AssetPaths.Num() == 0) {
     SendAutomationError(RequestingSocket, RequestId,
-                        TEXT("assetPaths array required"),
+                        TEXT("assetPath (string) or assetPaths (array) required"),
                         TEXT("INVALID_ARGUMENT"));
     return true;
   }
@@ -406,15 +597,8 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlSubmit(
     Description = TEXT("Automated submission via MCP Automation Bridge");
   }
 
-  TArray<FString> AssetPaths;
-  for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
-    if (Val.IsValid() && Val->Type == EJson::String) {
-      AssetPaths.Add(Val->AsString());
-    }
-  }
-
   if (!ISourceControlModule::Get().IsEnabled()) {
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), false);
     Result->SetStringField(TEXT("error"),
                            TEXT("Source control is not enabled"));
@@ -436,7 +620,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlSubmit(
   }
 
   if (PackageNames.Num() == 0) {
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), false);
     Result->SetStringField(TEXT("error"), TEXT("No valid assets found"));
     SendAutomationResponse(RequestingSocket, RequestId, false,
@@ -462,7 +646,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlSubmit(
       SourceControlProvider.Execute(CheckInOperation, FilePaths);
   bool bSuccess = (Result == ECommandResult::Succeeded);
 
-  TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> ResultObj = McpHandlerUtils::CreateResultObject();
   ResultObj->SetBoolField(TEXT("success"), bSuccess);
   ResultObj->SetNumberField(TEXT("submitted"),
                             bSuccess ? PackageNames.Num() : 0);
@@ -480,6 +664,67 @@ bool UMcpAutomationBridgeSubsystem::HandleSourceControlSubmit(
   return true;
 #endif
 }
+
+// ============================================================================
+// 4A. SOURCE CONTROL ENABLE
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleSourceControlEnable(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> RequestingSocket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("source_control_enable"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+#if WITH_EDITOR
+  FString Provider = TEXT("None");
+  if (Payload.IsValid()) {
+    Payload->TryGetStringField(TEXT("provider"), Provider);
+  }
+
+  ISourceControlModule& SourceControlModule = ISourceControlModule::Get();
+  
+  // Check if already enabled
+  if (SourceControlModule.IsEnabled()) {
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    Result->SetBoolField(TEXT("success"), true);
+    Result->SetStringField(TEXT("provider"), SourceControlModule.GetProvider().GetName().ToString());
+    Result->SetStringField(TEXT("message"), TEXT("Source control already enabled"));
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           TEXT("Source control already enabled"), Result, FString());
+    return true;
+  }
+
+  // Try to set the provider by name
+  if (!Provider.IsEmpty() && !Provider.Equals(TEXT("None"), ESearchCase::IgnoreCase)) {
+    SourceControlModule.SetProvider(FName(*Provider));
+  }
+  
+  bool bEnabled = SourceControlModule.IsEnabled();
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  Result->SetBoolField(TEXT("success"), bEnabled);
+  Result->SetStringField(TEXT("provider"), SourceControlModule.GetProvider().GetName().ToString());
+  
+  if (bEnabled) {
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           TEXT("Source control enabled"), Result, FString());
+  } else {
+    Result->SetStringField(TEXT("error"), TEXT("Failed to enable source control. Please configure provider in Editor preferences."));
+    SendAutomationResponse(RequestingSocket, RequestId, false,
+                           TEXT("Source control enable failed"), Result,
+                           TEXT("SOURCE_CONTROL_ENABLE_FAILED"));
+  }
+  return true;
+#else
+  SendAutomationResponse(RequestingSocket, RequestId, false,
+                         TEXT("source_control_enable requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+// ============================================================================
 
 // ============================================================================
 // 4. BULK RENAME ASSETS
@@ -502,15 +747,6 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkRenameAssets(
     return true;
   }
 
-  const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) ||
-      !AssetPathsArray || AssetPathsArray->Num() == 0) {
-    SendAutomationError(RequestingSocket, RequestId,
-                        TEXT("assetPaths array required"),
-                        TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
   // Get rename options
   FString Prefix, Suffix, SearchText, ReplaceText;
   Payload->TryGetStringField(TEXT("prefix"), Prefix);
@@ -522,9 +758,55 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkRenameAssets(
   Payload->TryGetBoolField(TEXT("checkoutFiles"), bCheckoutFiles);
 
   TArray<FString> AssetPaths;
-  for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
-    if (Val.IsValid() && Val->Type == EJson::String) {
-      AssetPaths.Add(Val->AsString());
+
+  // Check for assetPaths array first
+  const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
+  if (Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) &&
+      AssetPathsArray && AssetPathsArray->Num() > 0) {
+    for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
+      if (Val.IsValid() && Val->Type == EJson::String) {
+        AssetPaths.Add(Val->AsString());
+      }
+    }
+  } else {
+    // Check for folderPath - if provided, list all assets in that folder
+    FString FolderPath;
+    if (Payload->TryGetStringField(TEXT("folderPath"), FolderPath) && !FolderPath.IsEmpty()) {
+      // Normalize path
+      FString NormalizedPath = FolderPath;
+      if (NormalizedPath.StartsWith(TEXT("/Content"), ESearchCase::IgnoreCase)) {
+        NormalizedPath = FString::Printf(TEXT("/Game%s"), *NormalizedPath.RightChop(8));
+      }
+      
+      // Get all assets in the folder
+      FAssetRegistryModule &AssetRegistryModule =
+          FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+      IAssetRegistry &AssetRegistry = AssetRegistryModule.Get();
+      
+      FARFilter Filter;
+      Filter.PackagePaths.Add(FName(*NormalizedPath));
+      Filter.bRecursivePaths = true;
+      
+      TArray<FAssetData> AssetDataList;
+      AssetRegistry.GetAssets(Filter, AssetDataList);
+      
+      for (const FAssetData &AssetData : AssetDataList) {
+        AssetPaths.Add(AssetData.ToSoftObjectPath().ToString());
+      }
+      
+      if (AssetPaths.Num() == 0) {
+        TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+        Result->SetBoolField(TEXT("success"), true);
+        Result->SetNumberField(TEXT("renamed"), 0);
+        Result->SetStringField(TEXT("message"), TEXT("No assets found in folder"));
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("No assets found"), Result, FString());
+        return true;
+      }
+    } else {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Either assetPaths array or folderPath is required"),
+                          TEXT("INVALID_ARGUMENT"));
+      return true;
     }
   }
 
@@ -571,7 +853,7 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkRenameAssets(
   }
 
   if (RenameData.Num() == 0) {
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), true);
     Result->SetNumberField(TEXT("renamed"), 0);
     Result->SetStringField(TEXT("message"),
@@ -596,13 +878,13 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkRenameAssets(
 
   TArray<TSharedPtr<FJsonValue>> RenamedAssets;
   for (const FAssetRenameData &Data : RenameData) {
-    TSharedPtr<FJsonObject> AssetInfo = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> AssetInfo = McpHandlerUtils::CreateResultObject();
     AssetInfo->SetStringField(TEXT("oldPath"), Data.Asset->GetPathName());
     AssetInfo->SetStringField(TEXT("newName"), Data.NewName);
     RenamedAssets.Add(MakeShared<FJsonValueObject>(AssetInfo));
   }
 
-  TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
   Result->SetBoolField(TEXT("success"), bSuccess);
   Result->SetNumberField(TEXT("renamed"), RenameData.Num());
   Result->SetArrayField(TEXT("assets"), RenamedAssets);
@@ -642,15 +924,6 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkDeleteAssets(
     return true;
   }
 
-  const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) ||
-      !AssetPathsArray || AssetPathsArray->Num() == 0) {
-    SendAutomationError(RequestingSocket, RequestId,
-                        TEXT("assetPaths array required"),
-                        TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
   bool bShowConfirmation = false;
   Payload->TryGetBoolField(TEXT("showConfirmation"), bShowConfirmation);
 
@@ -658,9 +931,68 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkDeleteAssets(
   Payload->TryGetBoolField(TEXT("fixupRedirectors"), bFixupRedirectors);
 
   TArray<FString> AssetPaths;
-  for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
-    if (Val.IsValid() && Val->Type == EJson::String) {
-      AssetPaths.Add(Val->AsString());
+
+  // Check for assetPaths array first
+  const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
+  if (Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) &&
+      AssetPathsArray && AssetPathsArray->Num() > 0) {
+    for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
+      if (Val.IsValid() && Val->Type == EJson::String) {
+        AssetPaths.Add(Val->AsString());
+      }
+    }
+  } else {
+    // Check for folderPath - if provided, list all assets in that folder
+    FString FolderPath;
+    FString Pattern;
+    Payload->TryGetStringField(TEXT("folderPath"), FolderPath);
+    Payload->TryGetStringField(TEXT("path"), FolderPath);  // alias
+    Payload->TryGetStringField(TEXT("pattern"), Pattern);
+    
+    if (!FolderPath.IsEmpty()) {
+      // Normalize path
+      FString NormalizedPath = FolderPath;
+      if (NormalizedPath.StartsWith(TEXT("/Content"), ESearchCase::IgnoreCase)) {
+        NormalizedPath = FString::Printf(TEXT("/Game%s"), *NormalizedPath.RightChop(8));
+      }
+      
+      // Get all assets in the folder
+      FAssetRegistryModule &AssetRegistryModule =
+          FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+      IAssetRegistry &AssetRegistry = AssetRegistryModule.Get();
+      
+      FARFilter Filter;
+      Filter.PackagePaths.Add(FName(*NormalizedPath));
+      Filter.bRecursivePaths = true;
+      
+      TArray<FAssetData> AssetDataList;
+      AssetRegistry.GetAssets(Filter, AssetDataList);
+      
+      for (const FAssetData &AssetData : AssetDataList) {
+        FString AssetPath = AssetData.ToSoftObjectPath().ToString();
+        // If pattern is specified, filter by it
+        if (!Pattern.IsEmpty()) {
+          FString AssetName = AssetData.AssetName.ToString();
+          if (!AssetName.Contains(Pattern)) {
+            continue;
+          }
+        }
+        AssetPaths.Add(AssetPath);
+      }
+      
+      if (AssetPaths.Num() == 0) {
+        TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+        Result->SetBoolField(TEXT("success"), true);
+        Result->SetNumberField(TEXT("deleted"), 0);
+        Result->SetStringField(TEXT("message"), TEXT("No assets found matching criteria"));
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("No assets found"), Result, FString());
+        return true;
+      }
+    } else {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Either assetPaths array or folderPath is required"),
+                          TEXT("INVALID_ARGUMENT"));
+      return true;
     }
   }
 
@@ -677,7 +1009,7 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkDeleteAssets(
   }
 
   if (ObjectsToDelete.Num() == 0) {
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetBoolField(TEXT("success"), false);
     Result->SetStringField(TEXT("error"), TEXT("No valid assets found"));
     SendAutomationResponse(RequestingSocket, RequestId, false,
@@ -730,7 +1062,7 @@ bool UMcpAutomationBridgeSubsystem::HandleBulkDeleteAssets(
     DeletedArray.Add(MakeShared<FJsonValueString>(Path));
   }
 
-  TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
   Result->SetBoolField(TEXT("success"), DeletedCount > 0);
   Result->SetArrayField(TEXT("deleted"), DeletedArray);
   Result->SetNumberField(TEXT("requested"), ObjectsToDelete.Num());
@@ -758,7 +1090,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
     const TSharedPtr<FJsonObject> &Payload,
     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket) {
   const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("generate_thumbnail"), ESearchCase::IgnoreCase)) {
+  if (!Lower.Equals(TEXT("generate_thumbnail"), ESearchCase::IgnoreCase) &&
+      !Lower.Equals(TEXT("create_thumbnail"), ESearchCase::IgnoreCase)) {
     return false;
   }
 #if WITH_EDITOR
@@ -777,6 +1110,15 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
     return true;
   }
 
+  // SECURITY: Validate asset path
+  FString SafeAssetPath = SanitizeProjectRelativePath(AssetPath);
+  if (SafeAssetPath.IsEmpty()) {
+    SendAutomationError(RequestingSocket, RequestId,
+        FString::Printf(TEXT("Invalid path (traversal/security violation): %s"), *AssetPath),
+        TEXT("SECURITY_VIOLATION"));
+    return true;
+  }
+
   int32 Width = 512;
   int32 Height = 512;
 
@@ -789,20 +1131,32 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
   FString OutputPath;
   Payload->TryGetStringField(TEXT("outputPath"), OutputPath);
 
-  if (!UEditorAssetLibrary::DoesAssetExist(AssetPath)) {
+  // NOTE: ProcessAutomationRequest already dispatches to GameThread.
+  // Wrapping ALL work (including fast existence checks) in AsyncTask(GameThread, ...)
+  // caused the queued lambda to sit behind the current dispatch cycle, so responses
+  // never reached the MCP server before the 30-second timeout (issues #138, #139).
+  // Execute synchronously instead.
+  SendProgressUpdate(RequestId, 0.0f,
+      FString::Printf(TEXT("Starting thumbnail generation for: %s"), *SafeAssetPath), true);
+
+  if (!UEditorAssetLibrary::DoesAssetExist(SafeAssetPath)) {
     SendAutomationResponse(RequestingSocket, RequestId, false,
                            TEXT("Asset not found"), nullptr,
                            TEXT("ASSET_NOT_FOUND"));
     return true;
   }
 
-  UObject *Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+  UObject *Asset = UEditorAssetLibrary::LoadAsset(SafeAssetPath);
   if (!Asset) {
     SendAutomationResponse(RequestingSocket, RequestId, false,
                            TEXT("Failed to load asset"), nullptr,
                            TEXT("LOAD_FAILED"));
     return true;
   }
+
+  // Send progress update before GPU operation
+  SendProgressUpdate(RequestId, 50.0f,
+      TEXT("Rendering thumbnail (GPU operation)..."), true);
 
   FObjectThumbnail ObjectThumbnail;
   ThumbnailTools::RenderThumbnail(
@@ -820,7 +1174,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
       TArray<FColor> ColorData;
       ColorData.Reserve(Width * Height);
 
-      for (int32 i = 0; i < ImageData.Num(); i += 4) {
+      // Fixed: Ensure we don't read out of bounds if ImageData length isn't a multiple of 4
+      for (int32 i = 0; i + 3 < ImageData.Num(); i += 4) {
         FColor Color;
         Color.B = ImageData[i + 0];
         Color.G = ImageData[i + 1];
@@ -829,10 +1184,30 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
         ColorData.Add(Color);
       }
 
-      FString AbsolutePath = OutputPath;
-      if (FPaths::IsRelative(OutputPath)) {
-        AbsolutePath =
-            FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), OutputPath);
+      // SECURITY: Sanitize and validate the output path to prevent path traversal
+      FString SafeOutputPath = SanitizeProjectFilePath(OutputPath);
+      if (SafeOutputPath.IsEmpty()) {
+        SendAutomationResponse(RequestingSocket, RequestId, false,
+                               FString::Printf(TEXT("Invalid or unsafe output path: %s"), *OutputPath),
+                               nullptr, TEXT("SECURITY_VIOLATION"));
+        return true;
+      }
+
+      FString AbsolutePath = FPaths::ProjectDir() / SafeOutputPath;
+      AbsolutePath = FPaths::ConvertRelativePathToFull(AbsolutePath);
+      FPaths::NormalizeFilename(AbsolutePath);
+
+      FString NormalizedProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+      FPaths::NormalizeDirectoryName(NormalizedProjectDir);
+      if (!NormalizedProjectDir.EndsWith(TEXT("/"))) {
+        NormalizedProjectDir += TEXT("/");
+      }
+
+      if (!AbsolutePath.StartsWith(NormalizedProjectDir, ESearchCase::IgnoreCase)) {
+        SendAutomationResponse(RequestingSocket, RequestId, false,
+                               FString::Printf(TEXT("Output path escapes project directory: %s"), *OutputPath),
+                               nullptr, TEXT("SECURITY_VIOLATION"));
+        return true;
       }
 
       TArray<uint8> CompressedData;
@@ -851,9 +1226,9 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
     Asset->GetOutermost()->MarkPackageDirty();
   }
 
-  TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
   Result->SetBoolField(TEXT("success"), bSuccess);
-  Result->SetStringField(TEXT("assetPath"), AssetPath);
+  Result->SetStringField(TEXT("assetPath"), SafeAssetPath);
   Result->SetNumberField(TEXT("width"), Width);
   Result->SetNumberField(TEXT("height"), Height);
 
@@ -866,6 +1241,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateThumbnail(
       bSuccess ? TEXT("Thumbnail generated successfully")
                : TEXT("Thumbnail generation failed"),
       Result, bSuccess ? FString() : TEXT("THUMBNAIL_GENERATION_FAILED"));
+
   return true;
 #else
   SendAutomationResponse(RequestingSocket, RequestId, false,
@@ -1001,11 +1377,16 @@ bool UMcpAutomationBridgeSubsystem::HandleImportAsset(
               FinalAssetPath = Asset->GetPathName();
             }
 
-            TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+            TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
             Resp->SetBoolField(TEXT("success"), true);
             Resp->SetStringField(TEXT("assetPath"), FinalAssetPath);
             if (!bRenameSucceeded) {
               Resp->SetBoolField(TEXT("renameWarning"), true);
+            }
+            // Add verification data
+            UObject *ImportedAsset = UEditorAssetLibrary::LoadAsset(FinalAssetPath);
+            if (ImportedAsset) {
+              McpHandlerUtils::AddVerification(Resp, ImportedAsset);
             }
             StrongThis->SendAutomationResponse(
                 Socket, RequestId, true,
@@ -1029,7 +1410,8 @@ bool UMcpAutomationBridgeSubsystem::HandleImportAsset(
 
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1070,7 +1452,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSetMetadata(
   if (!Payload->TryGetObjectField(TEXT("metadata"), MetadataObjPtr) ||
       !MetadataObjPtr) {
     // Treat missing/empty metadata as a no-op success; nothing to write.
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), AssetPath);
     Resp->SetNumberField(TEXT("updatedKeys"), 0);
@@ -1151,16 +1533,20 @@ bool UMcpAutomationBridgeSubsystem::HandleSetMetadata(
     Package->SetDirtyFlag(true);
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("assetPath"), AssetPath);
   Resp->SetNumberField(TEXT("updatedKeys"), UpdatedCount);
+  
+  // Add verification data
+  McpHandlerUtils::AddVerification(Resp, Asset);
 
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Asset metadata updated"), Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1248,7 +1634,7 @@ bool UMcpAutomationBridgeSubsystem::HandleDuplicateAsset(
       }
     }
 
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     const bool bSuccess = DuplicatedCount > 0;
     Resp->SetBoolField(TEXT("success"), bSuccess);
     Resp->SetStringField(TEXT("sourcePath"), SourcePath);
@@ -1285,9 +1671,14 @@ bool UMcpAutomationBridgeSubsystem::HandleDuplicateAsset(
   }
 
   if (UEditorAssetLibrary::DuplicateAsset(SourcePath, DestinationPath)) {
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), DestinationPath);
+    // Add verification data
+    UObject *NewAsset = UEditorAssetLibrary::LoadAsset(DestinationPath);
+    if (NewAsset) {
+      McpHandlerUtils::AddVerification(Resp, NewAsset);
+    }
     SendAutomationResponse(Socket, RequestId, true, TEXT("Asset duplicated"),
                            Resp, FString());
   } else {
@@ -1296,7 +1687,8 @@ bool UMcpAutomationBridgeSubsystem::HandleDuplicateAsset(
   }
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1356,9 +1748,16 @@ bool UMcpAutomationBridgeSubsystem::HandleRenameAsset(
 
   // Use the resolved path for the rename operation
   if (UEditorAssetLibrary::RenameAsset(ResolvedSourcePath, DestinationPath)) {
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), DestinationPath);
+    
+    // Add verification data
+    UObject* RenamedAsset = UEditorAssetLibrary::LoadAsset(DestinationPath);
+    if (RenamedAsset) {
+      McpHandlerUtils::AddVerification(Resp, RenamedAsset);
+    }
+    
     SendAutomationResponse(Socket, RequestId, true, TEXT("Asset renamed"), Resp,
                            FString());
   } else {
@@ -1371,7 +1770,8 @@ bool UMcpAutomationBridgeSubsystem::HandleRenameAsset(
   }
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1418,24 +1818,101 @@ bool UMcpAutomationBridgeSubsystem::HandleDeleteAssets(
   }
 
   int32 DeletedCount = 0;
+  TArray<FString> NotFoundPaths;
+  TArray<FString> FailedToDeletePaths;
+  
   for (const FString &Path : PathsToDelete) {
+    // Check if it's a directory first (folder path)
     if (UEditorAssetLibrary::DoesDirectoryExist(Path)) {
-      if (UEditorAssetLibrary::DeleteDirectory(Path)) {
-        DeletedCount++;
+      // Directory exists - use safe folder deletion with proper cleanup
+      // CRITICAL for UE 5.7+: Use McpSafeDeleteFolder instead of UEditorAssetLibrary::DeleteDirectory
+      // to prevent crashes during UWorld::CleanupWorld when deleting folders containing
+      // AnimBlueprints, IKRigs, IKRetargeters, etc.
+      if (McpSafeOperations::McpSafeDeleteFolder(Path, true))
+      {
+        // Verify the directory was actually deleted
+        if (!UEditorAssetLibrary::DoesDirectoryExist(Path)) {
+          DeletedCount++;
+        } else {
+          // Delete returned true but directory still exists
+          FailedToDeletePaths.Add(Path);
+        }
+      } else {
+        FailedToDeletePaths.Add(Path);
       }
-    } else if (UEditorAssetLibrary::DeleteAsset(Path)) {
-      DeletedCount++;
+    } else if (UEditorAssetLibrary::DoesAssetExist(Path)) {
+      // Asset exists - attempt to delete it
+      if (UEditorAssetLibrary::DeleteAsset(Path)) {
+        // Verify the asset was actually deleted
+        if (!UEditorAssetLibrary::DoesAssetExist(Path)) {
+          DeletedCount++;
+        } else {
+          // Delete returned true but asset still exists
+          FailedToDeletePaths.Add(Path);
+        }
+      } else {
+        FailedToDeletePaths.Add(Path);
+      }
+    } else {
+      // Asset/directory does not exist
+      NotFoundPaths.Add(Path);
     }
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
-  Resp->SetBoolField(TEXT("success"), DeletedCount > 0);
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  
+  // Return success only if at least one asset was deleted
+  bool bSuccess = DeletedCount > 0;
+  Resp->SetBoolField(TEXT("success"), bSuccess);
   Resp->SetNumberField(TEXT("deletedCount"), DeletedCount);
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Assets deleted"), Resp,
-                         FString());
+  Resp->SetBoolField(TEXT("existsAfter"), false);
+  
+  if (NotFoundPaths.Num() > 0) {
+    TArray<TSharedPtr<FJsonValue>> NotFoundArray;
+    for (const FString& P : NotFoundPaths) {
+      NotFoundArray.Add(MakeShared<FJsonValueString>(P));
+    }
+    Resp->SetArrayField(TEXT("notFoundPaths"), NotFoundArray);
+    Resp->SetNumberField(TEXT("notFoundCount"), NotFoundPaths.Num());
+  }
+  
+  if (FailedToDeletePaths.Num() > 0) {
+    TArray<TSharedPtr<FJsonValue>> FailedArray;
+    for (const FString& P : FailedToDeletePaths) {
+      FailedArray.Add(MakeShared<FJsonValueString>(P));
+    }
+    Resp->SetArrayField(TEXT("failedToDeletePaths"), FailedArray);
+    Resp->SetNumberField(TEXT("failedCount"), FailedToDeletePaths.Num());
+  }
+  
+  if (bSuccess) {
+    SendAutomationResponse(Socket, RequestId, true, TEXT("Assets deleted"), Resp, FString());
+  } else {
+    // Nothing was deleted - determine the reason
+    FString ErrorMessage;
+    FString ErrorCode;
+    
+    if (NotFoundPaths.Num() > 0 && FailedToDeletePaths.Num() == 0) {
+      // All paths were not found
+      ErrorMessage = FString::Printf(TEXT("No assets deleted. %d path(s) not found."), NotFoundPaths.Num());
+      ErrorCode = TEXT("ASSET_NOT_FOUND");
+    } else if (FailedToDeletePaths.Num() > 0 && NotFoundPaths.Num() == 0) {
+      // All paths existed but deletion failed
+      ErrorMessage = FString::Printf(TEXT("Failed to delete %d asset(s). They may be in use or locked."), FailedToDeletePaths.Num());
+      ErrorCode = TEXT("DELETE_FAILED");
+    } else {
+      // Mixed: some not found, some failed to delete
+      ErrorMessage = FString::Printf(TEXT("No assets deleted. %d path(s) not found, %d failed to delete."), 
+                                      NotFoundPaths.Num(), FailedToDeletePaths.Num());
+      ErrorCode = TEXT("DELETE_FAILED");
+    }
+    
+    SendAutomationResponse(Socket, RequestId, false, ErrorMessage, Resp, ErrorCode);
+  }
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1474,9 +1951,11 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateFolder(
 
   if (UEditorAssetLibrary::DoesDirectoryExist(SafePath) ||
       UEditorAssetLibrary::MakeDirectory(SafePath)) {
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("path"), SafePath);
+    // Add verification data
+    VerifyAssetExists(Resp, SafePath);
     SendAutomationResponse(Socket, RequestId, true, TEXT("Folder created"),
                            Resp, FString());
   } else {
@@ -1486,7 +1965,8 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateFolder(
   }
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1517,6 +1997,14 @@ bool UMcpAutomationBridgeSubsystem::HandleGetDependencies(
     return true;
   }
 
+  // Check if asset exists - return error for non-existent assets
+  if (!UEditorAssetLibrary::DoesAssetExist(AssetPath)) {
+    SendAutomationError(Socket, RequestId, 
+                        FString::Printf(TEXT("Asset not found: %s"), *AssetPath),
+                        TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
   bool bRecursive = false;
   Payload->TryGetBoolField(TEXT("recursive"), bRecursive);
 
@@ -1532,14 +2020,15 @@ bool UMcpAutomationBridgeSubsystem::HandleGetDependencies(
     DepArray.Add(MakeShared<FJsonValueString>(Dep.ToString()));
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetArrayField(TEXT("dependencies"), DepArray);
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Dependencies retrieved"), Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1569,6 +2058,14 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
     return true;
   }
 
+  // Check if asset exists - return error for non-existent assets
+  if (!UEditorAssetLibrary::DoesAssetExist(AssetPath)) {
+    SendAutomationError(Socket, RequestId, 
+                        FString::Printf(TEXT("Asset not found: %s"), *AssetPath),
+                        TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
   int32 MaxDepth = 3;
   Payload->TryGetNumberField(TEXT("maxDepth"), MaxDepth);
 
@@ -1576,7 +2073,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
       FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
   IAssetRegistry &AssetRegistry = AssetRegistryModule.Get();
 
-  TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> GraphObj = McpHandlerUtils::CreateResultObject();
 
   TArray<FString> Queue;
   Queue.Add(AssetPath);
@@ -1614,14 +2111,15 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
     GraphObj->SetArrayField(Current, DepArray);
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetObjectField(TEXT("graph"), GraphObj);
   SendAutomationResponse(Socket, RequestId, true, TEXT("Asset graph retrieved"),
                          Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1669,7 +2167,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSetTags(
     // Edge-case: empty or missing tags array should be treated as a no-op
     // success.
     if (Tags.Num() == 0) {
-      TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+      TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
       Resp->SetBoolField(TEXT("success"), true);
       Resp->SetStringField(TEXT("assetPath"), AssetPath);
       Resp->SetNumberField(TEXT("appliedTags"), 0);
@@ -1702,7 +2200,7 @@ bool UMcpAutomationBridgeSubsystem::HandleSetTags(
     // Mark dirty so the asset can be saved later
     Asset->MarkPackageDirty();
 
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetBoolField(TEXT("markedDirty"), true);
     Resp->SetStringField(TEXT("assetPath"), AssetPath);
@@ -1713,7 +2211,8 @@ bool UMcpAutomationBridgeSubsystem::HandleSetTags(
 
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1760,7 +2259,7 @@ bool UMcpAutomationBridgeSubsystem::HandleValidateAsset(
     }
 
     bool bIsValid = true;
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), bIsValid);
     Resp->SetStringField(TEXT("assetPath"), AssetPath);
     Resp->SetBoolField(TEXT("isValid"), bIsValid);
@@ -1770,7 +2269,8 @@ bool UMcpAutomationBridgeSubsystem::HandleValidateAsset(
   });
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -1985,7 +2485,7 @@ bool UMcpAutomationBridgeSubsystem::HandleListAssets(
 
   TArray<TSharedPtr<FJsonValue>> AssetsArray;
   for (const FAssetData &Asset : AssetList) {
-    TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> AssetObj = McpHandlerUtils::CreateResultObject();
     AssetObj->SetStringField(TEXT("name"), Asset.AssetName.ToString());
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
     AssetObj->SetStringField(TEXT("path"), Asset.GetSoftObjectPath().ToString());
@@ -2011,7 +2511,7 @@ bool UMcpAutomationBridgeSubsystem::HandleListAssets(
     FoldersJson.Add(MakeShared<FJsonValueString>(SubPath));
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetArrayField(TEXT("assets"), AssetsArray);
   Resp->SetArrayField(TEXT("folders"), FoldersJson);
@@ -2023,7 +2523,8 @@ bool UMcpAutomationBridgeSubsystem::HandleListAssets(
                          FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2068,7 +2569,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAsset(
     return true;
   }
 
-  TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> AssetObj = McpHandlerUtils::CreateResultObject();
   AssetObj->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
   AssetObj->SetStringField(TEXT("path"), AssetData.GetSoftObjectPath().ToString());
@@ -2080,7 +2581,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAsset(
   AssetObj->SetStringField(TEXT("packagePath"),
                            AssetData.PackagePath.ToString());
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetObjectField(TEXT("result"), AssetObj);
 
@@ -2088,7 +2589,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAsset(
                          TEXT("Asset details retrieved"), Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2147,7 +2649,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateReport(
 
     TArray<TSharedPtr<FJsonValue>> AssetsArray;
     for (const FAssetData &Asset : AssetList) {
-      TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
+      TSharedPtr<FJsonObject> AssetObj = McpHandlerUtils::CreateResultObject();
       AssetObj->SetStringField(TEXT("name"), Asset.AssetName.ToString());
       AssetObj->SetStringField(TEXT("path"),
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
@@ -2162,10 +2664,30 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateReport(
 
     bool bFileWritten = false;
     if (!OutputPath.IsEmpty()) {
-      FString AbsoluteOutput = OutputPath;
-      if (FPaths::IsRelative(OutputPath)) {
-        AbsoluteOutput =
-            FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), OutputPath);
+      // SECURITY: Sanitize and validate the output path to prevent path traversal
+      FString SafeOutputPath = SanitizeProjectFilePath(OutputPath);
+      if (SafeOutputPath.IsEmpty()) {
+        SendAutomationError(Socket, RequestId,
+                            FString::Printf(TEXT("Invalid or unsafe output path: %s"), *OutputPath),
+                            TEXT("SECURITY_VIOLATION"));
+        return;
+      }
+      
+      FString AbsoluteOutput = FPaths::ProjectDir() / SafeOutputPath;
+      AbsoluteOutput = FPaths::ConvertRelativePathToFull(AbsoluteOutput);
+      FPaths::NormalizeFilename(AbsoluteOutput);
+      
+      FString NormalizedProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+      FPaths::NormalizeDirectoryName(NormalizedProjectDir);
+      if (!NormalizedProjectDir.EndsWith(TEXT("/"))) {
+        NormalizedProjectDir += TEXT("/");
+      }
+      
+      if (!AbsoluteOutput.StartsWith(NormalizedProjectDir, ESearchCase::IgnoreCase)) {
+        SendAutomationError(Socket, RequestId,
+                            FString::Printf(TEXT("Output path escapes project directory: %s"), *OutputPath),
+                            TEXT("SECURITY_VIOLATION"));
+        return;
       }
 
       const FString DirPath = FPaths::GetPath(AbsoluteOutput);
@@ -2179,7 +2701,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateReport(
           FFileHelper::SaveStringToFile(FileContents, *AbsoluteOutput);
     }
 
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("directory"), Directory);
     Resp->SetStringField(TEXT("reportType"), ReportType);
@@ -2195,7 +2717,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateReport(
   });
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2248,7 +2771,7 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateMaterial(
       AssetTools.CreateAsset(Name, Path, UMaterial::StaticClass(), Factory);
 
   if (NewAsset) {
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), NewAsset->GetPathName());
     SendAutomationResponse(Socket, RequestId, true, TEXT("Material created"),
@@ -2260,7 +2783,8 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateMaterial(
   }
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2367,7 +2891,7 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateMaterialInstance(
       }
     }
 
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), NewAsset->GetPathName());
     SendAutomationResponse(Socket, RequestId, true,
@@ -2379,7 +2903,8 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateMaterialInstance(
   }
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2495,7 +3020,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialParameter(
     UMaterialEditingLibrary::RecompileMaterial(Material);
     Material->MarkPackageDirty();
 
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), AssetPath);
     Resp->SetStringField(TEXT("parameterName"), Name);
@@ -2509,7 +3034,8 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialParameter(
 
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2575,14 +3101,15 @@ bool UMcpAutomationBridgeSubsystem::HandleListMaterialInstances(
     }
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetArrayField(TEXT("instances"), Instances);
   SendAutomationResponse(Socket, RequestId, true, TEXT("Instances listed"),
                          Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2618,14 +3145,15 @@ bool UMcpAutomationBridgeSubsystem::HandleResetInstanceParameters(
   MIC->PostEditChange();
   MIC->MarkPackageDirty();
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("assetPath"), AssetPath);
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Instance parameters reset"), Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2643,7 +3171,7 @@ bool UMcpAutomationBridgeSubsystem::HandleDoesAssetExist(
 
   bool bExists = UEditorAssetLibrary::DoesAssetExist(AssetPath);
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetBoolField(TEXT("exists"), bExists);
   Resp->SetStringField(TEXT("assetPath"), AssetPath);
@@ -2653,7 +3181,8 @@ bool UMcpAutomationBridgeSubsystem::HandleDoesAssetExist(
                          Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2693,7 +3222,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialStats(
   Material->GetMaterial();
 #endif
 
-  TSharedPtr<FJsonObject> Stats = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Stats = McpHandlerUtils::CreateResultObject();
 
   // Get actual shading model from the material
   FString ShadingModelStr = TEXT("Unknown");
@@ -2741,14 +3270,15 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialStats(
   }
   Stats->SetNumberField(TEXT("samplerCount"), SamplerCount);
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetObjectField(TEXT("stats"), Stats);
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Material stats retrieved"), Resp, FString());
   return true;
 #else
-  return false;
+  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
+  return true;
 #endif
 }
 
@@ -2768,40 +3298,93 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateLODs(
     return true;
   }
 
+  // Support both landscapePath (single) and assetPaths (array)
+  FString LandscapePath;
+  Payload->TryGetStringField(TEXT("landscapePath"), LandscapePath);
+  
+  // Support both assetPath (single) and assetPaths (array)
+  FString SingleAssetPath;
+  Payload->TryGetStringField(TEXT("assetPath"), SingleAssetPath);
+  
   const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) ||
-      !AssetPathsArray) {
+  Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray);
+
+  // Support both lodCount and numLODs
+  int32 NumLODs = 4;
+  Payload->TryGetNumberField(TEXT("lodCount"), NumLODs);
+  Payload->TryGetNumberField(TEXT("numLODs"), NumLODs);
+  NumLODs = FMath::Clamp(NumLODs, 1, 50);
+
+  // Build list of paths to process
+  TArray<FString> Paths;
+  
+  // Add landscape path if provided
+  if (!LandscapePath.IsEmpty()) {
+    // Validate landscape path
+    FString SafePath = SanitizeProjectRelativePath(LandscapePath);
+    if (SafePath.IsEmpty()) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          FString::Printf(TEXT("Invalid or unsafe landscape path: %s"), *LandscapePath),
+                          TEXT("SECURITY_VIOLATION"));
+      return true;
+    }
+    Paths.Add(SafePath);
+  }
+  
+  // Add single asset path if provided
+  if (!SingleAssetPath.IsEmpty()) {
+    FString SafePath = SanitizeProjectRelativePath(SingleAssetPath);
+    if (SafePath.IsEmpty()) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          FString::Printf(TEXT("Invalid or unsafe asset path: %s"), *SingleAssetPath),
+                          TEXT("SECURITY_VIOLATION"));
+      return true;
+    }
+    Paths.Add(SafePath);
+  }
+  
+  // Add asset paths if provided
+  if (AssetPathsArray) {
+    for (const auto &Val : *AssetPathsArray) {
+      if (Val.IsValid() && Val->Type == EJson::String) {
+        FString SafePath = SanitizeProjectRelativePath(Val->AsString());
+        if (!SafePath.IsEmpty()) {
+          Paths.Add(SafePath);
+        }
+      }
+    }
+  }
+
+  if (Paths.Num() == 0) {
     SendAutomationError(RequestingSocket, RequestId,
-                        TEXT("assetPaths array required"),
+                        TEXT("landscapePath or assetPaths required"),
                         TEXT("INVALID_ARGUMENT"));
     return true;
   }
 
-  int32 NumLODs = 4;
-  Payload->TryGetNumberField(TEXT("numLODs"), NumLODs);
+  // NOTE: ProcessAutomationRequest already dispatches to GameThread.
+  // Wrapping ALL work in AsyncTask(GameThread, ...) caused the queued lambda
+  // to sit behind the current dispatch cycle, so responses never reached the
+  // MCP server before the 30-second timeout. Execute synchronously instead.
+  int32 SuccessCount = 0;
+  TArray<FString> NotFoundPaths;
+  TArray<FString> NotMeshPaths;
 
-  // Dispatch to Game Thread
-  TWeakObjectPtr<UMcpAutomationBridgeSubsystem> WeakSubsystem(this);
-  // Copy paths
-  TArray<FString> Paths;
-  for (const auto &Val : *AssetPathsArray) {
-    if (Val.IsValid() && Val->Type == EJson::String)
-      Paths.Add(Val->AsString());
-  }
+  for (const FString &Path : Paths) {
+    SendProgressUpdate(RequestId, -1.0f,
+        FString::Printf(TEXT("Processing LOD generation for: %s"), *Path), true);
 
-  AsyncTask(ENamedThreads::GameThread, [WeakSubsystem, RequestId,
-                                        RequestingSocket, Paths, NumLODs]() {
-    UMcpAutomationBridgeSubsystem *Subsystem = WeakSubsystem.Get();
-    if (!Subsystem)
-      return;
+    UObject *Obj = LoadObject<UObject>(nullptr, *Path);
 
-    int32 SuccessCount = 0;
+    if (!Obj) {
+      NotFoundPaths.Add(Path);
+      continue;
+    }
 
-    for (const FString &Path : Paths) {
-      UObject *Obj = LoadObject<UObject>(nullptr, *Path);
-      if (UStaticMesh *Mesh = Cast<UStaticMesh>(Obj)) {
-        UE_LOG(LogMcpAutomationBridgeSubsystem, Log,
-               TEXT("Generating %d LODs for %s"), NumLODs, *Path);
+    // Try Static Mesh
+    if (UStaticMesh *Mesh = Cast<UStaticMesh>(Obj)) {
+      UE_LOG(LogMcpAutomationBridgeSubsystem, Log,
+             TEXT("Generating %d LODs for static mesh %s"), NumLODs, *Path);
 
         Mesh->Modify();
         Mesh->SetNumSourceModels(NumLODs);
@@ -2830,16 +3413,60 @@ bool UMcpAutomationBridgeSubsystem::HandleGenerateLODs(
         McpSafeAssetSave(Mesh);
 
         SuccessCount++;
+      } else {
+        // Asset exists but is not a static mesh
+        NotMeshPaths.Add(Path);
       }
     }
 
-    TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
-    Resp->SetBoolField(TEXT("success"), true);
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    
+    // CRITICAL FIX: Return proper success/failure based on actual results
+    // Previously always returned success=true even when 0 meshes processed
+    bool bSuccess = SuccessCount > 0;
+    Resp->SetBoolField(TEXT("success"), bSuccess);
     Resp->SetNumberField(TEXT("processed"), SuccessCount);
-    Subsystem->SendAutomationResponse(RequestingSocket, RequestId, true,
-                                      TEXT("LOD generation completed"),
-                                      Resp, FString());
-  });
+    Resp->SetNumberField(TEXT("requested"), Paths.Num());
+    Resp->SetNumberField(TEXT("lodCount"), NumLODs);
+    
+    // Add details about failures
+    if (NotFoundPaths.Num() > 0) {
+      TArray<TSharedPtr<FJsonValue>> NotFoundArray;
+      for (const FString& P : NotFoundPaths) {
+        NotFoundArray.Add(MakeShared<FJsonValueString>(P));
+      }
+      Resp->SetArrayField(TEXT("notFoundPaths"), NotFoundArray);
+      Resp->SetNumberField(TEXT("notFoundCount"), NotFoundPaths.Num());
+    }
+    
+    if (NotMeshPaths.Num() > 0) {
+      TArray<TSharedPtr<FJsonValue>> NotMeshArray;
+      for (const FString& P : NotMeshPaths) {
+        NotMeshArray.Add(MakeShared<FJsonValueString>(P));
+      }
+      Resp->SetArrayField(TEXT("notMeshPaths"), NotMeshArray);
+      Resp->SetNumberField(TEXT("notMeshCount"), NotMeshPaths.Num());
+    }
+    
+    FString Message;
+    FString ErrorCode;
+    
+    if (bSuccess) {
+      Message = FString::Printf(TEXT("Generated LODs for %d mesh(es)"), SuccessCount);
+    } else if (NotFoundPaths.Num() > 0 && NotMeshPaths.Num() == 0) {
+      Message = FString::Printf(TEXT("No assets found. %d path(s) not found."), NotFoundPaths.Num());
+      ErrorCode = TEXT("ASSET_NOT_FOUND");
+    } else if (NotMeshPaths.Num() > 0 && NotFoundPaths.Num() == 0) {
+      Message = FString::Printf(TEXT("No static meshes found. %d asset(s) are not meshes."), NotMeshPaths.Num());
+      ErrorCode = TEXT("INVALID_ASSET_TYPE");
+    } else {
+      Message = FString::Printf(TEXT("No LODs generated. %d not found, %d not meshes."), 
+                                NotFoundPaths.Num(), NotMeshPaths.Num());
+      ErrorCode = TEXT("LOD_GENERATION_FAILED");
+    }
+    
+    SendAutomationResponse(RequestingSocket, RequestId, bSuccess,
+                                      Message, Resp, ErrorCode);
 
   return true;
 #else
@@ -2888,13 +3515,13 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMetadata(
     return true;
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("assetPath"), AssetPath);
 
   // 1. Asset Registry Tags
   FAssetData AssetData(Asset);
-  TSharedPtr<FJsonObject> TagsObj = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> TagsObj = McpHandlerUtils::CreateResultObject();
   for (const auto &Kvp : AssetData.TagsAndValues) {
     TagsObj->SetStringField(Kvp.Key.ToString(), Kvp.Value.AsString());
   }
@@ -2918,7 +3545,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMetadata(
     const TMap<FName, FString> *ObjectMeta = Meta->GetMapForObject(Asset);
 #endif
     if (ObjectMeta) {
-      TSharedPtr<FJsonObject> MetaObj = MakeShared<FJsonObject>();
+      TSharedPtr<FJsonObject> MetaObj = McpHandlerUtils::CreateResultObject();
       for (const auto &Entry : *ObjectMeta) {
         MetaObj->SetStringField(Entry.Key.ToString(), Entry.Value);
       }
@@ -2938,49 +3565,1898 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMetadata(
 }
 
 // ============================================================================
-// 9. MATERIAL REBUILD
+// 9. MATERIAL REBUILD - NOT IMPLEMENTED (placeholder for future implementation)
 // ============================================================================
 
-bool UMcpAutomationBridgeSubsystem::HandleRebuildMaterial(
-    const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
+// Stub implementations for functions declared in header but removed from implementation
+// These functions are referenced by the dispatcher but were removed due to API changes
+
+bool UMcpAutomationBridgeSubsystem::HandleNaniteRebuildMesh(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
     TSharedPtr<FMcpBridgeWebSocket> Socket) {
-#if WITH_EDITOR
-  FString AssetPath;
-  Payload->TryGetStringField(TEXT("assetPath"), AssetPath);
-  if (AssetPath.IsEmpty()) {
-    SendAutomationResponse(Socket, RequestId, false, TEXT("assetPath required"),
-                           nullptr, TEXT("INVALID_ARGUMENT"));
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("nanite_rebuild_mesh"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR && ENGINE_MAJOR_VERSION >= 5
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("nanite_rebuild_mesh payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
     return true;
   }
 
-  if (!UEditorAssetLibrary::DoesAssetExist(AssetPath)) {
-    SendAutomationResponse(Socket, RequestId, false, TEXT("Asset not found"),
-                           nullptr, TEXT("ASSET_NOT_FOUND"));
+  FString MeshPath;
+  if (!Payload->TryGetStringField(TEXT("meshPath"), MeshPath) ||
+      MeshPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("meshPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
     return true;
   }
 
-  UObject *Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-  UMaterial *Material = Cast<UMaterial>(Asset);
-
-  if (!Material) {
-    SendAutomationResponse(Socket, RequestId, false,
-                           TEXT("Asset is not a UMaterial"), nullptr,
-                           TEXT("INVALID_ASSET_TYPE"));
+  // Load the static mesh
+  UStaticMesh *StaticMesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
+  if (!StaticMesh) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Static mesh not found: %s"), *MeshPath),
+                        TEXT("MESH_NOT_FOUND"));
     return true;
   }
 
-  // Force rebuild/recompile
-  Material->Modify();
-  Material->PreEditChange(nullptr);
-  Material->PostEditChange();
+  // Check if mesh supports Nanite
+  bool bEnableNanite = true;
+  Payload->TryGetBoolField(TEXT("enableNanite"), bEnableNanite);
 
-  // Material->EnsureIsComplete();
+  // Nanite settings
+  bool bPreserveArea = true;
+  double TrianglePercent = 100.0;
+  double FallbackPercent = 0.0;
+
+  Payload->TryGetBoolField(TEXT("preserveArea"), bPreserveArea);
+  Payload->TryGetNumberField(TEXT("trianglePercent"), TrianglePercent);
+  Payload->TryGetNumberField(TEXT("fallbackPercent"), FallbackPercent);
+
+  // Clamp values
+  TrianglePercent = FMath::Clamp(TrianglePercent, 0.0, 100.0);
+  FallbackPercent = FMath::Clamp(FallbackPercent, 0.0, 100.0);
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+  // UE 5.7+: Use accessor functions to avoid deprecation warnings
+  FMeshNaniteSettings Settings = StaticMesh->GetNaniteSettings();
+  Settings.bEnabled = bEnableNanite;
+  Settings.PositionPrecision = 8; // Default precision
+  
+  // bPreserveArea replaced with ShapePreservation enum
+  if (bPreserveArea) {
+    Settings.ShapePreservation = ENaniteShapePreservation::PreserveArea;
+  } else {
+    Settings.ShapePreservation = ENaniteShapePreservation::None;
+  }
+  Settings.KeepPercentTriangles = static_cast<float>(TrianglePercent / 100.0);
+  Settings.FallbackPercentTriangles = static_cast<float>(FallbackPercent / 100.0);
+  if (FallbackPercent > 0.0) {
+    Settings.GenerateFallback = ENaniteGenerateFallback::Enabled;
+  } else {
+    Settings.GenerateFallback = ENaniteGenerateFallback::PlatformDefault;
+  }
+  StaticMesh->SetNaniteSettings(Settings);
+  StaticMesh->NotifyNaniteSettingsChanged();
+#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  // UE 5.1-5.6: Uses KeepPercentTriangles, FallbackPercentTriangles, and bPreserveArea
+  StaticMesh->NaniteSettings.bEnabled = bEnableNanite;
+  StaticMesh->NaniteSettings.PositionPrecision = 8;
+  StaticMesh->NaniteSettings.bPreserveArea = bPreserveArea;
+  StaticMesh->NaniteSettings.KeepPercentTriangles = static_cast<float>(TrianglePercent / 100.0);
+  StaticMesh->NaniteSettings.FallbackPercentTriangles = static_cast<float>(FallbackPercent / 100.0);
+#else
+  // UE 5.0: Uses KeepPercentTriangles (no bPreserveArea)
+  StaticMesh->NaniteSettings.bEnabled = bEnableNanite;
+  StaticMesh->NaniteSettings.PositionPrecision = 8;
+  StaticMesh->NaniteSettings.KeepPercentTriangles = static_cast<float>(TrianglePercent / 100.0);
+  StaticMesh->NaniteSettings.FallbackPercentTriangles = static_cast<float>(FallbackPercent / 100.0);
+#endif
+
+  // Mark mesh as modified
+  StaticMesh->MarkPackageDirty();
+
+  // Build response
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  Resp->SetStringField(TEXT("meshPath"), MeshPath);
+  Resp->SetStringField(TEXT("meshName"), StaticMesh->GetName());
+  Resp->SetBoolField(TEXT("naniteEnabled"), bEnableNanite);
+  Resp->SetBoolField(TEXT("preserveArea"), bPreserveArea);
+  Resp->SetNumberField(TEXT("trianglePercent"), TrianglePercent);
+  Resp->SetNumberField(TEXT("fallbackPercent"), FallbackPercent);
 
   SendAutomationResponse(Socket, RequestId, true,
-                         TEXT("Material rebuild triggered"), nullptr,
+                         FString::Printf(TEXT("Nanite settings updated for %s"), *StaticMesh->GetName()),
+                         Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("nanite_rebuild_mesh requires UE 5.0+ editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleFindByTag(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("find_by_tag"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("find_by_tag payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString Tag;
+  if (!Payload->TryGetStringField(TEXT("tag"), Tag) || Tag.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("tag field is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // CRITICAL: Validate path parameter for security even if not used for actor search
+  // This prevents false negatives in security testing and follows defense-in-depth
+  FString Path;
+  if (Payload->TryGetStringField(TEXT("path"), Path) && !Path.IsEmpty()) {
+    FString SanitizedPath = SanitizeProjectRelativePath(Path);
+    if (SanitizedPath.IsEmpty()) {
+      SendAutomationError(Socket, RequestId,
+          FString::Printf(TEXT("Invalid path (traversal/security violation): %s"), *Path),
+          TEXT("SECURITY_VIOLATION"));
+      return true;
+    }
+    // Path is valid - could be used for scoping asset search in future
+  }
+
+  FName TagName(*Tag);
+  TArray<TSharedPtr<FJsonValue>> Results;
+  int32 MaxResults = 100;
+  Payload->TryGetNumberField(TEXT("maxResults"), MaxResults);
+  MaxResults = FMath::Clamp(MaxResults, 1, 1000);
+
+  bool bSearchActors = true;
+  bool bSearchComponents = false;
+  bool bSearchAssets = false;
+  Payload->TryGetBoolField(TEXT("searchActors"), bSearchActors);
+  Payload->TryGetBoolField(TEXT("searchComponents"), bSearchComponents);
+  Payload->TryGetBoolField(TEXT("searchAssets"), bSearchAssets);
+
+  // Search in world
+  if (GEditor && bSearchActors) {
+    UWorld *World = GEditor->GetEditorWorldContext().World();
+    if (World) {
+      for (TActorIterator<AActor> It(World); It && Results.Num() < MaxResults; ++It) {
+        AActor *Actor = *It;
+        if (Actor && Actor->ActorHasTag(TagName)) {
+          TSharedPtr<FJsonObject> ResultObj = McpHandlerUtils::CreateResultObject();
+          ResultObj->SetStringField(TEXT("type"), TEXT("Actor"));
+          ResultObj->SetStringField(TEXT("name"), Actor->GetName());
+          ResultObj->SetStringField(TEXT("label"), Actor->GetActorLabel());
+          ResultObj->SetStringField(TEXT("path"), Actor->GetPathName());
+          ResultObj->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
+          
+          const FVector Location = Actor->GetActorLocation();
+          TSharedPtr<FJsonObject> LocObj = McpHandlerUtils::CreateResultObject();
+          LocObj->SetNumberField(TEXT("x"), Location.X);
+          LocObj->SetNumberField(TEXT("y"), Location.Y);
+          LocObj->SetNumberField(TEXT("z"), Location.Z);
+          ResultObj->SetObjectField(TEXT("location"), LocObj);
+          
+          Results.Add(MakeShared<FJsonValueObject>(ResultObj));
+        }
+      }
+    }
+  }
+
+  // Search for components with tag
+  if (bSearchComponents && GEditor && Results.Num() < MaxResults) {
+    UWorld *World = GEditor->GetEditorWorldContext().World();
+    if (World) {
+      for (TActorIterator<AActor> It(World); It && Results.Num() < MaxResults; ++It) {
+        AActor *Actor = *It;
+        if (Actor) {
+          TInlineComponentArray<UActorComponent*> Components;
+          Actor->GetComponents(Components);
+          for (UActorComponent *Component : Components) {
+            if (Component && Component->ComponentHasTag(TagName)) {
+              TSharedPtr<FJsonObject> ResultObj = McpHandlerUtils::CreateResultObject();
+              ResultObj->SetStringField(TEXT("type"), TEXT("Component"));
+              ResultObj->SetStringField(TEXT("name"), Component->GetName());
+              ResultObj->SetStringField(TEXT("class"), Component->GetClass()->GetName());
+              ResultObj->SetStringField(TEXT("owner"), Actor->GetName());
+              ResultObj->SetStringField(TEXT("path"), Component->GetPathName());
+              Results.Add(MakeShared<FJsonValueObject>(ResultObj));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  Resp->SetStringField(TEXT("tag"), Tag);
+  Resp->SetNumberField(TEXT("count"), Results.Num());
+  Resp->SetArrayField(TEXT("results"), Results);
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         FString::Printf(TEXT("Found %d objects with tag '%s'"), Results.Num(), *Tag),
+                         Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("find_by_tag requires editor build"), nullptr,
+                         TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("add_material_node"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("add_material_node payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("materialPath"), MaterialPath) ||
+      MaterialPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FString NodeType;
+  if (!Payload->TryGetStringField(TEXT("nodeType"), NodeType) ||
+      NodeType.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("nodeType is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the material
+  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
+  if (!Material) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
+                        TEXT("MATERIAL_NOT_FOUND"));
+    return true;
+  }
+
+  // Create material expression based on node type
+  UMaterialExpression *NewExpression = nullptr;
+  UClass *ExpressionClass = nullptr;
+
+  // Map common node type names to expression classes
+  if (NodeType.Equals(TEXT("Constant"), ESearchCase::IgnoreCase) ||
+      NodeType.Equals(TEXT("Constant1"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionConstant::StaticClass();
+  } else if (NodeType.Equals(TEXT("Constant2"), ESearchCase::IgnoreCase) ||
+             NodeType.Equals(TEXT("Constant2Vector"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionConstant2Vector::StaticClass();
+  } else if (NodeType.Equals(TEXT("Constant3"), ESearchCase::IgnoreCase) ||
+             NodeType.Equals(TEXT("Constant3Vector"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionConstant3Vector::StaticClass();
+  } else if (NodeType.Equals(TEXT("Constant4"), ESearchCase::IgnoreCase) ||
+             NodeType.Equals(TEXT("Constant4Vector"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionConstant4Vector::StaticClass();
+  } else if (NodeType.Equals(TEXT("TextureSample"), ESearchCase::IgnoreCase) ||
+             NodeType.Equals(TEXT("Texture"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionTextureSample::StaticClass();
+  } else if (NodeType.Equals(TEXT("Add"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionAdd::StaticClass();
+  } else if (NodeType.Equals(TEXT("Multiply"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionMultiply::StaticClass();
+  } else if (NodeType.Equals(TEXT("Sine"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionSine::StaticClass();
+  } else if (NodeType.Equals(TEXT("Cosine"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionCosine::StaticClass();
+  } else if (NodeType.Equals(TEXT("Time"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionTime::StaticClass();
+  } else if (NodeType.Equals(TEXT("VertexColor"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionVertexColor::StaticClass();
+  } else {
+    // Try to find the class dynamically
+    FString FullClassName = FString::Printf(TEXT("/Script/Engine.MaterialExpression%s"), *NodeType);
+    ExpressionClass = LoadClass<UMaterialExpression>(nullptr, *FullClassName);
+    
+    if (!ExpressionClass) {
+      SendAutomationError(Socket, RequestId,
+                          FString::Printf(TEXT("Unknown node type: %s"), *NodeType),
+                          TEXT("INVALID_NODE_TYPE"));
+      return true;
+    }
+  }
+
+  // Create the expression
+  NewExpression = NewObject<UMaterialExpression>(Material, ExpressionClass, NAME_None, RF_Transactional);
+  if (!NewExpression) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Failed to create material expression"),
+                        TEXT("EXPRESSION_CREATION_FAILED"));
+    return true;
+  }
+
+  // Set position
+  double PosX = 0, PosY = 0;
+  Payload->TryGetNumberField(TEXT("posX"), PosX);
+  Payload->TryGetNumberField(TEXT("posY"), PosY);
+  NewExpression->MaterialExpressionEditorX = static_cast<int32>(PosX);
+  NewExpression->MaterialExpressionEditorY = static_cast<int32>(PosY);
+
+  // Set node properties based on type
+  if (UMaterialExpressionConstant *Const = Cast<UMaterialExpressionConstant>(NewExpression)) {
+    double Value = 0;
+    Payload->TryGetNumberField(TEXT("value"), Value);
+    Const->R = static_cast<float>(Value);
+  } else if (UMaterialExpressionConstant3Vector *Const3 = Cast<UMaterialExpressionConstant3Vector>(NewExpression)) {
+    double R = 0, G = 0, B = 0;
+    const TSharedPtr<FJsonObject> *ColorObj = nullptr;
+    if (Payload->TryGetObjectField(TEXT("color"), ColorObj) && ColorObj) {
+      (*ColorObj)->TryGetNumberField(TEXT("r"), R);
+      (*ColorObj)->TryGetNumberField(TEXT("g"), G);
+      (*ColorObj)->TryGetNumberField(TEXT("b"), B);
+    }
+    Const3->Constant = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B));
+  } else if (UMaterialExpressionTextureSample *TexSample = Cast<UMaterialExpressionTextureSample>(NewExpression)) {
+    FString TexturePath;
+    if (Payload->TryGetStringField(TEXT("texturePath"), TexturePath) && !TexturePath.IsEmpty()) {
+      UTexture *Texture = LoadObject<UTexture>(nullptr, *TexturePath);
+      if (Texture) {
+        TexSample->Texture = Texture;
+      }
+    }
+  }
+
+  // Add to material
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  Material->GetEditorOnlyData()->ExpressionCollection.AddExpression(NewExpression);
+#else
+  Material->Expressions.Add(NewExpression);
+#endif
+
+  Material->MarkPackageDirty();
+
+  // Get the expression index for reference
+  int32 ExpressionIndex = -1;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  ExpressionIndex = Material->GetEditorOnlyData()->ExpressionCollection.Expressions.IndexOfByKey(NewExpression);
+#else
+  ExpressionIndex = Material->Expressions.IndexOfByKey(NewExpression);
+#endif
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  Resp->SetStringField(TEXT("materialPath"), MaterialPath);
+  Resp->SetStringField(TEXT("nodeType"), NodeType);
+  Resp->SetNumberField(TEXT("expressionIndex"), ExpressionIndex);
+  Resp->SetStringField(TEXT("expressionName"), NewExpression->GetName());
+  Resp->SetStringField(TEXT("nodeGuid"), NewExpression->MaterialExpressionGuid.ToString());
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material node added successfully"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("add_material_node requires editor build"), nullptr,
+                         TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("connect_material_pins"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("connect_material_pins payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  // Accept both assetPath and materialPath
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath or materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (MaterialPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the material
+  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
+  if (!Material) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
+                        TEXT("MATERIAL_NOT_FOUND"));
+    return true;
+  }
+
+  // Helper to find expression by GUID, name, or index
+  auto FindExpression = [&Material](const FString &IdOrIndex) -> UMaterialExpression* {
+    if (IdOrIndex.IsEmpty()) {
+      return nullptr;
+    }
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
+        Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+#else
+    const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
+#endif
+
+    // Try as GUID string first
+    FGuid GuidId;
+    if (FGuid::Parse(IdOrIndex, GuidId)) {
+      for (UMaterialExpression *Expr : Expressions) {
+        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
+          return Expr;
+        }
+      }
+    }
+
+    // Try as name
+    for (UMaterialExpression *Expr : Expressions) {
+      if (Expr) {
+        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
+          return Expr;
+        }
+        // Check parameter name
+        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          if (Param->ParameterName.ToString() == IdOrIndex) {
+            return Expr;
+          }
+        }
+      }
+    }
+
+    // Try as numeric index
+    int32 Index = -1;
+    if (IdOrIndex.IsNumeric()) {
+      Index = FCString::Atoi(*IdOrIndex);
+      if (Index >= 0 && Index < Expressions.Num()) {
+        return Expressions[Index];
+      }
+    }
+
+    return nullptr;
+  };
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
+      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+#else
+  const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
+#endif
+
+  // Accept both sourceNodeId/targetNodeId (GUID strings) and fromExpression/toExpression (indices)
+  FString SourceNodeId, TargetNodeId;
+  int32 FromExpressionIndex = -1, ToExpressionIndex = -1;
+  
+  UMaterialExpression *FromExpression = nullptr;
+  UMaterialExpression *ToExpression = nullptr;
+
+  // Try GUID-based parameters first
+  if (Payload->TryGetStringField(TEXT("sourceNodeId"), SourceNodeId) && !SourceNodeId.IsEmpty()) {
+    FromExpression = FindExpression(SourceNodeId);
+  }
+  if (Payload->TryGetStringField(TEXT("targetNodeId"), TargetNodeId) && !TargetNodeId.IsEmpty()) {
+    ToExpression = FindExpression(TargetNodeId);
+  }
+
+  // Fall back to index-based parameters
+  if (!FromExpression && Payload->TryGetNumberField(TEXT("fromExpression"), FromExpressionIndex)) {
+    if (FromExpressionIndex >= 0 && FromExpressionIndex < Expressions.Num()) {
+      FromExpression = Expressions[FromExpressionIndex];
+    }
+  }
+  if (!ToExpression && Payload->TryGetNumberField(TEXT("toExpression"), ToExpressionIndex)) {
+    if (ToExpressionIndex >= 0 && ToExpressionIndex < Expressions.Num()) {
+      ToExpression = Expressions[ToExpressionIndex];
+    }
+  }
+
+  // Check if target is the main material node
+  FString InputName;
+  Payload->TryGetStringField(TEXT("inputName"), InputName);
+  if (InputName.IsEmpty()) {
+    Payload->TryGetStringField(TEXT("targetPin"), InputName);  // Alias
+  }
+  if (InputName.IsEmpty()) {
+    Payload->TryGetStringField(TEXT("sourcePin"), InputName);  // Another alias
+  }
+
+  // Handle connection to main material node
+  bool bConnectToMainNode = false;
+  if ((TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && !InputName.IsEmpty()) {
+    bConnectToMainNode = true;
+  } else if (ToExpression == nullptr && !InputName.IsEmpty()) {
+    // No target expression but have input name = main node connection
+    bConnectToMainNode = true;
+  }
+
+  if (bConnectToMainNode && FromExpression) {
+    // Connect to main material input
+    bool bFound = false;
+#if WITH_EDITORONLY_DATA
+    if (InputName == TEXT("BaseColor")) {
+      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("EmissiveColor")) {
+      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("Roughness")) {
+      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("Metallic")) {
+      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("Specular")) {
+      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("Normal")) {
+      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("Opacity")) {
+      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("OpacityMask")) {
+      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("AmbientOcclusion") || InputName == TEXT("AO")) {
+      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("SubsurfaceColor")) {
+      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = FromExpression;
+      bFound = true;
+    } else if (InputName == TEXT("WorldPositionOffset")) {
+      MCP_GET_MATERIAL_INPUT(Material, WorldPositionOffset).Expression = FromExpression;
+      bFound = true;
+    }
+    // Note: TessellationMultiplier removed - not available in all UE versions
+#endif
+
+    if (bFound) {
+      Material->PostEditChange();
+      Material->MarkPackageDirty();
+
+      TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+      McpHandlerUtils::AddVerification(Resp, Material);
+      Resp->SetStringField(TEXT("inputName"), InputName);
+      Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
+      SendAutomationResponse(Socket, RequestId, true,
+                             TEXT("Connected to main material pin"), Resp, FString());
+    } else {
+      SendAutomationError(Socket, RequestId,
+                          FString::Printf(TEXT("Unknown main material input: %s"), *InputName),
+                          TEXT("INVALID_PIN"));
+    }
+    return true;
+  }
+
+  // Normal expression-to-expression connection
+  if (!FromExpression) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Source node not found"),
+                        TEXT("SOURCE_NODE_NOT_FOUND"));
+    return true;
+  }
+
+  if (!ToExpression) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Target node not found"),
+                        TEXT("TARGET_NODE_NOT_FOUND"));
+    return true;
+  }
+
+  // Get input name (default to first available input)
+  if (InputName.IsEmpty()) {
+    InputName = TEXT("Input");
+  }
+
+  // Find the input on the destination expression
+  FExpressionInput *TargetInput = nullptr;
+  for (FProperty *Property = ToExpression->GetClass()->PropertyLink; Property;
+       Property = Property->PropertyLinkNext) {
+    if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
+      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
+        if (Property->GetName().Equals(InputName, ESearchCase::IgnoreCase)) {
+          TargetInput = StructProp->ContainerPtrToValuePtr<FExpressionInput>(ToExpression);
+          break;
+        }
+      }
+    }
+  }
+
+  // If not found, try first available input
+  if (!TargetInput) {
+    for (FProperty *Property = ToExpression->GetClass()->PropertyLink; Property;
+         Property = Property->PropertyLinkNext) {
+      if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
+        if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
+          TargetInput = StructProp->ContainerPtrToValuePtr<FExpressionInput>(ToExpression);
+          InputName = Property->GetName();
+          break;
+        }
+      }
+    }
+  }
+
+  if (!TargetInput) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("No input found on target expression. Tried: %s"), *InputName),
+                        TEXT("INPUT_NOT_FOUND"));
+    return true;
+  }
+
+  // Make the connection
+  TargetInput->Expression = FromExpression;
+  Material->PostEditChange();
+  Material->MarkPackageDirty();
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, Material);
+  Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
+  Resp->SetStringField(TEXT("targetNodeId"), ToExpression->MaterialExpressionGuid.ToString());
+  Resp->SetStringField(TEXT("inputName"), InputName);
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material pins connected successfully"), Resp,
                          FString());
   return true;
 #else
-  return false;
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("connect_material_pins requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleRemoveMaterialNode(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("remove_material_node"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("remove_material_node payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  // Accept both assetPath and materialPath
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath or materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (MaterialPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the material
+  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
+  if (!Material) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
+                        TEXT("MATERIAL_NOT_FOUND"));
+    return true;
+  }
+
+  // Get expressions array
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  TArray<TObjectPtr<UMaterialExpression>> &Expressions =
+      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+#else
+  TArray<UMaterialExpression *> &Expressions = Material->Expressions;
+#endif
+
+  // Helper to find expression by GUID, name, or index
+  auto FindExpression = [&Expressions](const FString &IdOrIndex) -> UMaterialExpression* {
+    if (IdOrIndex.IsEmpty()) {
+      return nullptr;
+    }
+
+    // Try as GUID string first
+    FGuid GuidId;
+    if (FGuid::Parse(IdOrIndex, GuidId)) {
+      for (UMaterialExpression *Expr : Expressions) {
+        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
+          return Expr;
+        }
+      }
+    }
+
+    // Try as name
+    for (UMaterialExpression *Expr : Expressions) {
+      if (Expr) {
+        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
+          return Expr;
+        }
+        // Check parameter name
+        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          if (Param->ParameterName.ToString() == IdOrIndex) {
+            return Expr;
+          }
+        }
+      }
+    }
+
+    // Try as numeric index
+    int32 Index = -1;
+    if (IdOrIndex.IsNumeric()) {
+      Index = FCString::Atoi(*IdOrIndex);
+      if (Index >= 0 && Index < Expressions.Num()) {
+        return Expressions[Index];
+      }
+    }
+
+    return nullptr;
+  };
+
+  // Accept both nodeId (GUID string) and expressionIndex (int)
+  FString NodeId;
+  int32 ExpressionIndex = -1;
+  UMaterialExpression *ExpressionToRemove = nullptr;
+
+  if (Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty()) {
+    ExpressionToRemove = FindExpression(NodeId);
+  } else if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex)) {
+    if (ExpressionIndex >= 0 && ExpressionIndex < Expressions.Num()) {
+      ExpressionToRemove = Expressions[ExpressionIndex];
+    }
+  }
+
+  if (!ExpressionToRemove) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Node not found. Provide valid nodeId (GUID) or expressionIndex"),
+                        TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  FString RemovedName = ExpressionToRemove->GetName();
+  FString RemovedGuid = ExpressionToRemove->MaterialExpressionGuid.ToString();
+
+  // Remove the expression
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  Material->GetEditorOnlyData()->ExpressionCollection.RemoveExpression(ExpressionToRemove);
+#else
+  Expressions.Remove(ExpressionToRemove);
+#endif
+
+  // Also remove from the material's root node if connected
+  Material->RemoveExpressionParameter(ExpressionToRemove);
+
+  Material->PostEditChange();
+  Material->MarkPackageDirty();
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, Material);
+  Resp->SetStringField(TEXT("nodeId"), RemovedGuid);
+  Resp->SetStringField(TEXT("removedName"), RemovedName);
+  Resp->SetNumberField(TEXT("remainingExpressions"), Expressions.Num());
+  Resp->SetBoolField(TEXT("removed"), true);
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material node removed successfully"), Resp,
+                         FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("remove_material_node requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleBreakMaterialConnections(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("break_material_connections"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("break_material_connections payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  // Accept both assetPath and materialPath
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath or materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (MaterialPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the material
+  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
+  if (!Material) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
+                        TEXT("MATERIAL_NOT_FOUND"));
+    return true;
+  }
+
+  // Get expressions
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
+      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+#else
+  const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
+#endif
+
+  // Helper to find expression by GUID, name, or index
+  auto FindExpression = [&Expressions](const FString &IdOrIndex) -> UMaterialExpression* {
+    if (IdOrIndex.IsEmpty()) {
+      return nullptr;
+    }
+
+    // Try as GUID string first
+    FGuid GuidId;
+    if (FGuid::Parse(IdOrIndex, GuidId)) {
+      for (UMaterialExpression *Expr : Expressions) {
+        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
+          return Expr;
+        }
+      }
+    }
+
+    // Try as name
+    for (UMaterialExpression *Expr : Expressions) {
+      if (Expr) {
+        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
+          return Expr;
+        }
+        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          if (Param->ParameterName.ToString() == IdOrIndex) {
+            return Expr;
+          }
+        }
+      }
+    }
+
+    // Try as numeric index
+    int32 Index = -1;
+    if (IdOrIndex.IsNumeric()) {
+      Index = FCString::Atoi(*IdOrIndex);
+      if (Index >= 0 && Index < Expressions.Num()) {
+        return Expressions[Index];
+      }
+    }
+
+    return nullptr;
+  };
+
+  // Check if breaking from main material node
+  FString NodeId, PinName;
+  bool bHasNodeId = Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty();
+  bool bHasPinName = Payload->TryGetStringField(TEXT("pinName"), PinName) && !PinName.IsEmpty();
+  
+  // Also check nodeId alias
+  if (!bHasNodeId) {
+    bHasNodeId = Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty();
+  }
+
+  // If nodeId is "Main" or empty with pinName, disconnect from main material node
+  if ((!bHasNodeId || NodeId == TEXT("Main")) && bHasPinName) {
+    bool bFound = false;
+#if WITH_EDITORONLY_DATA
+    if (PinName == TEXT("BaseColor")) {
+      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("EmissiveColor")) {
+      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("Roughness")) {
+      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("Metallic")) {
+      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("Specular")) {
+      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("Normal")) {
+      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("Opacity")) {
+      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("OpacityMask")) {
+      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("AmbientOcclusion") || PinName == TEXT("AO")) {
+      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = nullptr;
+      bFound = true;
+    } else if (PinName == TEXT("SubsurfaceColor")) {
+      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = nullptr;
+      bFound = true;
+    }
+#endif
+
+    if (bFound) {
+      Material->PostEditChange();
+      Material->MarkPackageDirty();
+
+      TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+      McpHandlerUtils::AddVerification(Resp, Material);
+      Resp->SetStringField(TEXT("pinName"), PinName);
+      Resp->SetBoolField(TEXT("disconnected"), true);
+      SendAutomationResponse(Socket, RequestId, true,
+                             TEXT("Disconnected from main material pin"), Resp, FString());
+    } else {
+      SendAutomationError(Socket, RequestId,
+                          FString::Printf(TEXT("Unknown main material pin: %s"), *PinName),
+                          TEXT("INVALID_PIN"));
+    }
+    return true;
+  }
+
+  // Find target expression
+  int32 ExpressionIndex = -1;
+  UMaterialExpression *TargetExpression = nullptr;
+
+  if (bHasNodeId) {
+    TargetExpression = FindExpression(NodeId);
+  } else if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex)) {
+    if (ExpressionIndex >= 0 && ExpressionIndex < Expressions.Num()) {
+      TargetExpression = Expressions[ExpressionIndex];
+    }
+  }
+
+  if (!TargetExpression) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Node not found. Provide valid nodeId (GUID) or expressionIndex"),
+                        TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  // Get optional input name to break specific connection
+  FString InputName;
+  bool bSpecificInput = Payload->TryGetStringField(TEXT("inputName"), InputName) &&
+                        !InputName.IsEmpty();
+
+  int32 BrokenConnections = 0;
+
+  // Iterate through all properties of the expression to find and break connections
+  for (FProperty *Property = TargetExpression->GetClass()->PropertyLink; Property;
+       Property = Property->PropertyLinkNext) {
+    if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
+      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
+        // Check if we should break this specific input
+        if (bSpecificInput && !Property->GetName().Equals(InputName, ESearchCase::IgnoreCase)) {
+          continue;
+        }
+
+        FExpressionInput *Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(TargetExpression);
+        if (Input && Input->Expression) {
+          Input->Expression = nullptr;
+          BrokenConnections++;
+
+          // If breaking specific input, we can stop after finding it
+          if (bSpecificInput) {
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  Material->PostEditChange();
+  Material->MarkPackageDirty();
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, Material);
+  Resp->SetStringField(TEXT("nodeId"), TargetExpression->MaterialExpressionGuid.ToString());
+  Resp->SetNumberField(TEXT("brokenConnections"), BrokenConnections);
+  if (bSpecificInput) {
+    Resp->SetStringField(TEXT("inputName"), InputName);
+  }
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         FString::Printf(TEXT("Broken %d connection(s)"), BrokenConnections),
+                         Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("break_material_connections requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_material_node_details"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("get_material_node_details payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  // Accept both assetPath and materialPath
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath or materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (MaterialPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the material
+  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
+  if (!Material) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
+                        TEXT("MATERIAL_NOT_FOUND"));
+    return true;
+  }
+
+  // Get expressions
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
+      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+#else
+  const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
+#endif
+
+  // Helper to find expression by GUID, name, or index
+  auto FindExpression = [&Expressions](const FString &IdOrIndex) -> UMaterialExpression* {
+    if (IdOrIndex.IsEmpty()) {
+      return nullptr;
+    }
+
+    // Try as GUID string first
+    FGuid GuidId;
+    if (FGuid::Parse(IdOrIndex, GuidId)) {
+      for (UMaterialExpression *Expr : Expressions) {
+        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
+          return Expr;
+        }
+      }
+    }
+
+    // Try as name
+    for (UMaterialExpression *Expr : Expressions) {
+      if (Expr) {
+        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
+          return Expr;
+        }
+        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          if (Param->ParameterName.ToString() == IdOrIndex) {
+            return Expr;
+          }
+        }
+      }
+    }
+
+    // Try as numeric index
+    int32 Index = -1;
+    if (IdOrIndex.IsNumeric()) {
+      Index = FCString::Atoi(*IdOrIndex);
+      if (Index >= 0 && Index < Expressions.Num()) {
+        return Expressions[Index];
+      }
+    }
+
+    return nullptr;
+  };
+
+  // Accept both nodeId (GUID string) and expressionIndex (int)
+  FString NodeId;
+  int32 ExpressionIndex = -1;
+  UMaterialExpression *Expression = nullptr;
+
+  if (Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty()) {
+    Expression = FindExpression(NodeId);
+  } else if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex)) {
+    if (ExpressionIndex >= 0 && ExpressionIndex < Expressions.Num()) {
+      Expression = Expressions[ExpressionIndex];
+    }
+  }
+
+  // If no specific node requested or node not found, return list of all nodes
+  if (!Expression) {
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Resp, Material);
+    
+    TArray<TSharedPtr<FJsonValue>> NodeList;
+    for (int32 i = 0; i < Expressions.Num(); ++i) {
+      UMaterialExpression *Expr = Expressions[i];
+      if (!Expr) continue;
+      
+      TSharedPtr<FJsonObject> NodeInfo = McpHandlerUtils::CreateResultObject();
+      NodeInfo->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
+      NodeInfo->SetStringField(TEXT("nodeType"), Expr->GetClass()->GetName());
+      NodeInfo->SetNumberField(TEXT("index"), i);
+      NodeInfo->SetNumberField(TEXT("editorX"), Expr->MaterialExpressionEditorX);
+      NodeInfo->SetNumberField(TEXT("editorY"), Expr->MaterialExpressionEditorY);
+      if (!Expr->Desc.IsEmpty()) {
+        NodeInfo->SetStringField(TEXT("desc"), Expr->Desc);
+      }
+      // Add parameter name if applicable
+      if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+        NodeInfo->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
+      }
+      NodeList.Add(MakeShared<FJsonValueObject>(NodeInfo));
+    }
+    
+    Resp->SetArrayField(TEXT("nodes"), NodeList);
+    Resp->SetNumberField(TEXT("nodeCount"), Expressions.Num());
+
+    FString Message = NodeId.IsEmpty()
+        ? FString::Printf(TEXT("Material has %d nodes. Provide nodeId for specific node details."), Expressions.Num())
+        : FString::Printf(TEXT("Node '%s' not found. Material has %d nodes."), *NodeId, Expressions.Num());
+
+    SendAutomationResponse(Socket, RequestId, NodeId.IsEmpty(),
+                           Message, Resp, NodeId.IsEmpty() ? FString() : TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  // Build response for specific node
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, Material);
+  Resp->SetStringField(TEXT("nodeId"), Expression->MaterialExpressionGuid.ToString());
+  Resp->SetStringField(TEXT("name"), Expression->GetName());
+  Resp->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
+  Resp->SetStringField(TEXT("classPath"), Expression->GetClass()->GetPathName());
+  Resp->SetNumberField(TEXT("editorX"), Expression->MaterialExpressionEditorX);
+  Resp->SetNumberField(TEXT("editorY"), Expression->MaterialExpressionEditorY);
+  if (!Expression->Desc.IsEmpty()) {
+    Resp->SetStringField(TEXT("desc"), Expression->Desc);
+  }
+
+  // Get inputs
+  TArray<TSharedPtr<FJsonValue>> InputsArray;
+  for (FProperty *Property = Expression->GetClass()->PropertyLink; Property;
+       Property = Property->PropertyLinkNext) {
+    if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
+      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
+        FExpressionInput *Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+        TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+        InputObj->SetStringField(TEXT("name"), Property->GetName());
+        InputObj->SetBoolField(TEXT("isConnected"), Input->Expression != nullptr);
+        if (Input->Expression) {
+          InputObj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
+          InputObj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
+        }
+        InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+      }
+    }
+  }
+  Resp->SetArrayField(TEXT("inputs"), InputsArray);
+
+  // Get specific properties based on expression type
+  if (UMaterialExpressionConstant *Const = Cast<UMaterialExpressionConstant>(Expression)) {
+    Resp->SetNumberField(TEXT("value"), Const->R);
+  } else if (UMaterialExpressionConstant2Vector *Const2 = Cast<UMaterialExpressionConstant2Vector>(Expression)) {
+    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
+    ValueObj->SetNumberField(TEXT("r"), Const2->R);
+    ValueObj->SetNumberField(TEXT("g"), Const2->G);
+    Resp->SetObjectField(TEXT("value"), ValueObj);
+  } else if (UMaterialExpressionConstant3Vector *Const3 = Cast<UMaterialExpressionConstant3Vector>(Expression)) {
+    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
+    ValueObj->SetNumberField(TEXT("r"), Const3->Constant.R);
+    ValueObj->SetNumberField(TEXT("g"), Const3->Constant.G);
+    ValueObj->SetNumberField(TEXT("b"), Const3->Constant.B);
+    Resp->SetObjectField(TEXT("value"), ValueObj);
+  } else if (UMaterialExpressionConstant4Vector *Const4 = Cast<UMaterialExpressionConstant4Vector>(Expression)) {
+    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
+    ValueObj->SetNumberField(TEXT("r"), Const4->Constant.R);
+    ValueObj->SetNumberField(TEXT("g"), Const4->Constant.G);
+    ValueObj->SetNumberField(TEXT("b"), Const4->Constant.B);
+    ValueObj->SetNumberField(TEXT("a"), Const4->Constant.A);
+    Resp->SetObjectField(TEXT("value"), ValueObj);
+  } else if (UMaterialExpressionTextureSample *TexSample = Cast<UMaterialExpressionTextureSample>(Expression)) {
+    if (TexSample->Texture) {
+      Resp->SetStringField(TEXT("texture"), TexSample->Texture->GetPathName());
+      Resp->SetStringField(TEXT("textureName"), TexSample->Texture->GetName());
+    }
+  } else if (UMaterialExpressionScalarParameter *ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression)) {
+    Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
+    Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
+  } else if (UMaterialExpressionVectorParameter *VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression)) {
+    Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
+    TSharedPtr<FJsonObject> DefaultObj = McpHandlerUtils::CreateResultObject();
+    DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
+    DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
+    DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
+    DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
+    Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
+  }
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material node details retrieved"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("get_material_node_details requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+// ============================================================================
+// SOURCE CONTROL STATE
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleGetSourceControlState(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_source_control_state"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("get_source_control_state payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  // Accept both assetPath and assetPaths
+  TArray<FString> AssetPaths;
+  const TArray<TSharedPtr<FJsonValue>> *AssetPathsArray = nullptr;
+  if (Payload->TryGetArrayField(TEXT("assetPaths"), AssetPathsArray) &&
+      AssetPathsArray && AssetPathsArray->Num() > 0) {
+    for (const TSharedPtr<FJsonValue> &Val : *AssetPathsArray) {
+      if (Val.IsValid() && Val->Type == EJson::String) {
+        AssetPaths.Add(Val->AsString());
+      }
+    }
+  } else {
+    FString SinglePath;
+    if (Payload->TryGetStringField(TEXT("assetPath"), SinglePath) && !SinglePath.IsEmpty()) {
+      AssetPaths.Add(SinglePath);
+    }
+  }
+
+  if (AssetPaths.Num() == 0) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath (string) or assetPaths (array) required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (!ISourceControlModule::Get().IsEnabled()) {
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    Result->SetBoolField(TEXT("sourceControlEnabled"), false);
+    Result->SetStringField(TEXT("message"), TEXT("Source control is not enabled"));
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Source control disabled"), Result, FString());
+    return true;
+  }
+
+  ISourceControlProvider &SourceControlProvider =
+      ISourceControlModule::Get().GetProvider();
+
+  TArray<TSharedPtr<FJsonValue>> StatesArray;
+
+  for (const FString &AssetPath : AssetPaths) {
+    TSharedPtr<FJsonObject> StateObj = McpHandlerUtils::CreateResultObject();
+    StateObj->SetStringField(TEXT("assetPath"), AssetPath);
+
+    // Check if asset exists
+    if (!UEditorAssetLibrary::DoesAssetExist(AssetPath)) {
+      StateObj->SetBoolField(TEXT("exists"), false);
+      StateObj->SetStringField(TEXT("state"), TEXT("not_found"));
+      StatesArray.Add(MakeShared<FJsonValueObject>(StateObj));
+      continue;
+    }
+
+    StateObj->SetBoolField(TEXT("exists"), true);
+
+    // Convert asset path to file path
+    FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
+    FString FilePath;
+    if (!FPackageName::TryConvertLongPackageNameToFilename(
+            PackageName, FilePath, FPackageName::GetAssetPackageExtension())) {
+      StateObj->SetStringField(TEXT("state"), TEXT("path_conversion_failed"));
+      StatesArray.Add(MakeShared<FJsonValueObject>(StateObj));
+      continue;
+    }
+
+    // Get source control state
+    FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(
+        FilePath, EStateCacheUsage::Use);
+
+    if (!SourceControlState.IsValid()) {
+      StateObj->SetStringField(TEXT("state"), TEXT("unknown"));
+      StatesArray.Add(MakeShared<FJsonValueObject>(StateObj));
+      continue;
+    }
+
+    // Populate state info
+    StateObj->SetBoolField(TEXT("isSourceControlled"), SourceControlState->IsSourceControlled());
+    StateObj->SetBoolField(TEXT("isCheckedOut"), SourceControlState->IsCheckedOut());
+    StateObj->SetBoolField(TEXT("isCurrent"), SourceControlState->IsCurrent());
+    StateObj->SetBoolField(TEXT("isAdded"), SourceControlState->IsAdded());
+    StateObj->SetBoolField(TEXT("isDeleted"), SourceControlState->IsDeleted());
+    StateObj->SetBoolField(TEXT("isModified"), SourceControlState->IsModified());
+    StateObj->SetBoolField(TEXT("isIgnored"), SourceControlState->IsIgnored());
+    StateObj->SetBoolField(TEXT("isUnknown"), SourceControlState->IsUnknown());
+    StateObj->SetBoolField(TEXT("canCheckIn"), SourceControlState->CanCheckIn());
+    StateObj->SetBoolField(TEXT("canCheckout"), SourceControlState->CanCheckout());
+    StateObj->SetBoolField(TEXT("canRevert"), SourceControlState->CanRevert());
+    StateObj->SetBoolField(TEXT("canEdit"), SourceControlState->CanEdit());
+    StateObj->SetBoolField(TEXT("canDelete"), SourceControlState->CanDelete());
+    StateObj->SetBoolField(TEXT("canAdd"), SourceControlState->CanAdd());
+    StateObj->SetBoolField(TEXT("isConflicted"), SourceControlState->IsConflicted());
+
+    // Check if checked out by other
+    FString WhoCheckedOut;
+    bool bIsCheckedOutOther = SourceControlState->IsCheckedOutOther(&WhoCheckedOut);
+    StateObj->SetBoolField(TEXT("isCheckedOutOther"), bIsCheckedOutOther);
+    if (bIsCheckedOutOther && !WhoCheckedOut.IsEmpty()) {
+      StateObj->SetStringField(TEXT("checkedOutBy"), WhoCheckedOut);
+    }
+
+    // Determine primary state string
+    FString StateString = TEXT("unknown");
+    if (!SourceControlState->IsSourceControlled()) {
+      StateString = TEXT("not_controlled");
+    } else if (SourceControlState->IsAdded()) {
+      StateString = TEXT("added");
+    } else if (SourceControlState->IsDeleted()) {
+      StateString = TEXT("deleted");
+    } else if (SourceControlState->IsConflicted()) {
+      StateString = TEXT("conflicted");
+    } else if (SourceControlState->IsCheckedOut()) {
+      StateString = TEXT("checked_out");
+    } else if (SourceControlState->IsModified()) {
+      StateString = TEXT("modified");
+    } else if (!SourceControlState->IsCurrent()) {
+      StateString = TEXT("out_of_date");
+    } else {
+      StateString = TEXT("current");
+    }
+    StateObj->SetStringField(TEXT("state"), StateString);
+
+    // Get display name
+    StateObj->SetStringField(TEXT("displayName"), SourceControlState->GetDisplayName().ToString());
+
+    StatesArray.Add(MakeShared<FJsonValueObject>(StateObj));
+  }
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  Result->SetBoolField(TEXT("sourceControlEnabled"), true);
+  Result->SetArrayField(TEXT("states"), StatesArray);
+  Result->SetNumberField(TEXT("queriedCount"), AssetPaths.Num());
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Source control state retrieved"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("get_source_control_state requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+// ============================================================================
+// ANALYZE GRAPH
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleAnalyzeGraph(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("analyze_graph"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("analyze_graph payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString AssetPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (AssetPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the asset
+  UObject *Asset = LoadObject<UObject>(nullptr, *AssetPath);
+  if (!Asset) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Asset not found: %s"), *AssetPath),
+                        TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, Asset);
+  Result->SetStringField(TEXT("assetPath"), AssetPath);
+  Result->SetStringField(TEXT("assetClass"), Asset->GetClass()->GetName());
+
+  // Check if it's a material
+  UMaterial *Material = Cast<UMaterial>(Asset);
+  UMaterialInstance *MaterialInstance = Cast<UMaterialInstance>(Asset);
+
+  if (Material || MaterialInstance) {
+    // Analyze material graph
+    UMaterial *BaseMaterial = Material ? Material : MaterialInstance->GetBaseMaterial();
+
+    // Get expressions count
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    const TArray<TObjectPtr<UMaterialExpression>> *Expressions = nullptr;
+    if (Material && Material->GetEditorOnlyData()) {
+      Expressions = &Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+    }
+#else
+    // UE 5.0: Direct access, but also uses TObjectPtr
+    const TArray<TObjectPtr<UMaterialExpression>> *Expressions = nullptr;
+    if (Material) {
+      Expressions = &Material->Expressions;
+    }
+#endif
+
+    int32 NodeCount = Expressions ? Expressions->Num() : 0;
+    int32 ParameterCount = 0;
+    int32 TextureSampleCount = 0;
+    TArray<FString> ParameterNames;
+
+    if (Expressions) {
+      for (UMaterialExpression *Expr : *Expressions) {
+        if (!Expr) continue;
+        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          ParameterCount++;
+          ParameterNames.Add(Param->ParameterName.ToString());
+        }
+        if (Cast<UMaterialExpressionTextureSample>(Expr)) {
+          TextureSampleCount++;
+        }
+      }
+    }
+
+    Result->SetStringField(TEXT("graphType"), TEXT("Material"));
+    Result->SetNumberField(TEXT("nodeCount"), NodeCount);
+    Result->SetNumberField(TEXT("parameterCount"), ParameterCount);
+    Result->SetNumberField(TEXT("textureSampleCount"), TextureSampleCount);
+
+    // Add parameter names
+    TArray<TSharedPtr<FJsonValue>> ParamArray;
+    for (const FString &ParamName : ParameterNames) {
+      ParamArray.Add(MakeShared<FJsonValueString>(ParamName));
+    }
+    Result->SetArrayField(TEXT("parameters"), ParamArray);
+
+    // Material properties
+    Result->SetBoolField(TEXT("isMaterialInstance"), MaterialInstance != nullptr);
+    if (Material) {
+      Result->SetBoolField(TEXT("isTwoSided"), Material->TwoSided);
+      Result->SetBoolField(TEXT("isMasked"), Material->IsMasked());
+#if WITH_EDITORONLY_DATA
+      Result->SetStringField(TEXT("blendMode"),
+                             StaticEnum<EBlendMode>()->GetNameStringByValue((int64)Material->GetBlendMode()));
+      // Get shading model name from the first selected model
+      FString ShadingModelName = TEXT("Unknown");
+      FMaterialShadingModelField ShadingModels = Material->GetShadingModels();
+      if (ShadingModels.HasShadingModel(MSM_DefaultLit)) ShadingModelName = TEXT("DefaultLit");
+      else if (ShadingModels.HasShadingModel(MSM_Subsurface)) ShadingModelName = TEXT("Subsurface");
+      else if (ShadingModels.HasShadingModel(MSM_Unlit)) ShadingModelName = TEXT("Unlit");
+      else if (ShadingModels.HasShadingModel(MSM_ClearCoat)) ShadingModelName = TEXT("ClearCoat");
+      else if (ShadingModels.HasShadingModel(MSM_SubsurfaceProfile)) ShadingModelName = TEXT("SubsurfaceProfile");
+      else if (ShadingModels.HasShadingModel(MSM_PreintegratedSkin)) ShadingModelName = TEXT("PreintegratedSkin");
+      Result->SetStringField(TEXT("shadingModel"), ShadingModelName);
+#endif
+    }
+
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Material graph analyzed"), Result, FString());
+    return true;
+  }
+
+  // Check if it's a blueprint
+  UBlueprint *Blueprint = Cast<UBlueprint>(Asset);
+  if (Blueprint) {
+    TArray<UEdGraph *> AllGraphs;
+    Blueprint->GetAllGraphs(AllGraphs);
+
+    int32 TotalNodes = 0;
+    TArray<TSharedPtr<FJsonValue>> GraphInfoArray;
+
+    for (UEdGraph *Graph : AllGraphs) {
+      if (!Graph) continue;
+      TSharedPtr<FJsonObject> GraphInfo = McpHandlerUtils::CreateResultObject();
+      GraphInfo->SetStringField(TEXT("name"), Graph->GetName());
+      GraphInfo->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
+      TotalNodes += Graph->Nodes.Num();
+      GraphInfoArray.Add(MakeShared<FJsonValueObject>(GraphInfo));
+    }
+
+    Result->SetStringField(TEXT("graphType"), TEXT("Blueprint"));
+    Result->SetStringField(TEXT("blueprintType"), Blueprint->BlueprintType == BPTYPE_Interface ? TEXT("Interface") :
+                           Blueprint->BlueprintType == BPTYPE_MacroLibrary ? TEXT("MacroLibrary") :
+                           Blueprint->BlueprintType == BPTYPE_FunctionLibrary ? TEXT("FunctionLibrary") : TEXT("Class"));
+    Result->SetNumberField(TEXT("totalNodes"), TotalNodes);
+    Result->SetNumberField(TEXT("graphCount"), AllGraphs.Num());
+    Result->SetArrayField(TEXT("graphs"), GraphInfoArray);
+
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Blueprint graph analyzed"), Result, FString());
+    return true;
+  }
+
+  // Generic asset - no graph
+  Result->SetStringField(TEXT("graphType"), TEXT("None"));
+  Result->SetStringField(TEXT("message"), TEXT("Asset does not have a graph structure"));
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("No graph to analyze for this asset type"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("analyze_graph requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+// ============================================================================
+// GET ASSET GRAPH
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_asset_graph"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("get_asset_graph payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString AssetPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (AssetPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the asset
+  UObject *Asset = LoadObject<UObject>(nullptr, *AssetPath);
+  if (!Asset) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Asset not found: %s"), *AssetPath),
+                        TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, Asset);
+  Result->SetStringField(TEXT("assetPath"), AssetPath);
+  Result->SetStringField(TEXT("assetClass"), Asset->GetClass()->GetName());
+
+  // Check if it's a material
+  UMaterial *Material = Cast<UMaterial>(Asset);
+  if (Material) {
+    TArray<TSharedPtr<FJsonValue>> NodeList;
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
+        Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
+#else
+    const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
+#endif
+
+    // Build node list with connections
+    TMap<UMaterialExpression*, int32> NodeIndexMap;
+    for (int32 i = 0; i < Expressions.Num(); ++i) {
+      NodeIndexMap.Add(Expressions[i], i);
+    }
+
+    for (int32 i = 0; i < Expressions.Num(); ++i) {
+      UMaterialExpression *Expr = Expressions[i];
+      if (!Expr) continue;
+
+      TSharedPtr<FJsonObject> NodeObj = McpHandlerUtils::CreateResultObject();
+      NodeObj->SetNumberField(TEXT("index"), i);
+      NodeObj->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
+      NodeObj->SetStringField(TEXT("type"), Expr->GetClass()->GetName());
+      NodeObj->SetStringField(TEXT("name"), Expr->GetName());
+      NodeObj->SetNumberField(TEXT("x"), Expr->MaterialExpressionEditorX);
+      NodeObj->SetNumberField(TEXT("y"), Expr->MaterialExpressionEditorY);
+
+      // Add inputs with connections
+      TArray<TSharedPtr<FJsonValue>> InputsArray;
+      for (FProperty *Property = Expr->GetClass()->PropertyLink; Property;
+           Property = Property->PropertyLinkNext) {
+        if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
+          if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
+            FExpressionInput *Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
+            TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+            InputObj->SetStringField(TEXT("name"), Property->GetName());
+            InputObj->SetBoolField(TEXT("isConnected"), Input->Expression != nullptr);
+            if (Input->Expression) {
+              int32 *ConnectedIndex = NodeIndexMap.Find(Input->Expression);
+              if (ConnectedIndex) {
+                InputObj->SetNumberField(TEXT("connectedToIndex"), *ConnectedIndex);
+              }
+              InputObj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
+              InputObj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
+            }
+            InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+          }
+        }
+      }
+      NodeObj->SetArrayField(TEXT("inputs"), InputsArray);
+
+      // Add parameter info if applicable
+      if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
+        NodeObj->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
+      }
+
+      NodeList.Add(MakeShared<FJsonValueObject>(NodeObj));
+    }
+
+    Result->SetStringField(TEXT("graphType"), TEXT("Material"));
+    Result->SetNumberField(TEXT("nodeCount"), Expressions.Num());
+    Result->SetArrayField(TEXT("nodes"), NodeList);
+
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Material graph retrieved"), Result, FString());
+    return true;
+  }
+
+  // Check if it's a blueprint
+  UBlueprint *Blueprint = Cast<UBlueprint>(Asset);
+  if (Blueprint) {
+    TArray<UEdGraph *> AllGraphs;
+    Blueprint->GetAllGraphs(AllGraphs);
+
+    TArray<TSharedPtr<FJsonValue>> GraphList;
+
+    for (UEdGraph *Graph : AllGraphs) {
+      if (!Graph) continue;
+
+      TSharedPtr<FJsonObject> GraphObj = McpHandlerUtils::CreateResultObject();
+      GraphObj->SetStringField(TEXT("name"), Graph->GetName());
+      GraphObj->SetStringField(TEXT("graphType"), Graph->GetClass()->GetName());
+
+      TArray<TSharedPtr<FJsonValue>> NodeArray;
+      for (UEdGraphNode *Node : Graph->Nodes) {
+        if (!Node) continue;
+
+        TSharedPtr<FJsonObject> NodeObj = McpHandlerUtils::CreateResultObject();
+        NodeObj->SetStringField(TEXT("nodeId"), Node->NodeGuid.ToString());
+        NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+        NodeObj->SetNumberField(TEXT("x"), Node->NodePosX);
+        NodeObj->SetNumberField(TEXT("y"), Node->NodePosY);
+        NodeObj->SetBoolField(TEXT("isDeprecated"), Node->IsDeprecated());
+
+        // Get pins
+        TArray<TSharedPtr<FJsonValue>> PinArray;
+        for (UEdGraphPin *Pin : Node->Pins) {
+          if (!Pin) continue;
+          TSharedPtr<FJsonObject> PinObj = McpHandlerUtils::CreateResultObject();
+          PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+          PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+          PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+          PinObj->SetBoolField(TEXT("isConnected"), Pin->LinkedTo.Num() > 0);
+          PinArray.Add(MakeShared<FJsonValueObject>(PinObj));
+        }
+        NodeObj->SetArrayField(TEXT("pins"), PinArray);
+
+        NodeArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+      }
+      GraphObj->SetArrayField(TEXT("nodes"), NodeArray);
+      GraphObj->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
+
+      GraphList.Add(MakeShared<FJsonValueObject>(GraphObj));
+    }
+
+    Result->SetStringField(TEXT("graphType"), TEXT("Blueprint"));
+    Result->SetNumberField(TEXT("graphCount"), AllGraphs.Num());
+    Result->SetArrayField(TEXT("graphs"), GraphList);
+
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Blueprint graph retrieved"), Result, FString());
+    return true;
+  }
+
+  Result->SetStringField(TEXT("graphType"), TEXT("None"));
+  Result->SetStringField(TEXT("message"), TEXT("Asset does not have a graph structure"));
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("No graph for this asset type"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("get_asset_graph requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+// ============================================================================
+// REBUILD MATERIAL
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleRebuildMaterial(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("rebuild_material"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("Missing payload."),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString AssetPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath or materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  if (AssetPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath cannot be empty"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  // Load the material
+  UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);
+  if (!Material) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Material not found: %s"), *AssetPath),
+                        TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
+  // Rebuild the material by triggering a recompile
+  // This forces the material to update its shader maps and expressions
+  AsyncTask(ENamedThreads::GameThread, [this, RequestId, Socket, Material, AssetPath]() {
+    // Mark the material as needing recompilation
+    Material->MarkPackageDirty();
+    
+    // Force material to recompile its shader
+    Material->PreEditChange(nullptr);
+    Material->PostEditChange();
+    
+    // Save the material
+    McpSafeAssetSave(Material);
+
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, Material);
+    Result->SetStringField(TEXT("assetPath"), AssetPath);
+    Result->SetBoolField(TEXT("rebuilt"), true);
+
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Material rebuilt successfully"), Result, FString());
+  });
+
+  return true;
+#else
+  SendAutomationError(Socket, RequestId, TEXT("Editor only."),
+                      TEXT("EDITOR_ONLY"));
+  return true;
 #endif
 }

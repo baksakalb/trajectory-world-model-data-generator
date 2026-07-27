@@ -1,28 +1,110 @@
+// =============================================================================
+// McpAutomationBridge_NiagaraHandlers.cpp
+// =============================================================================
+// Handler implementations for Niagara particle system creation and manipulation.
+//
+// HANDLERS IMPLEMENTED:
+// ---------------------
+// create_niagara_system:
+//   - Create new Niagara System asset with default emitter
+//   - Initialize system spawn/update scripts with graph sources
+//   - Create NiagaraGraph for visual editing
+//
+// create_niagara_emitter:
+//   - Create standalone Niagara Emitter asset
+//   - Initialize with GraphSource for editor compatibility
+//
+// spawn_niagara_actor:
+//   - Spawn NiagaraActor in world with specified system
+//   - Set asset reference on NiagaraComponent
+//
+// modify_niagara_parameter:
+//   - Set Float/Vector/Color/Bool parameters on NiagaraComponent
+//   - Find actor by name in editor world
+//
+// create_niagara_ribbon:
+//   - Spawn NiagaraActor configured for ribbon/beam effects
+//   - Set ribbon start/end/width/color parameters
+//
+// VERSION COMPATIBILITY:
+// ----------------------
+// UE 5.0: GraphSource directly on UNiagaraEmitter
+//         AddEmitterHandle takes 2 parameters
+// UE 5.1+: GraphSource on FVersionedNiagaraEmitterData via GetLatestEmitterData()
+//          AddEmitterHandle takes 3 parameters (with FGuid)
+//
+// SECURITY:
+// ---------
+// - Niagara plugin module availability checked before operations
+// - Asset paths validated through standard UE loading
+// =============================================================================
+
+// =============================================================================
+// Version Compatibility Header (MUST BE FIRST)
+// =============================================================================
+#include "McpVersionCompatibility.h"
+
+// =============================================================================
+// Core Headers
+// =============================================================================
 #include "McpAutomationBridgeGlobals.h"
-#include "Dom/JsonObject.h"
+#include "McpHandlerUtils.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridgeSubsystem.h"
+#include "Dom/JsonObject.h"
 
+// =============================================================================
+// Editor-Only Headers
+// =============================================================================
 #if WITH_EDITOR
+
+// Asset Management
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "Async/Async.h"
 #include "EditorAssetLibrary.h"
 #include "Engine/World.h"
 #include "Modules/ModuleManager.h"
+
+// Niagara Core
 #include "NiagaraActor.h"
 #include "NiagaraComponent.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraParameterCollection.h"
 #include "NiagaraSystem.h"
+
+// Niagara Graph
+#include "NiagaraScriptSource.h"
+#include "NiagaraGraph.h"
 #include "UObject/Package.h"
+
+// Editor Subsystems (version-dependent header location)
 #if __has_include("Subsystems/EditorActorSubsystem.h")
 #include "Subsystems/EditorActorSubsystem.h"
 #elif __has_include("EditorActorSubsystem.h")
 #include "EditorActorSubsystem.h"
 #endif
+
+// Niagara Stack Utilities (optional)
+#if __has_include("ViewModels/Stack/NiagaraStackGraphUtilities.h")
+#include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #endif
 
+#endif // WITH_EDITOR
+
+// =============================================================================
+// Handler Implementations
+// =============================================================================
+
+/**
+ * @brief Creates a new Niagara System asset.
+ *
+ * @param RequestId Request identifier.
+ * @param Action Action name ("create_niagara_system").
+ * @param Payload JSON payload with name, savePath.
+ * @param RequestingSocket WebSocket for response.
+ * @return true if handled.
+ */
 bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraSystem(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -85,22 +167,81 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraSystem(
     return true;
   }
   
-  UNiagaraSystem *NiagaraSystem = NewObject<UNiagaraSystem>(Package, FName(*AssetName), RF_Public | RF_Standalone);
+  // Create Niagara system with proper initialization
+  UNiagaraSystem *NiagaraSystem = NewObject<UNiagaraSystem>(Package, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
   if (NiagaraSystem)
   {
-    // Add default emitter
-    // UE 5.4+ changed AddEmitterHandle signature - requires additional parameters
-    UNiagaraEmitter *NewEmitter = NewObject<UNiagaraEmitter>(NiagaraSystem, FName(TEXT("DefaultEmitter")));
+    // Initialize system scripts
+    UNiagaraScript* SystemSpawnScript = NiagaraSystem->GetSystemSpawnScript();
+    UNiagaraScript* SystemUpdateScript = NiagaraSystem->GetSystemUpdateScript();
+    
+    // Create script source and graph for system
+    UNiagaraScriptSource* SystemScriptSource = NewObject<UNiagaraScriptSource>(SystemSpawnScript, TEXT("SystemScriptSource"), RF_Transactional);
+    if (SystemScriptSource)
+    {
+      UNiagaraGraph* SystemGraph = NewObject<UNiagaraGraph>(SystemScriptSource, TEXT("SystemScriptGraph"), RF_Transactional);
+      SystemScriptSource->NodeGraph = SystemGraph;
+      
+      // Set source on both system scripts
+      SystemSpawnScript->SetLatestSource(SystemScriptSource);
+      SystemUpdateScript->SetLatestSource(SystemScriptSource);
+    }
+    
+    // Add default emitter with proper GraphSource initialization
+    UNiagaraEmitter *NewEmitter = NewObject<UNiagaraEmitter>(NiagaraSystem, FName(TEXT("DefaultEmitter")), RF_Transactional);
     if (NewEmitter)
     {
+      // Create script source and graph for emitter
+      UNiagaraScriptSource* EmitterSource = NewObject<UNiagaraScriptSource>(NewEmitter, NAME_None, RF_Transactional);
+      if (EmitterSource)
+      {
+        UNiagaraGraph* EmitterGraph = NewObject<UNiagaraGraph>(EmitterSource, NAME_None, RF_Transactional);
+        EmitterSource->NodeGraph = EmitterGraph;
+        
+        // Set GraphSource - API differs between engine versions
+        // UE 5.0: GraphSource is directly on UNiagaraEmitter
+        // UE 5.1+: GraphSource is on FVersionedNiagaraEmitterData, accessed via GetLatestEmitterData()
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 0
-      // UE 5.0 - AddEmitterHandle takes only 2 parameters
-      NiagaraSystem->AddEmitterHandle(*NewEmitter, FName(TEXT("DefaultEmitter")));
-#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4
-      // UE 5.4 signature with 2 parameters
+        // UE 5.0: Set GraphSource directly on emitter
+        NewEmitter->GraphSource = EmitterSource;
+        
+        // Set source on emitter scripts
+        if (NewEmitter->SpawnScriptProps.Script)
+          NewEmitter->SpawnScriptProps.Script->SetLatestSource(EmitterSource);
+        if (NewEmitter->UpdateScriptProps.Script)
+          NewEmitter->UpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#if WITH_EDITORONLY_DATA
+        if (NewEmitter->EmitterSpawnScriptProps.Script)
+          NewEmitter->EmitterSpawnScriptProps.Script->SetLatestSource(EmitterSource);
+        if (NewEmitter->EmitterUpdateScriptProps.Script)
+          NewEmitter->EmitterUpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#endif
+#else
+        // UE 5.1+: Access via GetLatestEmitterData()
+        FVersionedNiagaraEmitterData* EmitterData = NewEmitter->GetLatestEmitterData();
+        if (EmitterData)
+        {
+          EmitterData->GraphSource = EmitterSource;
+          
+          // Set source on emitter scripts
+          if (EmitterData->SpawnScriptProps.Script)
+            EmitterData->SpawnScriptProps.Script->SetLatestSource(EmitterSource);
+          if (EmitterData->UpdateScriptProps.Script)
+            EmitterData->UpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#if WITH_EDITORONLY_DATA
+          if (EmitterData->EmitterSpawnScriptProps.Script)
+            EmitterData->EmitterSpawnScriptProps.Script->SetLatestSource(EmitterSource);
+          if (EmitterData->EmitterUpdateScriptProps.Script)
+            EmitterData->EmitterUpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#endif
+        }
+#endif
+      }
+      
+      // AddEmitterHandle: UE 5.0 uses 2 params, UE 5.1+ uses 3 params (with FGuid)
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 0
       NiagaraSystem->AddEmitterHandle(*NewEmitter, FName(TEXT("DefaultEmitter")));
 #else
-      // UE 5.1-5.3 and 5.5+ - AddEmitterHandle takes 3 parameters: Emitter, Name, and Version GUID
       NiagaraSystem->AddEmitterHandle(*NewEmitter, FName(TEXT("DefaultEmitter")), FGuid::NewGuid());
 #endif
     }
@@ -124,10 +265,11 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraSystem(
   }
 
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("systemPath"), NiagaraSystem->GetPathName());
   Resp->SetStringField(TEXT("systemName"), SystemName);
+  McpHandlerUtils::AddVerification(Resp, NiagaraSystem);
 
   SendAutomationResponse(RequestingSocket, RequestId, true,
                          TEXT("Niagara system created successfully"), Resp,
@@ -141,6 +283,15 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraSystem(
 #endif
 }
 
+/**
+ * @brief Creates a new Niagara Emitter asset.
+ *
+ * @param RequestId Request identifier.
+ * @param Action Action name ("create_niagara_emitter").
+ * @param Payload JSON payload with name, savePath.
+ * @param RequestingSocket WebSocket for response.
+ * @return true if handled.
+ */
 bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraEmitter(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -200,13 +351,63 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraEmitter(
     return true;
   }
   
-  UNiagaraEmitter *NiagaraEmitter = NewObject<UNiagaraEmitter>(Package, FName(*AssetName), RF_Public | RF_Standalone);
+  UNiagaraEmitter *NiagaraEmitter = NewObject<UNiagaraEmitter>(Package, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
   
   if (!NiagaraEmitter) {
     SendAutomationError(RequestingSocket, RequestId,
                         TEXT("Failed to create Niagara emitter"),
                         TEXT("CREATE_FAILED"));
     return true;
+  }
+  
+  // Initialize emitter with GraphSource to prevent crashes
+  {
+    // Create script source and graph
+    UNiagaraScriptSource* EmitterSource = NewObject<UNiagaraScriptSource>(NiagaraEmitter, NAME_None, RF_Transactional);
+    if (EmitterSource)
+    {
+      UNiagaraGraph* EmitterGraph = NewObject<UNiagaraGraph>(EmitterSource, NAME_None, RF_Transactional);
+      EmitterSource->NodeGraph = EmitterGraph;
+      
+      // Set GraphSource - API differs between engine versions
+      // UE 5.0: GraphSource is directly on UNiagaraEmitter
+      // UE 5.1+: GraphSource is on FVersionedNiagaraEmitterData, accessed via GetLatestEmitterData()
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 0
+      // UE 5.0: Set GraphSource directly on emitter
+      NiagaraEmitter->GraphSource = EmitterSource;
+      
+      // Set source on emitter scripts
+      if (NiagaraEmitter->SpawnScriptProps.Script)
+        NiagaraEmitter->SpawnScriptProps.Script->SetLatestSource(EmitterSource);
+      if (NiagaraEmitter->UpdateScriptProps.Script)
+        NiagaraEmitter->UpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#if WITH_EDITORONLY_DATA
+      if (NiagaraEmitter->EmitterSpawnScriptProps.Script)
+        NiagaraEmitter->EmitterSpawnScriptProps.Script->SetLatestSource(EmitterSource);
+      if (NiagaraEmitter->EmitterUpdateScriptProps.Script)
+        NiagaraEmitter->EmitterUpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#endif
+#else
+      // UE 5.1+: Access via GetLatestEmitterData()
+      FVersionedNiagaraEmitterData* EmitterData = NiagaraEmitter->GetLatestEmitterData();
+      if (EmitterData)
+      {
+        EmitterData->GraphSource = EmitterSource;
+        
+        // Set source on emitter scripts
+        if (EmitterData->SpawnScriptProps.Script)
+          EmitterData->SpawnScriptProps.Script->SetLatestSource(EmitterSource);
+        if (EmitterData->UpdateScriptProps.Script)
+          EmitterData->UpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#if WITH_EDITORONLY_DATA
+        if (EmitterData->EmitterSpawnScriptProps.Script)
+          EmitterData->EmitterSpawnScriptProps.Script->SetLatestSource(EmitterSource);
+        if (EmitterData->EmitterUpdateScriptProps.Script)
+          EmitterData->EmitterUpdateScriptProps.Script->SetLatestSource(EmitterSource);
+#endif
+      }
+#endif
+    }
   }
   
   FAssetRegistryModule::AssetCreated(NiagaraEmitter);
@@ -220,10 +421,11 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraEmitter(
   }
 
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("emitterPath"), NiagaraEmitter->GetPathName());
   Resp->SetStringField(TEXT("emitterName"), EmitterName);
+  McpHandlerUtils::AddVerification(Resp, NiagaraEmitter);
 
   SendAutomationResponse(RequestingSocket, RequestId, true,
                          TEXT("Niagara emitter created successfully"), Resp,
@@ -237,6 +439,15 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraEmitter(
 #endif
 }
 
+/**
+ * @brief Spawns a NiagaraActor with specified system.
+ *
+ * @param RequestId Request identifier.
+ * @param Action Action name ("spawn_niagara_actor").
+ * @param Payload JSON payload with systemPath, location, name.
+ * @param RequestingSocket WebSocket for response.
+ * @return true if handled.
+ */
 bool UMcpAutomationBridgeSubsystem::HandleSpawnNiagaraActor(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -324,11 +535,12 @@ bool UMcpAutomationBridgeSubsystem::HandleSpawnNiagaraActor(
                         *FGuid::NewGuid().ToString(EGuidFormats::Short)));
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("actorPath"), NiagaraActor->GetPathName());
   Resp->SetStringField(TEXT("actorName"), NiagaraActor->GetActorLabel());
   Resp->SetStringField(TEXT("systemPath"), SystemPath);
+  McpHandlerUtils::AddVerification(Resp, NiagaraActor);
 
   SendAutomationResponse(RequestingSocket, RequestId, true,
                          TEXT("Niagara actor spawned successfully"), Resp,
@@ -342,6 +554,15 @@ bool UMcpAutomationBridgeSubsystem::HandleSpawnNiagaraActor(
 #endif
 }
 
+/**
+ * @brief Modifies a parameter on a Niagara component.
+ *
+ * @param RequestId Request identifier.
+ * @param Action Action name ("modify_niagara_parameter").
+ * @param Payload JSON payload with actorName, parameterName, parameterType, value.
+ * @param RequestingSocket WebSocket for response.
+ * @return true if handled.
+ */
 bool UMcpAutomationBridgeSubsystem::HandleModifyNiagaraParameter(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -481,11 +702,14 @@ bool UMcpAutomationBridgeSubsystem::HandleModifyNiagaraParameter(
     }
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), bSuccess);
   Resp->SetStringField(TEXT("actorName"), ActorName);
   Resp->SetStringField(TEXT("parameterName"), ParameterName);
   Resp->SetStringField(TEXT("parameterType"), ParameterType);
+  if (bSuccess && NiagaraActor) {
+    McpHandlerUtils::AddVerification(Resp, NiagaraActor);
+  }
 
   SendAutomationResponse(
       RequestingSocket, RequestId, bSuccess,
@@ -501,6 +725,15 @@ bool UMcpAutomationBridgeSubsystem::HandleModifyNiagaraParameter(
 #endif
 }
 
+/**
+ * @brief Creates a Niagara ribbon/beam effect.
+ *
+ * @param RequestId Request identifier.
+ * @param Action Action name ("create_niagara_ribbon").
+ * @param Payload JSON payload with systemPath, name, start, end, width, color.
+ * @param RequestingSocket WebSocket for response.
+ * @return true if handled.
+ */
 bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraRibbon(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -627,10 +860,11 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateNiagaraRibbon(
     NiagaraComp->SetColorParameter(FName("User.Color"), ColorVal);
   }
 
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetStringField(TEXT("actorPath"), NiagaraActor->GetPathName());
   Resp->SetStringField(TEXT("actorName"), NiagaraActor->GetActorLabel());
+  McpHandlerUtils::AddVerification(Resp, NiagaraActor);
 
   SendAutomationResponse(RequestingSocket, RequestId, true,
                          TEXT("Niagara ribbon created successfully"), Resp,

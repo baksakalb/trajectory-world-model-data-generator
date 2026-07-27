@@ -1,13 +1,46 @@
-#include "Dom/JsonObject.h"
+// =============================================================================
 // McpAutomationBridge_LevelStructureHandlers.cpp
-// Phase 23: Level Structure Handlers
+// =============================================================================
+// Level Structure & World Partition Handlers for MCP Automation Bridge
 //
-// Complete level and world structure management including:
-// - Levels (create levels, sublevels, streaming, bounds)
-// - World Partition (grid configuration, data layers, HLOD)
-// - Level Blueprint (open, add nodes, connect nodes)
-// - Level Instances (packed level actors, level instances)
+// HANDLERS IMPLEMENTED:
+// ---------------------
+// Section 1: Level Management
+//   - create_sublevel              : Add sublevel to world
+//   - remove_sublevel              : Remove sublevel
+//   - set_level_bounds             : Configure level bounds
+//
+// Section 2: World Partition
+//   - configure_world_partition    : Enable/configure world partition
+//   - create_data_layer            : Create UDataLayer
+//   - set_data_layer_state         : Load/unload data layer
+//
+// Section 3: HLOD
+//   - create_hlod_layer             : Create UHLODLayer
+//   - generate_hlod                 : Build HLOD meshes
+//   - set_hlod_settings             : Configure HLOD parameters
+//
+// Section 4: Level Instances
+//   - create_packed_level_actor    : Create packed level actor
+//   - create_level_instance         : Create level instance
+//
+// Section 5: Level Blueprint
+//   - open_level_blueprint         : Open level blueprint editor
+//   - add_level_event              : Add event node
+//
+// VERSION COMPATIBILITY:
+// ----------------------
+// UE 5.0: UDataLayer (direct class)
+// UE 5.1+: UDataLayerInstance, UDataLayerAsset
+// UE 5.4+: World Partition LoaderAdapter
+//
+// Copyright (c) 2024 MCP Automation Bridge Contributors
+// =============================================================================
 
+#include "McpVersionCompatibility.h"  // MUST be first
+#include "McpHandlerUtils.h"
+
+#include "Dom/JsonObject.h"
 #include "McpAutomationBridgeSubsystem.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpBridgeWebSocket.h"
@@ -15,6 +48,7 @@
 
 #if WITH_EDITOR
 #include "Editor.h"
+#include "HAL/FileManager.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Engine/Engine.h"
@@ -54,8 +88,12 @@
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 #include "WorldPartition/WorldPartitionMiniMapVolume.h"
 #endif
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#include "WorldPartition/RuntimeHashSet/WorldPartitionRuntimeHashSet.h"
+#endif
 #include "WorldPartition/WorldPartitionRuntimeSpatialHash.h"
 #include "Engine/LevelStreamingVolume.h"
+#include "EditorAssetLibrary.h"
 #endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogMcpLevelStructureHandlers, Log, All);
@@ -133,16 +171,131 @@ static bool HandleCreateLevel(
 {
     using namespace LevelStructureHelpers;
 
-    FString LevelName = GetJsonStringField(Payload, TEXT("levelName"), TEXT("NewLevel"));
+    // CRITICAL: levelName is required - check if explicitly provided, not just if empty
+    FString LevelName;
+    bool bHasLevelName = false;
+    if (Payload.IsValid())
+    {
+        bHasLevelName = Payload->TryGetStringField(TEXT("levelName"), LevelName);
+    }
+
+    // Fail if levelName was not provided OR if it's empty
+    if (!bHasLevelName || LevelName.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("levelName is required for create_level"), nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Validate levelName for invalid characters
+    // These characters are not allowed in Windows filenames and UE asset names
+    const FString InvalidChars = TEXT("\\/:*?\"<>|");
+    for (const TCHAR& Char : LevelName)
+    {
+        if (InvalidChars.Contains(FString(1, &Char)))
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                FString::Printf(TEXT("levelName contains invalid character: '%c'. Cannot use: \\ / : * ? \" < > |"), Char),
+                nullptr, TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+    }
+
+    // Check length (max 255 chars)
+    if (LevelName.Len() > 255)
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("levelName exceeds maximum length of 255 characters"),
+            nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Check for reserved Windows filenames
+    const TArray<FString> ReservedNames = {
+        TEXT("CON"), TEXT("PRN"), TEXT("AUX"), TEXT("NUL"),
+        TEXT("COM1"), TEXT("COM2"), TEXT("COM3"), TEXT("COM4"), TEXT("COM5"),
+        TEXT("COM6"), TEXT("COM7"), TEXT("COM8"), TEXT("COM9"),
+        TEXT("LPT1"), TEXT("LPT2"), TEXT("LPT3"), TEXT("LPT4"), TEXT("LPT5"),
+        TEXT("LPT6"), TEXT("LPT7"), TEXT("LPT8"), TEXT("LPT9")
+    };
+    FString UpperLevelName = LevelName.ToUpper();
+    if (ReservedNames.Contains(UpperLevelName))
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("levelName cannot be a reserved Windows device name: %s"), *LevelName),
+            nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
     FString LevelPath = GetJsonStringField(Payload, TEXT("levelPath"), TEXT("/Game/Maps"));
     bool bCreateWorldPartition = GetJsonBoolField(Payload, TEXT("bCreateWorldPartition"), false);
+    bool bUseExternalActors = GetJsonBoolField(Payload, TEXT("bUseExternalActors"), false);
     bool bSave = GetJsonBoolField(Payload, TEXT("save"), true);
+
+    // CRITICAL: When creating a World Partition level, OFPA (External Actors) should be enabled
+    // for data layer support. If bCreateWorldPartition is true but bUseExternalActors is not specified,
+    // automatically enable OFPA for better compatibility with data layers.
+    // This can be overridden by explicitly setting bUseExternalActors to false.
+    if (bCreateWorldPartition && !Payload->HasField(TEXT("bUseExternalActors")))
+    {
+        bUseExternalActors = true;
+    }
+
+    // Security: Validate level path format to prevent traversal attacks
+    FString SafeLevelPath = SanitizeProjectRelativePath(LevelPath);
+    if (SafeLevelPath.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Invalid or unsafe level path: %s"), *LevelPath),
+            nullptr, TEXT("SECURITY_VIOLATION"));
+        return true;
+    }
+    LevelPath = SafeLevelPath;
 
     // Build full path
     FString FullPath = LevelPath / LevelName;
     if (!FullPath.StartsWith(TEXT("/Game/")))
     {
         FullPath = TEXT("/Game/") + FullPath;
+    }
+
+    // IDEMPOTENT: Check if level already exists and return success if so
+    // This makes create_level idempotent - calling it multiple times with the same path succeeds
+    // The level is not recreated if it already exists (prevents WorldSettings collision crash)
+    
+    // Check 1: Check if package exists IN MEMORY (from previous operations in same session)
+    // This catches cases where a level was created but the asset registry hasn't synced yet
+    UPackage* ExistingPackage = FindObject<UPackage>(nullptr, *FullPath);
+    if (ExistingPackage)
+    {
+        // Check if there's already a world in this package
+        UWorld* ExistingWorld = FindObject<UWorld>(ExistingPackage, *LevelName);
+        if (ExistingWorld)
+        {
+            // IDEMPOTENT: Level exists in memory - return success with exists flag
+            TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+            Result->SetStringField(TEXT("levelPath"), FullPath);
+            Result->SetBoolField(TEXT("exists"), true);
+            Result->SetBoolField(TEXT("alreadyExisted"), true);
+            Subsystem->SendAutomationResponse(Socket, RequestId, true,
+                FString::Printf(TEXT("Level already exists: %s"), *FullPath),
+                Result, FString());
+            return true;
+        }
+    }
+    
+    // Check 2: Check if package exists ON DISK (covers previously saved levels)
+    if (FPackageName::DoesPackageExist(FullPath))
+    {
+        // IDEMPOTENT: Level exists on disk - return success with exists flag
+        TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+        Result->SetStringField(TEXT("levelPath"), FullPath);
+        Result->SetBoolField(TEXT("exists"), true);
+        Result->SetBoolField(TEXT("alreadyExisted"), true);
+        Subsystem->SendAutomationResponse(Socket, RequestId, true,
+            FString::Printf(TEXT("Level already exists: %s"), *FullPath),
+            Result, FString());
+        return true;
     }
 
     // Create the level package
@@ -175,34 +328,191 @@ static bool HandleCreateLevel(
 #if ENGINE_MAJOR_VERSION >= 5
     if (bCreateWorldPartition)
     {
-        // World Partition is enabled via WorldSettings
-        AWorldSettings* WorldSettings = NewWorld->GetWorldSettings();
+        // World Partition is enabled via WorldSettings using CreateOrRepairWorldPartition
+        AWorldSettings* WorldSettings = NewWorld->GetWorldSettings(true);
         if (WorldSettings)
         {
-            // In UE5, World Partition is typically enabled at world creation time
-            // or via project settings. We mark it as requested but note the limitation.
-            bWorldPartitionActuallyEnabled = false; // Requires editor UI to fully enable
+            // Use the editor-only API to create World Partition
+            // This properly initializes the WorldPartition subsystem, RuntimeHash, and related structures
+            UWorldPartition* NewWorldPartition = UWorldPartition::CreateOrRepairWorldPartition(WorldSettings);
+            if (NewWorldPartition)
+            {
+                bWorldPartitionActuallyEnabled = true;
+                UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("Created World Partition for level: %s"), *FullPath);
+            }
+            else
+            {
+                UE_LOG(LogMcpLevelStructureHandlers, Warning, TEXT("Failed to create World Partition for level: %s"), *FullPath);
+            }
+        }
+        else
+        {
+            UE_LOG(LogMcpLevelStructureHandlers, Warning, TEXT("Failed to get WorldSettings for World Partition creation: %s"), *FullPath);
         }
     }
 #endif
+
+    // Enable One File Per Actor (OFPA/External Actors) if requested
+    // This is required for Data Layer support in World Partition levels
+    bool bExternalActorsActuallyEnabled = false;
+    if (bUseExternalActors && NewWorld->PersistentLevel)
+    {
+#if WITH_EDITORONLY_DATA
+        // Set the bUseExternalActors flag on the persistent level
+        // This enables actors to be stored as external packages, which is required
+        // for Data Layer compatibility in World Partition levels
+        NewWorld->PersistentLevel->bUseExternalActors = true;
+        bExternalActorsActuallyEnabled = true;
+        UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("Enabled External Actors (OFPA) for level: %s"), *FullPath);
+#endif
+    }
 
     // Mark package dirty
     Package->MarkPackageDirty();
 
     // Save if requested
+    bool bSaveSucceeded = true;
     if (bSave)
     {
-        McpSafeAssetSave(NewWorld);
+        // CRITICAL: Use McpSafeLevelSave to avoid Intel GPU driver crashes.
+        // FEditorFileUtils::SaveLevel() directly can trigger MONZA DdiThreadingContext
+        // exceptions on Intel GPUs due to render thread race conditions.
+        // The safe wrapper suspends rendering during save and implements retry logic.
+        // Explicitly use 5 retries for Intel GPU resilience (max 7.75s total retry time).
+        bSaveSucceeded = McpSafeLevelSave(NewWorld->PersistentLevel, FullPath);
+
+        if (bSaveSucceeded)
+        {
+            // Flush asset registry so the new level is immediately discoverable
+            IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+
+            // Convert package path to filename for scanning
+            FString LevelFilename;
+            if (FPackageName::TryConvertLongPackageNameToFilename(FullPath, LevelFilename, FPackageName::GetMapPackageExtension()))
+            {
+                TArray<FString> FilesToScan;
+                FilesToScan.Add(LevelFilename);
+                AssetRegistry.ScanFilesSynchronous(FilesToScan, true);
+            }
+        }
+        else
+        {
+            UE_LOG(LogMcpLevelStructureHandlers, Error, TEXT("McpSafeLevelSave failed for: %s"), *FullPath);
+        }
     }
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
-    ResponseJson->SetStringField(TEXT("levelPath"), FullPath);
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, NewWorld);
     ResponseJson->SetStringField(TEXT("levelName"), LevelName);
+    ResponseJson->SetStringField(TEXT("levelPath"), FullPath);
     ResponseJson->SetBoolField(TEXT("worldPartitionEnabled"), bWorldPartitionActuallyEnabled);
     ResponseJson->SetBoolField(TEXT("worldPartitionRequested"), bCreateWorldPartition);
+    ResponseJson->SetBoolField(TEXT("externalActorsEnabled"), bExternalActorsActuallyEnabled);
+    ResponseJson->SetBoolField(TEXT("externalActorsRequested"), bUseExternalActors);
+    ResponseJson->SetBoolField(TEXT("saved"), bSave && bSaveSucceeded);
     if (bCreateWorldPartition && !bWorldPartitionActuallyEnabled)
     {
         ResponseJson->SetStringField(TEXT("worldPartitionNote"), TEXT("World Partition must be enabled via editor UI or project settings for new levels"));
+    }
+
+    // If save was requested but failed, report error
+    // NOTE: We do NOT clean up the level from memory because:
+    // 1. McpSafeLevelSave now uses FPackageName::DoesPackageExist as fallback verification
+    // 2. The file might actually exist on disk even if file verification timed out
+    // 3. The idempotent check will find it on retry and return success
+    // 4. Cleaning up causes race conditions where the level exists on disk but not in memory
+    if (bSave && !bSaveSucceeded)
+    {
+        UE_LOG(LogMcpLevelStructureHandlers, Warning, TEXT("Save verification reported failure, but level may exist on disk: %s"), *FullPath);
+        
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Level created but save verification failed: %s"), *FullPath),
+            ResponseJson, TEXT("SAVE_VERIFICATION_FAILED"));
+        return true;
+    }
+
+    // CRITICAL FIX for UE 5.7 World Memory Leaks:
+    // After saving, clean up the created world from memory. If we leave it in memory,
+    // subsequent LoadMap calls will crash with "World Memory Leaks" because the world
+    // package has root flags and can't be garbage collected.
+    //
+    // Root Cause: UWorld::CreateWorld(EWorldType::Inactive, ...) creates a standalone
+    // world that stays in memory as a root object. When FEditorFileUtils::LoadMap()
+    // tries to load the same package, UE 5.7 detects the existing package → Fatal Error.
+    //
+    // Reference: EditorServer.cpp line 2524 - "World Memory Leaks: %d leaks objects"
+    // Reference: World.cpp line 1488-1491 - CleanupWorld must be called for initialized Inactive worlds
+    if (bSaveSucceeded && NewWorld)
+    {
+        UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("HandleCreateLevel: Cleaning up created world from memory after save: %s"), *FullPath);
+        
+        // STEP 1: Call CleanupWorld() if the world was initialized
+        // This is CRITICAL for UE 5.7 - without this, HasEverBeenInitialized() remains true
+        // and the world can't be reused during LoadMap, causing "World Memory Leaks" crash.
+        // See World.cpp BeginDestroy() for reference.
+        // Note: Using bIsWorldInitialized directly for UE 5.0 compatibility (IsInitialized() added in 5.1)
+        if (NewWorld->bIsWorldInitialized)
+        {
+            UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("HandleCreateLevel: Calling CleanupWorld() for initialized world"));
+            NewWorld->CleanupWorld();
+        }
+        
+        // STEP 2: Mark the world for destruction
+        NewWorld->bIsTearingDown = true;
+        
+        // STEP 3: Disable all ticking on this world to prevent tick assertions
+        if (NewWorld->PersistentLevel)
+        {
+            // Mark level as invisible
+            NewWorld->PersistentLevel->bIsVisible = false;
+            
+            for (AActor* Actor : NewWorld->PersistentLevel->Actors)
+            {
+                if (Actor)
+                {
+                    if (Actor->PrimaryActorTick.IsTickFunctionRegistered())
+                    {
+                        Actor->PrimaryActorTick.UnRegisterTickFunction();
+                    }
+                    Actor->PrimaryActorTick.GetPrerequisites().Empty();
+                    
+                    for (UActorComponent* Component : Actor->GetComponents())
+                    {
+                        if (Component && Component->PrimaryComponentTick.IsTickFunctionRegistered())
+                        {
+                            Component->PrimaryComponentTick.UnRegisterTickFunction();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // STEP 4: Remove from root if the world was added to root
+        // The "(root)" flag in error messages indicates RF_RootSet - must clear this
+        if (NewWorld->IsRooted())
+        {
+            UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("HandleCreateLevel: Removing world from root"));
+            NewWorld->RemoveFromRoot();
+        }
+        
+        // STEP 5: Mark the world and its package as transient so GC will collect them
+        NewWorld->SetFlags(RF_Transient);
+        if (Package)
+        {
+            // Also remove package from root if needed
+            if (Package->IsRooted())
+            {
+                Package->RemoveFromRoot();
+            }
+            Package->SetFlags(RF_Transient);
+        }
+        
+        // STEP 6: Force garbage collection to remove the world from memory
+        // This allows the level to be cleanly loaded later via LoadMap
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+        FlushRenderingCommands();
+        
+        UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("HandleCreateLevel: World cleaned up from memory: %s"), *FullPath);
     }
 
     FString Message = FString::Printf(TEXT("Created level: %s"), *FullPath);
@@ -218,59 +528,252 @@ static bool HandleCreateSublevel(
 {
     using namespace LevelStructureHelpers;
 
-    FString SublevelName = GetJsonStringField(Payload, TEXT("sublevelName"), TEXT("Sublevel"));
+    // CRITICAL: sublevelName is required - no default fallback to prevent hidden errors
+    FString SublevelName;
+    if (Payload.IsValid())
+    {
+        Payload->TryGetStringField(TEXT("sublevelName"), SublevelName);
+    }
+    
+    if (SublevelName.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("sublevelName is required for create_sublevel"), nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
     FString SublevelPath = GetJsonStringField(Payload, TEXT("sublevelPath"), TEXT(""));
+    FString ParentLevel = GetJsonStringField(Payload, TEXT("parentLevel"), TEXT(""));
     bool bSave = GetJsonBoolField(Payload, TEXT("save"), true);
 
     UWorld* World = GetEditorWorld();
     if (!World)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("No editor world available"), nullptr);
+            TEXT("No editor world available"), nullptr, TEXT("NO_EDITOR_WORLD"));
         return true;
     }
 
-    // Create sublevel path if not provided
+    // Validate parentLevel if specified
+    if (!ParentLevel.IsEmpty())
+    {
+        // Normalize the parent level path
+        FString NormalizedParentPath = ParentLevel;
+        if (!NormalizedParentPath.StartsWith(TEXT("/Game/")))
+        {
+            NormalizedParentPath = TEXT("/Game/") + NormalizedParentPath;
+        }
+        // Remove .umap extension if present
+        NormalizedParentPath.RemoveFromEnd(TEXT(".umap"));
+
+        // Check if the parent level exists
+        if (!FPackageName::DoesPackageExist(NormalizedParentPath))
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                FString::Printf(TEXT("Parent level not found: %s"), *ParentLevel), nullptr, TEXT("LEVEL_NOT_FOUND"));
+            return true;
+        }
+    }
+
+    // Build full sublevel path
+    FString FullSublevelPath;
     if (SublevelPath.IsEmpty())
     {
         FString WorldPath = World->GetOutermost()->GetName();
-        SublevelPath = FPaths::GetPath(WorldPath) / SublevelName;
+        FullSublevelPath = FPaths::GetPath(WorldPath) / SublevelName;
+    }
+    else
+    {
+        // Security: Validate sublevel path format to prevent traversal attacks
+        FString SafePath = SanitizeProjectRelativePath(SublevelPath);
+        if (SafePath.IsEmpty())
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                FString::Printf(TEXT("Invalid or unsafe sublevel path: %s"), *SublevelPath),
+                nullptr, TEXT("SECURITY_VIOLATION"));
+            return true;
+        }
+        FullSublevelPath = SafePath;
+    }
+    
+    // Ensure path starts with /Game/
+    if (!FullSublevelPath.StartsWith(TEXT("/Game/")))
+    {
+        FullSublevelPath = TEXT("/Game/") + FullSublevelPath;
     }
 
-    // Add streaming level
-    ULevelStreamingDynamic* StreamingLevel = NewObject<ULevelStreamingDynamic>(World, ULevelStreamingDynamic::StaticClass());
-    if (!StreamingLevel)
+    // IDEMPOTENT: Check if sublevel already exists
+    if (FPackageName::DoesPackageExist(FullSublevelPath))
     {
-        Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to create streaming level object"), nullptr);
+        // Sublevel already exists - find or create streaming reference
+        ULevelStreaming* ExistingStreamingLevel = nullptr;
+        for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
+        {
+            if (StreamingLevel && StreamingLevel->GetWorldAssetPackageFName().ToString() == FullSublevelPath)
+            {
+                ExistingStreamingLevel = StreamingLevel;
+                break;
+            }
+        }
+        
+        TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+        ResponseJson->SetStringField(TEXT("sublevelName"), SublevelName);
+        ResponseJson->SetStringField(TEXT("sublevelPath"), FullSublevelPath);
+        ResponseJson->SetStringField(TEXT("parentLevel"), World->GetMapName());
+        ResponseJson->SetBoolField(TEXT("alreadyExisted"), true);
+        ResponseJson->SetBoolField(TEXT("streamingAdded"), ExistingStreamingLevel != nullptr);
+        
+        Subsystem->SendAutomationResponse(Socket, RequestId, true,
+            FString::Printf(TEXT("Sublevel already exists: %s"), *FullSublevelPath), ResponseJson);
         return true;
     }
 
-    // Configure the streaming level
-    StreamingLevel->SetWorldAssetByPackageName(FName(*SublevelPath));
-    StreamingLevel->LevelTransform = FTransform::Identity;
-    StreamingLevel->SetShouldBeVisible(true);
-    StreamingLevel->SetShouldBeLoaded(true);
+    // CRITICAL FIX: Create the actual sublevel asset on disk using UEditorLevelUtils
+    // This creates a proper .umap file that can be loaded later
+    // See: EditorLevelUtils.h - CreateNewStreamingLevel creates a new level and adds it as streaming
+    
+    // Build the package name for the new sublevel
+    FString SublevelPackageName = FullSublevelPath;
+    
+    // Create a new level package
+    UPackage* SublevelPackage = CreatePackage(*SublevelPackageName);
+    if (!SublevelPackage)
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Failed to create package for sublevel: %s"), *SublevelPackageName), nullptr, TEXT("PACKAGE_CREATION_FAILED"));
+        return true;
+    }
 
-    // Add to world's streaming levels
-    World->AddStreamingLevel(StreamingLevel);
+    // Create the new world for the sublevel
+    UWorld* NewSublevelWorld = UWorld::CreateWorld(EWorldType::Inactive, false, FName(*SublevelName), SublevelPackage);
+    if (!NewSublevelWorld)
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Failed to create world for sublevel: %s"), *SublevelName), nullptr, TEXT("WORLD_CREATION_FAILED"));
+        return true;
+    }
 
-    // Mark world dirty so changes can be saved
+    // Initialize the world if not already initialized
+    if (!NewSublevelWorld->bIsWorldInitialized)
+    {
+        NewSublevelWorld->InitWorld();
+    }
+
+    // Mark package dirty
+    SublevelPackage->MarkPackageDirty();
+
+    // Save the sublevel to disk
+    bool bSaveSucceeded = true;
+    if (bSave)
+    {
+        bSaveSucceeded = McpSafeLevelSave(NewSublevelWorld->PersistentLevel, SublevelPackageName);
+        
+        if (bSaveSucceeded)
+        {
+            // Flush asset registry so the new level is immediately discoverable
+            IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+            FString LevelFilename;
+            if (FPackageName::TryConvertLongPackageNameToFilename(SublevelPackageName, LevelFilename, FPackageName::GetMapPackageExtension()))
+            {
+                TArray<FString> FilesToScan;
+                FilesToScan.Add(LevelFilename);
+                AssetRegistry.ScanFilesSynchronous(FilesToScan, true);
+            }
+        }
+    }
+
+    // Create streaming level to add to parent world
+    ULevelStreamingDynamic* StreamingLevel = NewObject<ULevelStreamingDynamic>(World, ULevelStreamingDynamic::StaticClass());
+    if (StreamingLevel)
+    {
+        StreamingLevel->SetWorldAssetByPackageName(FName(*SublevelPackageName));
+        StreamingLevel->LevelTransform = FTransform::Identity;
+        StreamingLevel->SetShouldBeVisible(true);
+        StreamingLevel->SetShouldBeLoaded(true);
+        
+        // Add to world's streaming levels
+        World->AddStreamingLevel(StreamingLevel);
+    }
+
+    // Mark parent world dirty
     World->MarkPackageDirty();
     
-    // Save if requested
-    if (bSave)
+    // Save parent world if requested (to persist streaming level reference)
+    if (bSave && StreamingLevel)
     {
         McpSafeAssetSave(World);
     }
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
-    ResponseJson->SetStringField(TEXT("sublevelPath"), SublevelPath);
-    ResponseJson->SetStringField(TEXT("sublevelName"), SublevelName);
-    ResponseJson->SetStringField(TEXT("parentLevel"), World->GetMapName());
-    ResponseJson->SetBoolField(TEXT("saved"), bSave);
+    // CRITICAL: Clean up the created sublevel world from memory to prevent "World Memory Leaks" crash
+    // Same fix as HandleCreateLevel - see that function for detailed comments
+    // Note: Using bIsWorldInitialized directly for UE 5.0 compatibility (IsInitialized() added in 5.1)
+    if (bSaveSucceeded && NewSublevelWorld)
+    {
+        if (NewSublevelWorld->bIsWorldInitialized)
+        {
+            NewSublevelWorld->CleanupWorld();
+        }
+        
+        NewSublevelWorld->bIsTearingDown = true;
+        
+        if (NewSublevelWorld->PersistentLevel)
+        {
+            NewSublevelWorld->PersistentLevel->bIsVisible = false;
+            for (AActor* Actor : NewSublevelWorld->PersistentLevel->Actors)
+            {
+                if (Actor)
+                {
+                    if (Actor->PrimaryActorTick.IsTickFunctionRegistered())
+                    {
+                        Actor->PrimaryActorTick.UnRegisterTickFunction();
+                    }
+                    Actor->PrimaryActorTick.GetPrerequisites().Empty();
+                    for (UActorComponent* Component : Actor->GetComponents())
+                    {
+                        if (Component && Component->PrimaryComponentTick.IsTickFunctionRegistered())
+                        {
+                            Component->PrimaryComponentTick.UnRegisterTickFunction();
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (NewSublevelWorld->IsRooted())
+        {
+            NewSublevelWorld->RemoveFromRoot();
+        }
+        
+        NewSublevelWorld->SetFlags(RF_Transient);
+        if (SublevelPackage && SublevelPackage->IsRooted())
+        {
+            SublevelPackage->RemoveFromRoot();
+        }
+        if (SublevelPackage)
+        {
+            SublevelPackage->SetFlags(RF_Transient);
+        }
+        
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+        FlushRenderingCommands();
+    }
 
-    FString Message = FString::Printf(TEXT("Created sublevel: %s"), *SublevelName);
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    ResponseJson->SetStringField(TEXT("sublevelName"), SublevelName);
+    ResponseJson->SetStringField(TEXT("sublevelPath"), FullSublevelPath);
+    ResponseJson->SetStringField(TEXT("parentLevel"), World->GetMapName());
+    ResponseJson->SetBoolField(TEXT("saved"), bSave && bSaveSucceeded);
+    ResponseJson->SetBoolField(TEXT("streamingAdded"), StreamingLevel != nullptr);
+
+    if (bSave && !bSaveSucceeded)
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Sublevel created but save failed: %s"), *SublevelName),
+            ResponseJson, TEXT("SAVE_FAILED"));
+        return true;
+    }
+
+    FString Message = FString::Printf(TEXT("Created sublevel: %s at %s"), *SublevelName, *FullSublevelPath);
     Subsystem->SendAutomationResponse(Socket, RequestId, true, Message, ResponseJson);
     return true;
 }
@@ -283,7 +786,20 @@ static bool HandleConfigureLevelStreaming(
 {
     using namespace LevelStructureHelpers;
 
-    FString LevelName = GetJsonStringField(Payload, TEXT("levelName"), TEXT(""));
+    // CRITICAL: levelName is required - no default fallback
+    FString LevelName;
+    if (Payload.IsValid())
+    {
+        Payload->TryGetStringField(TEXT("levelName"), LevelName);
+    }
+    
+    if (LevelName.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("levelName is required for configure_level_streaming"), nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
     FString StreamingMethod = GetJsonStringField(Payload, TEXT("streamingMethod"), TEXT("Blueprint"));
     bool bShouldBeVisible = GetJsonBoolField(Payload, TEXT("bShouldBeVisible"), true);
     bool bShouldBlockOnLoad = GetJsonBoolField(Payload, TEXT("bShouldBlockOnLoad"), false);
@@ -293,11 +809,11 @@ static bool HandleConfigureLevelStreaming(
     if (!World)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("No editor world available"), nullptr);
+            TEXT("No editor world available"), nullptr, TEXT("NO_EDITOR_WORLD"));
         return true;
     }
 
-    // Find the streaming level
+    // Find the streaming level in the world's streaming levels array
     ULevelStreaming* FoundLevel = nullptr;
     for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
     {
@@ -308,10 +824,58 @@ static bool HandleConfigureLevelStreaming(
         }
     }
 
+    // If not found in streaming levels, check if the level exists on disk and create a streaming reference
+    // This handles cases where the sublevel was created but the streaming reference wasn't loaded
+    if (!FoundLevel)
+    {
+        // Build potential full paths for the level
+        TArray<FString> PotentialPaths;
+        
+        // Try as-is first (might be a full path)
+        if (LevelName.StartsWith(TEXT("/Game/")))
+        {
+            PotentialPaths.Add(LevelName);
+        }
+        // Try under the current world's path
+        FString WorldPath = FPaths::GetPath(World->GetOutermost()->GetName());
+        PotentialPaths.Add(WorldPath / LevelName);
+        // Try under /Game/ directly
+        PotentialPaths.Add(FString(TEXT("/Game/")) / LevelName);
+        // Try with the level name as a full path under /Game/
+        PotentialPaths.Add(FString(TEXT("/Game/")) + LevelName);
+        
+        for (const FString& TestPath : PotentialPaths)
+        {
+            FString TestFullPath = TestPath;
+            if (!TestFullPath.EndsWith(TEXT(".umap")))
+            {
+                // Already a package path, check if package exists
+                if (FPackageName::DoesPackageExist(TestFullPath))
+                {
+                    // Found the level on disk - create a streaming reference
+                    ULevelStreamingDynamic* NewStreamingLevel = NewObject<ULevelStreamingDynamic>(World, ULevelStreamingDynamic::StaticClass());
+                    if (NewStreamingLevel)
+                    {
+                        NewStreamingLevel->SetWorldAssetByPackageName(FName(*TestFullPath));
+                        NewStreamingLevel->LevelTransform = FTransform::Identity;
+                        NewStreamingLevel->SetShouldBeVisible(true);
+                        NewStreamingLevel->SetShouldBeLoaded(true);
+                        
+                        World->AddStreamingLevel(NewStreamingLevel);
+                        FoundLevel = NewStreamingLevel;
+                        
+                        UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("Created streaming reference for existing level: %s"), *TestFullPath);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     if (!FoundLevel)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            FString::Printf(TEXT("Streaming level not found: %s"), *LevelName), nullptr);
+            FString::Printf(TEXT("Streaming level not found: %s"), *LevelName), nullptr, TEXT("LEVEL_NOT_FOUND"));
         return true;
     }
 
@@ -320,7 +884,8 @@ static bool HandleConfigureLevelStreaming(
     FoundLevel->bShouldBlockOnLoad = bShouldBlockOnLoad;
     FoundLevel->bDisableDistanceStreaming = bDisableDistanceStreaming;
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, FoundLevel);
     ResponseJson->SetStringField(TEXT("levelName"), LevelName);
     ResponseJson->SetStringField(TEXT("streamingMethod"), StreamingMethod);
     ResponseJson->SetBoolField(TEXT("shouldBeVisible"), bShouldBeVisible);
@@ -338,7 +903,20 @@ static bool HandleSetStreamingDistance(
 {
     using namespace LevelStructureHelpers;
 
-    FString LevelName = GetJsonStringField(Payload, TEXT("levelName"), TEXT(""));
+    // CRITICAL: levelName is required - no default fallback
+    FString LevelName;
+    if (Payload.IsValid())
+    {
+        Payload->TryGetStringField(TEXT("levelName"), LevelName);
+    }
+    
+    if (LevelName.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("levelName is required for set_streaming_distance"), nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
     double StreamingDistance = GetJsonNumberField(Payload, TEXT("streamingDistance"), 10000.0);
     FString StreamingUsage = GetJsonStringField(Payload, TEXT("streamingUsage"), TEXT("LoadingAndVisibility"));
     TSharedPtr<FJsonObject> VolumeLocationJson = GetObjectField(Payload, TEXT("volumeLocation"));
@@ -349,11 +927,11 @@ static bool HandleSetStreamingDistance(
     if (!World)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("No editor world available"), nullptr);
+            TEXT("No editor world available"), nullptr, TEXT("NO_EDITOR_WORLD"));
         return true;
     }
 
-    // Find the streaming level
+    // Find the streaming level in the world's streaming levels array
     ULevelStreaming* FoundLevel = nullptr;
     for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
     {
@@ -364,10 +942,58 @@ static bool HandleSetStreamingDistance(
         }
     }
 
+    // If not found in streaming levels, check if the level exists on disk and create a streaming reference
+    // This handles cases where the sublevel was created but the streaming reference wasn't loaded
+    if (!FoundLevel)
+    {
+        // Build potential full paths for the level
+        TArray<FString> PotentialPaths;
+        
+        // Try as-is first (might be a full path)
+        if (LevelName.StartsWith(TEXT("/Game/")))
+        {
+            PotentialPaths.Add(LevelName);
+        }
+        // Try under the current world's path
+        FString WorldPath = FPaths::GetPath(World->GetOutermost()->GetName());
+        PotentialPaths.Add(WorldPath / LevelName);
+        // Try under /Game/ directly
+        PotentialPaths.Add(FString(TEXT("/Game/")) / LevelName);
+        // Try with the level name as a full path under /Game/
+        PotentialPaths.Add(FString(TEXT("/Game/")) + LevelName);
+        
+        for (const FString& TestPath : PotentialPaths)
+        {
+            FString TestFullPath = TestPath;
+            if (!TestFullPath.EndsWith(TEXT(".umap")))
+            {
+                // Already a package path, check if package exists
+                if (FPackageName::DoesPackageExist(TestFullPath))
+                {
+                    // Found the level on disk - create a streaming reference
+                    ULevelStreamingDynamic* NewStreamingLevel = NewObject<ULevelStreamingDynamic>(World, ULevelStreamingDynamic::StaticClass());
+                    if (NewStreamingLevel)
+                    {
+                        NewStreamingLevel->SetWorldAssetByPackageName(FName(*TestFullPath));
+                        NewStreamingLevel->LevelTransform = FTransform::Identity;
+                        NewStreamingLevel->SetShouldBeVisible(true);
+                        NewStreamingLevel->SetShouldBeLoaded(true);
+                        
+                        World->AddStreamingLevel(NewStreamingLevel);
+                        FoundLevel = NewStreamingLevel;
+                        
+                        UE_LOG(LogMcpLevelStructureHandlers, Log, TEXT("Created streaming reference for existing level: %s"), *TestFullPath);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     if (!FoundLevel)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            FString::Printf(TEXT("Streaming level not found: %s"), *LevelName), nullptr);
+            FString::Printf(TEXT("Streaming level not found: %s"), *LevelName), nullptr, TEXT("LEVEL_NOT_FOUND"));
         return true;
     }
 
@@ -382,14 +1008,15 @@ static bool HandleSetStreamingDistance(
         {
             if (Volume)
             {
-                TSharedPtr<FJsonObject> VolumeObj = MakeShareable(new FJsonObject());
+                TSharedPtr<FJsonObject> VolumeObj = McpHandlerUtils::CreateResultObject();
                 VolumeObj->SetStringField(TEXT("name"), Volume->GetActorLabel());
                 VolumeObj->SetNumberField(TEXT("usage"), static_cast<int32>(Volume->StreamingUsage));
-                VolumesArray.Add(MakeShareable(new FJsonValueObject(VolumeObj)));
+                VolumesArray.Add(MakeShared<FJsonValueObject>(VolumeObj));
             }
         }
         
-        TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+        TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+        McpHandlerUtils::AddVerification(ResponseJson, World);
         ResponseJson->SetStringField(TEXT("levelName"), LevelName);
         ResponseJson->SetArrayField(TEXT("streamingVolumes"), VolumesArray);
         ResponseJson->SetNumberField(TEXT("volumeCount"), VolumesArray.Num());
@@ -461,13 +1088,14 @@ static bool HandleSetStreamingDistance(
     FoundLevel->MarkPackageDirty();
     World->MarkPackageDirty();
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, NewVolume);
     ResponseJson->SetStringField(TEXT("levelName"), LevelName);
     ResponseJson->SetStringField(TEXT("volumeName"), NewVolume->GetActorLabel());
     ResponseJson->SetNumberField(TEXT("streamingDistance"), StreamingDistance);
     ResponseJson->SetStringField(TEXT("streamingUsage"), StreamingUsage);
     
-    TSharedPtr<FJsonObject> LocationJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> LocationJson = McpHandlerUtils::CreateResultObject();
     LocationJson->SetNumberField(TEXT("x"), VolumeLocation.X);
     LocationJson->SetNumberField(TEXT("y"), VolumeLocation.Y);
     LocationJson->SetNumberField(TEXT("z"), VolumeLocation.Z);
@@ -489,9 +1117,26 @@ static bool HandleConfigureLevelBounds(
 {
     using namespace LevelStructureHelpers;
 
-    FVector BoundsOrigin = LevelStructureHelpers::GetVectorFromJson(GetObjectField(Payload, TEXT("boundsOrigin")));
-    FVector BoundsExtent = LevelStructureHelpers::GetVectorFromJson(GetObjectField(Payload, TEXT("boundsExtent")), FVector(10000.0));
     bool bAutoCalculateBounds = GetJsonBoolField(Payload, TEXT("bAutoCalculateBounds"), false);
+    
+    // Check if bounds parameters are provided
+    TSharedPtr<FJsonObject> BoundsOriginJson = GetObjectField(Payload, TEXT("boundsOrigin"));
+    TSharedPtr<FJsonObject> BoundsExtentJson = GetObjectField(Payload, TEXT("boundsExtent"));
+    
+    // If not auto-calculating, boundsOrigin and boundsExtent must be provided
+    if (!bAutoCalculateBounds)
+    {
+        if (!BoundsOriginJson.IsValid() || !BoundsExtentJson.IsValid())
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                TEXT("boundsOrigin and boundsExtent are required when bAutoCalculateBounds is false"),
+                nullptr, TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+    }
+
+    FVector BoundsOrigin = LevelStructureHelpers::GetVectorFromJson(BoundsOriginJson);
+    FVector BoundsExtent = LevelStructureHelpers::GetVectorFromJson(BoundsExtentJson, FVector(10000.0));
 
     UWorld* World = GetEditorWorld();
     if (!World)
@@ -525,15 +1170,16 @@ static bool HandleConfigureLevelBounds(
         WorldBounds = FBox(BoundsOrigin - BoundsExtent, BoundsOrigin + BoundsExtent);
     }
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, World);
     
-    TSharedPtr<FJsonObject> OriginJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> OriginJson = McpHandlerUtils::CreateResultObject();
     OriginJson->SetNumberField(TEXT("x"), WorldBounds.GetCenter().X);
     OriginJson->SetNumberField(TEXT("y"), WorldBounds.GetCenter().Y);
     OriginJson->SetNumberField(TEXT("z"), WorldBounds.GetCenter().Z);
     ResponseJson->SetObjectField(TEXT("boundsOrigin"), OriginJson);
     
-    TSharedPtr<FJsonObject> ExtentJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ExtentJson = McpHandlerUtils::CreateResultObject();
     ExtentJson->SetNumberField(TEXT("x"), WorldBounds.GetExtent().X);
     ExtentJson->SetNumberField(TEXT("y"), WorldBounds.GetExtent().Y);
     ExtentJson->SetNumberField(TEXT("z"), WorldBounds.GetExtent().Z);
@@ -569,7 +1215,7 @@ static bool HandleEnableWorldPartition(
     // Check if World Partition is available
     UWorldPartition* WorldPartition = World->GetWorldPartition();
     
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
     ResponseJson->SetBoolField(TEXT("worldPartitionEnabled"), WorldPartition != nullptr);
     ResponseJson->SetBoolField(TEXT("requested"), bEnable);
 
@@ -636,15 +1282,176 @@ static bool HandleConfigureGridSize(
         return true;
     }
 
+    // Check if we're dealing with RuntimeSpatialHash or RuntimeHashSet
     UWorldPartitionRuntimeSpatialHash* SpatialHash = Cast<UWorldPartitionRuntimeSpatialHash>(RuntimeHash);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+    UWorldPartitionRuntimeHashSet* HashSet = Cast<UWorldPartitionRuntimeHashSet>(RuntimeHash);
+
+    if (!SpatialHash && !HashSet)
+#else
     if (!SpatialHash)
+#endif
     {
+        // Neither supported hash type
+        TSharedPtr<FJsonObject> ErrorJson = McpHandlerUtils::CreateResultObject();
+        ErrorJson->SetStringField(TEXT("currentHashType"), RuntimeHash->GetClass()->GetName());
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+        ErrorJson->SetStringField(TEXT("supportedHashTypes"), TEXT("WorldPartitionRuntimeSpatialHash, WorldPartitionRuntimeHashSet"));
+#else
+        ErrorJson->SetStringField(TEXT("supportedHashTypes"), TEXT("WorldPartitionRuntimeSpatialHash"));
+#endif
+        ErrorJson->SetStringField(TEXT("hint"), TEXT("World Partition must use RuntimeSpatialHash for grid configuration."));
+        ErrorJson->SetStringField(TEXT("solution"), TEXT("Create a new level with World Partition enabled, or check World Partition settings in the editor."));
+
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("World Partition is not using RuntimeSpatialHash. Grid configuration not applicable."), nullptr);
+            FString::Printf(TEXT("World Partition is using unsupported hash type: %s. Grid configuration not applicable."),
+                *RuntimeHash->GetClass()->GetName()),
+            ErrorJson, TEXT("INVALID_PARTITION_TYPE"));
         return true;
     }
 
 #if WITH_EDITORONLY_DATA
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+    // Handle RuntimeHashSet (UE 5.3+ only)
+    if (HashSet)
+    {
+        // For HashSet, we use the RuntimePartitions API instead of Grids
+        // RuntimePartitions is an array of FWorldPartitionRuntimePartition
+        FProperty* PartitionsProperty = HashSet->GetClass()->FindPropertyByName(TEXT("RuntimePartitions"));
+        if (!PartitionsProperty)
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                TEXT("Could not find RuntimePartitions property on RuntimeHashSet"), nullptr);
+            return true;
+        }
+
+        FArrayProperty* ArrayProp = CastField<FArrayProperty>(PartitionsProperty);
+        if (!ArrayProp)
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                TEXT("RuntimePartitions property is not an array"), nullptr);
+            return true;
+        }
+
+        // Get the array helper
+        void* PartitionsArrayPtr = PartitionsProperty->ContainerPtrToValuePtr<void>(HashSet);
+        FScriptArrayHelper ArrayHelper(ArrayProp, PartitionsArrayPtr);
+
+        // Find or create the partition
+        bool bFound = false;
+        bool bCreated = false;
+        int32 ModifiedIndex = -1;
+        FName TargetPartitionName = GridName.IsEmpty() ? FName(TEXT("MainPartition")) : FName(*GridName);
+
+        // Get the struct type from the array property
+        FStructProperty* StructProp = CastField<FStructProperty>(ArrayProp->Inner);
+        if (!StructProp)
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                TEXT("RuntimePartitions array element is not a struct"), nullptr);
+            return true;
+        }
+
+        UStruct* PartitionStruct = StructProp->Struct;
+
+        for (int32 i = 0; i < ArrayHelper.Num(); ++i)
+        {
+            void* PartitionPtr = ArrayHelper.GetRawPtr(i);
+            if (!PartitionPtr) continue;
+
+            // Get the Name property from the partition struct
+            FProperty* NameProp = PartitionStruct->FindPropertyByName(TEXT("Name"));
+            if (NameProp && NameProp->IsA<FNameProperty>())
+            {
+                FNameProperty* NameProperty = CastField<FNameProperty>(NameProp);
+                FName PartitionName = NameProperty->GetPropertyValue(PartitionPtr);
+
+                if (PartitionName == TargetPartitionName)
+                {
+                    // Found the partition - update its settings via reflection
+                    // LoadingRange equivalent
+                    FProperty* LoadingRangeProp = PartitionStruct->FindPropertyByName(TEXT("LoadingRange"));
+                    if (LoadingRangeProp && LoadingRangeProp->IsA<FFloatProperty>())
+                    {
+                        CastField<FFloatProperty>(LoadingRangeProp)->SetPropertyValue(PartitionPtr, LoadingRange);
+                    }
+
+                    // GridCellSize equivalent (may be called GridSize or CellSize)
+                    FProperty* GridSizeProp = PartitionStruct->FindPropertyByName(TEXT("GridSize"));
+                    if (!GridSizeProp)
+                    {
+                        GridSizeProp = PartitionStruct->FindPropertyByName(TEXT("CellSize"));
+                    }
+                    if (GridSizeProp && GridSizeProp->IsA<FIntProperty>())
+                    {
+                        CastField<FIntProperty>(GridSizeProp)->SetPropertyValue(PartitionPtr, GridCellSize);
+                    }
+
+                    bFound = true;
+                    ModifiedIndex = i;
+                    break;
+                }
+            }
+        }
+
+        // If not found and createIfMissing is true, add a new partition
+        if (!bFound && bCreateIfMissing)
+        {
+            int32 NewIndex = ArrayHelper.AddValue();
+            void* NewPartition = ArrayHelper.GetRawPtr(NewIndex);
+            if (NewPartition)
+            {
+                // Initialize the new partition
+                FProperty* NameProp = PartitionStruct->FindPropertyByName(TEXT("Name"));
+                if (NameProp && NameProp->IsA<FNameProperty>())
+                {
+                    CastField<FNameProperty>(NameProp)->SetPropertyValue(NewPartition, TargetPartitionName);
+                }
+
+                FProperty* LoadingRangeProp = PartitionStruct->FindPropertyByName(TEXT("LoadingRange"));
+                if (LoadingRangeProp && LoadingRangeProp->IsA<FFloatProperty>())
+                {
+                    CastField<FFloatProperty>(LoadingRangeProp)->SetPropertyValue(NewPartition, LoadingRange);
+                }
+
+                FProperty* GridSizeProp = PartitionStruct->FindPropertyByName(TEXT("GridSize"));
+                if (!GridSizeProp)
+                {
+                    GridSizeProp = PartitionStruct->FindPropertyByName(TEXT("CellSize"));
+                }
+                if (GridSizeProp && GridSizeProp->IsA<FIntProperty>())
+                {
+                    CastField<FIntProperty>(GridSizeProp)->SetPropertyValue(NewPartition, GridCellSize);
+                }
+
+                bCreated = true;
+                bFound = true;
+            }
+        }
+
+        // Mark package dirty
+        HashSet->MarkPackageDirty();
+
+        TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+        McpHandlerUtils::AddVerification(ResponseJson, World);
+        ResponseJson->SetBoolField(TEXT("success"), true);
+        ResponseJson->SetStringField(TEXT("hashType"), TEXT("RuntimeHashSet"));
+        ResponseJson->SetStringField(TEXT("partitionName"), TargetPartitionName.ToString());
+        ResponseJson->SetNumberField(TEXT("loadingRange"), LoadingRange);
+        ResponseJson->SetNumberField(TEXT("cellSize"), GridCellSize);
+        ResponseJson->SetBoolField(TEXT("created"), bCreated);
+        ResponseJson->SetBoolField(TEXT("modified"), bFound);
+
+        FString Message = bCreated
+            ? FString::Printf(TEXT("Created new partition '%s' in RuntimeHashSet"), *TargetPartitionName.ToString())
+            : FString::Printf(TEXT("Updated partition '%s' in RuntimeHashSet"), *TargetPartitionName.ToString());
+
+        Subsystem->SendAutomationResponse(Socket, RequestId, true, Message, ResponseJson);
+        return true;
+    }
+#endif // ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+
+    // Handle RuntimeSpatialHash (existing code)
     // Access the editor-only Grids array via reflection since it's protected
     // The Grids property is TArray<FSpatialHashRuntimeGrid> which holds the editable grid configuration
     FProperty* GridsProperty = SpatialHash->GetClass()->FindPropertyByName(TEXT("Grids"));
@@ -686,7 +1493,7 @@ static bool HandleConfigureGridSize(
                 Grid->LoadingRange = LoadingRange;
                 Grid->bBlockOnSlowStreaming = bBlockOnSlowStreaming;
                 Grid->Priority = Priority;
-                
+
                 bFound = true;
                 ModifiedIndex = i;
                 break;
@@ -706,13 +1513,13 @@ static bool HandleConfigureGridSize(
             NewGrid->LoadingRange = LoadingRange;
             NewGrid->bBlockOnSlowStreaming = bBlockOnSlowStreaming;
             NewGrid->Priority = Priority;
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 1
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
             NewGrid->Origin = FVector2D::ZeroVector;
 #endif
             NewGrid->DebugColor = FLinearColor::MakeRandomColor();
             NewGrid->bClientOnlyVisible = false;
             NewGrid->HLODLayer = nullptr;
-            
+
             bCreated = true;
             ModifiedIndex = NewIndex;
         }
@@ -730,11 +1537,11 @@ static bool HandleConfigureGridSize(
                 AvailableGrids.Add(Grid->GridName.ToString());
             }
         }
-        
-        FString AvailableStr = AvailableGrids.Num() > 0 
-            ? FString::Join(AvailableGrids, TEXT(", ")) 
+
+        FString AvailableStr = AvailableGrids.Num() > 0
+            ? FString::Join(AvailableGrids, TEXT(", "))
             : TEXT("(none - use createIfMissing=true to create a new grid)");
-        
+
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
             FString::Printf(TEXT("Grid '%s' not found. Available grids: %s"), *GridName, *AvailableStr), nullptr);
         return true;
@@ -752,18 +1559,19 @@ static bool HandleConfigureGridSize(
         FSpatialHashRuntimeGrid* Grid = reinterpret_cast<FSpatialHashRuntimeGrid*>(ArrayHelper.GetRawPtr(i));
         if (Grid)
         {
-            TSharedPtr<FJsonObject> GridObj = MakeShareable(new FJsonObject());
+            TSharedPtr<FJsonObject> GridObj = McpHandlerUtils::CreateResultObject();
             GridObj->SetStringField(TEXT("gridName"), Grid->GridName.ToString());
             GridObj->SetNumberField(TEXT("cellSize"), Grid->CellSize);
             GridObj->SetNumberField(TEXT("loadingRange"), Grid->LoadingRange);
             GridObj->SetBoolField(TEXT("blockOnSlowStreaming"), Grid->bBlockOnSlowStreaming);
             GridObj->SetNumberField(TEXT("priority"), Grid->Priority);
             GridObj->SetBoolField(TEXT("modified"), i == ModifiedIndex);
-            GridsArray.Add(MakeShareable(new FJsonValueObject(GridObj)));
+            GridsArray.Add(MakeShared<FJsonValueObject>(GridObj));
         }
     }
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, World);
     ResponseJson->SetStringField(TEXT("gridName"), GridName.IsEmpty() ? TEXT("(default)") : GridName);
     ResponseJson->SetNumberField(TEXT("cellSize"), GridCellSize);
     ResponseJson->SetNumberField(TEXT("loadingRange"), LoadingRange);
@@ -775,7 +1583,7 @@ static bool HandleConfigureGridSize(
     ResponseJson->SetStringField(TEXT("note"), TEXT("Grid configuration updated. Regenerate streaming data to apply changes (World Partition > Generate Streaming)."));
 
     FString Action = bCreated ? TEXT("Created") : TEXT("Configured");
-    FString Message = FString::Printf(TEXT("%s grid '%s' with CellSize=%d, LoadingRange=%.0f"), 
+    FString Message = FString::Printf(TEXT("%s grid '%s' with CellSize=%d, LoadingRange=%.0f"),
         *Action, GridName.IsEmpty() ? TEXT("(default)") : *GridName, GridCellSize, LoadingRange);
     Subsystem->SendAutomationResponse(Socket, RequestId, true, Message, ResponseJson);
     return true;
@@ -787,18 +1595,18 @@ static bool HandleConfigureGridSize(
     // UE 5.7+: ForEachStreamingGrid is available as public API
     SpatialHash->ForEachStreamingGrid([&GridsArray](const FSpatialHashStreamingGrid& Grid)
     {
-        TSharedPtr<FJsonObject> GridObj = MakeShareable(new FJsonObject());
+        TSharedPtr<FJsonObject> GridObj = McpHandlerUtils::CreateResultObject();
         GridObj->SetStringField(TEXT("gridName"), Grid.GridName.ToString());
         GridObj->SetNumberField(TEXT("cellSize"), Grid.CellSize);
         GridObj->SetNumberField(TEXT("loadingRange"), Grid.LoadingRange);
-        GridsArray.Add(MakeShareable(new FJsonValueObject(GridObj)));
+        GridsArray.Add(MakeShared<FJsonValueObject>(GridObj));
     });
 #else
     // UE 5.0-5.6: ForEachStreamingGrid not available - return empty grid info
     UE_LOG(LogMcpLevelStructureHandlers, Warning, TEXT("ForEachStreamingGrid not available in UE versions < 5.7"));
 #endif
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
     ResponseJson->SetArrayField(TEXT("currentGrids"), GridsArray);
     ResponseJson->SetStringField(TEXT("note"), TEXT("Grid configuration requires editor build to modify."));
     
@@ -817,7 +1625,20 @@ static bool HandleCreateDataLayer(
 #if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 1
     using namespace LevelStructureHelpers;
 
-    FString DataLayerName = GetJsonStringField(Payload, TEXT("dataLayerName"), TEXT("NewDataLayer"));
+    // CRITICAL: dataLayerName is required - no default fallback
+    FString DataLayerName;
+    if (Payload.IsValid())
+    {
+        Payload->TryGetStringField(TEXT("dataLayerName"), DataLayerName);
+    }
+    
+    if (DataLayerName.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("dataLayerName is required for create_data_layer"), nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
     FString DataLayerAssetPath = GetJsonStringField(Payload, TEXT("dataLayerAssetPath"), TEXT("/Game/DataLayers"));
     bool bIsInitiallyVisible = GetJsonBoolField(Payload, TEXT("bIsInitiallyVisible"), true);
     bool bIsInitiallyLoaded = GetJsonBoolField(Payload, TEXT("bIsInitiallyLoaded"), true);
@@ -828,7 +1649,7 @@ static bool HandleCreateDataLayer(
     if (!World)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("No editor world available"), nullptr);
+            TEXT("No editor world available"), nullptr, TEXT("NO_EDITOR_WORLD"));
         return true;
     }
 
@@ -837,7 +1658,26 @@ static bool HandleCreateDataLayer(
     if (!WorldPartition)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("World Partition is not enabled for this level. Data layers require World Partition."), nullptr);
+            TEXT("World Partition is not enabled for this level. Data layers require World Partition."), nullptr, TEXT("WORLD_PARTITION_NOT_ENABLED"));
+        return true;
+    }
+
+    // CRITICAL: Check if the level uses External Objects (One File Per Actor / OFPA)
+    // Data Layer instances require OFPA to be enabled, otherwise AddDataLayerInstance()
+    // will hit an assertion: "GetLevel()->IsUsingExternalObjects()"
+    // See WorldDataLayers.cpp:685
+    ULevel* PersistentLevel = World->PersistentLevel;
+    if (!PersistentLevel || !PersistentLevel->IsUsingExternalObjects())
+    {
+        TSharedPtr<FJsonObject> ErrorDetails = McpHandlerUtils::CreateResultObject();
+        ErrorDetails->SetStringField(TEXT("reason"), TEXT("One File Per Actor (OFPA) / External Actors is not enabled for this level."));
+        ErrorDetails->SetStringField(TEXT("solution"), TEXT("Enable 'Use External Actors' in World Partition settings or convert the level via Edit > Convert Level."));
+        ErrorDetails->SetBoolField(TEXT("worldPartitionEnabled"), true);
+        ErrorDetails->SetBoolField(TEXT("externalActorsEnabled"), PersistentLevel ? PersistentLevel->IsUsingExternalObjects() : false);
+        
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("Data layers require 'One File Per Actor' (External Actors) to be enabled. Enable it in World Partition settings or use 'Edit > Convert Level' in the editor."),
+            ErrorDetails, TEXT("EXTERNAL_ACTORS_NOT_ENABLED"));
         return true;
     }
 
@@ -846,9 +1686,20 @@ static bool HandleCreateDataLayer(
     if (!DataLayerEditorSubsystem)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Data Layer Editor Subsystem not available"), nullptr);
+            TEXT("Data Layer Editor Subsystem not available"), nullptr, TEXT("SUBSYSTEM_NOT_AVAILABLE"));
         return true;
     }
+
+    // Security: Validate data layer asset path format to prevent traversal attacks
+    FString SafeAssetPath = SanitizeProjectRelativePath(DataLayerAssetPath);
+    if (SafeAssetPath.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Invalid or unsafe data layer asset path: %s"), *DataLayerAssetPath),
+            nullptr, TEXT("SECURITY_VIOLATION"));
+        return true;
+    }
+    DataLayerAssetPath = SafeAssetPath;
 
     // Step 1: Create a UDataLayerAsset (the asset that backs the data layer instance)
     FString FullAssetPath = DataLayerAssetPath / DataLayerName;
@@ -862,7 +1713,7 @@ static bool HandleCreateDataLayer(
     if (!AssetPackage)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            FString::Printf(TEXT("Failed to create package for DataLayerAsset at: %s"), *FullAssetPath), nullptr);
+            FString::Printf(TEXT("Failed to create package for DataLayerAsset at: %s"), *FullAssetPath), nullptr, TEXT("PACKAGE_CREATION_FAILED"));
         return true;
     }
 
@@ -871,7 +1722,7 @@ static bool HandleCreateDataLayer(
     if (!NewDataLayerAsset)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to create UDataLayerAsset object"), nullptr);
+            TEXT("Failed to create UDataLayerAsset object"), nullptr, TEXT("ASSET_CREATION_FAILED"));
         return true;
     }
 
@@ -896,7 +1747,9 @@ static bool HandleCreateDataLayer(
     FDataLayerCreationParameters CreationParams;
     CreationParams.DataLayerAsset = NewDataLayerAsset;
     CreationParams.WorldDataLayers = World->GetWorldDataLayers();
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
     CreationParams.bIsPrivate = bIsPrivate;
+#endif
 
     UDataLayerInstance* NewDataLayerInstance = DataLayerEditorSubsystem->CreateDataLayerInstance(CreationParams);
     if (!NewDataLayerInstance)
@@ -908,16 +1761,14 @@ static bool HandleCreateDataLayer(
     }
 
     // Configure initial visibility and loaded state
-    // Note: SetDataLayerIsInitiallyVisible was removed in UE 5.5
-    #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4
-    DataLayerEditorSubsystem->SetDataLayerIsInitiallyVisible(NewDataLayerInstance, bIsInitiallyVisible);
-#endif
+    DataLayerEditorSubsystem->SetDataLayerVisibility(NewDataLayerInstance, bIsInitiallyVisible);
     DataLayerEditorSubsystem->SetDataLayerIsLoadedInEditor(NewDataLayerInstance, bIsInitiallyLoaded, false);
 
     // Mark world dirty
     World->MarkPackageDirty();
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, NewDataLayerAsset);
     ResponseJson->SetStringField(TEXT("dataLayerName"), DataLayerName);
     ResponseJson->SetStringField(TEXT("dataLayerAssetPath"), FullAssetPath);
     ResponseJson->SetStringField(TEXT("dataLayerType"), DataLayerType);
@@ -951,14 +1802,14 @@ static bool HandleAssignActorToDataLayer(
     if (ActorName.IsEmpty())
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("actorName is required"), nullptr);
+            TEXT("actorName is required"), nullptr, TEXT("INVALID_ARGUMENT"));
         return true;
     }
 
     if (DataLayerName.IsEmpty())
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("dataLayerName is required"), nullptr);
+            TEXT("dataLayerName is required"), nullptr, TEXT("INVALID_ARGUMENT"));
         return true;
     }
 
@@ -975,7 +1826,25 @@ static bool HandleAssignActorToDataLayer(
     if (!WorldPartition)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("World Partition is not enabled for this level. Data layers require World Partition."), nullptr);
+            TEXT("World Partition is not enabled for this level. Data layers require World Partition."), nullptr, TEXT("WORLD_PARTITION_NOT_ENABLED"));
+        return true;
+    }
+
+    // CRITICAL: Check if the level uses External Objects (One File Per Actor / OFPA)
+    // Actor-to-DataLayer assignment requires OFPA for actors to be compatible with data layers.
+    // Non-OFPA actors cannot be assigned to data layers.
+    ULevel* PersistentLevel = World->PersistentLevel;
+    if (!PersistentLevel || !PersistentLevel->IsUsingExternalObjects())
+    {
+        TSharedPtr<FJsonObject> ErrorDetails = McpHandlerUtils::CreateResultObject();
+        ErrorDetails->SetStringField(TEXT("reason"), TEXT("One File Per Actor (OFPA) / External Actors is not enabled for this level."));
+        ErrorDetails->SetStringField(TEXT("solution"), TEXT("Enable 'Use External Actors' in World Partition settings. Actors must be external to be compatible with data layers."));
+        ErrorDetails->SetBoolField(TEXT("worldPartitionEnabled"), true);
+        ErrorDetails->SetBoolField(TEXT("externalActorsEnabled"), PersistentLevel ? PersistentLevel->IsUsingExternalObjects() : false);
+        
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("Actor-to-DataLayer assignment requires 'One File Per Actor' (External Actors). Actors must be stored as external packages to be compatible with data layers."),
+            ErrorDetails, TEXT("EXTERNAL_ACTORS_NOT_ENABLED"));
         return true;
     }
 
@@ -984,7 +1853,7 @@ static bool HandleAssignActorToDataLayer(
     if (!DataLayerEditorSubsystem)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Data Layer Editor Subsystem not available"), nullptr);
+            TEXT("Data Layer Editor Subsystem not available"), nullptr, TEXT("SUBSYSTEM_NOT_AVAILABLE"));
         return true;
     }
 
@@ -1002,12 +1871,43 @@ static bool HandleAssignActorToDataLayer(
     if (!FoundActor)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            FString::Printf(TEXT("Actor not found: %s"), *ActorName), nullptr);
+            FString::Printf(TEXT("Actor not found: %s"), *ActorName), nullptr, TEXT("NOT_FOUND"));
         return true;
     }
 
     // Find the data layer instance by name
-    UDataLayerInstance* DataLayerInstance = DataLayerEditorSubsystem->GetDataLayerInstance(FName(*DataLayerName));
+    // Try multiple lookup methods to handle both short name and full name matching
+    UDataLayerInstance* DataLayerInstance = nullptr;
+    
+    // Method 1: Direct FName lookup (for full names)
+    DataLayerInstance = DataLayerEditorSubsystem->GetDataLayerInstance(FName(*DataLayerName));
+    
+    // Method 2: If not found, search by short name (case-insensitive)
+    if (!DataLayerInstance)
+    {
+        TArray<UDataLayerInstance*> AllDataLayers = DataLayerEditorSubsystem->GetAllDataLayers();
+        for (UDataLayerInstance* DL : AllDataLayers)
+        {
+            if (DL)
+            {
+                // Compare by short name (case-insensitive for robustness)
+                FString ShortName = DL->GetDataLayerShortName();
+                if (ShortName.Equals(DataLayerName, ESearchCase::IgnoreCase))
+                {
+                    DataLayerInstance = DL;
+                    break;
+                }
+                // Also try full name
+                FString FullName = DL->GetDataLayerFullName();
+                if (FullName.Equals(DataLayerName, ESearchCase::IgnoreCase))
+                {
+                    DataLayerInstance = DL;
+                    break;
+                }
+            }
+        }
+    }
+    
     if (!DataLayerInstance)
     {
         // Build a list of available data layers for the error message
@@ -1026,16 +1926,36 @@ static bool HandleAssignActorToDataLayer(
             : TEXT("(none)");
 
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            FString::Printf(TEXT("Data layer not found: '%s'. Available data layers: %s"), *DataLayerName, *AvailableStr), nullptr);
+            FString::Printf(TEXT("Data layer not found: '%s'. Available data layers: %s"), *DataLayerName, *AvailableStr), nullptr, TEXT("NOT_FOUND"));
+        return true;
+    }
+
+    // IDEMPOTENCY: Check if actor is already in the target data layer before attempting to add
+    // This makes the operation idempotent - returns success whether actor is newly added or already present
+    bool bAlreadyInLayer = FoundActor->ContainsDataLayer(DataLayerInstance);
+
+    if (bAlreadyInLayer)
+    {
+        // Already assigned - return success (idempotent behavior)
+        TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+        McpHandlerUtils::AddVerification(ResponseJson, FoundActor);
+        ResponseJson->SetStringField(TEXT("actorName"), ActorName);
+        ResponseJson->SetStringField(TEXT("dataLayerName"), DataLayerName);
+        ResponseJson->SetBoolField(TEXT("assigned"), true);
+        ResponseJson->SetBoolField(TEXT("alreadyAssigned"), true);
+        
+        FString Message = FString::Printf(TEXT("Actor '%s' is already in data layer '%s'"), 
+            *ActorName, *DataLayerName);
+        Subsystem->SendAutomationResponse(Socket, RequestId, true, Message, ResponseJson);
         return true;
     }
 
     // Use the real API to add the actor to the data layer
     bool bSuccess = DataLayerEditorSubsystem->AddActorToDataLayer(FoundActor, DataLayerInstance);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, FoundActor);
     ResponseJson->SetStringField(TEXT("actorName"), ActorName);
-    ResponseJson->SetStringField(TEXT("actorPath"), FoundActor->GetPathName());
     ResponseJson->SetStringField(TEXT("dataLayerName"), DataLayerName);
     ResponseJson->SetBoolField(TEXT("assigned"), bSuccess);
 
@@ -1047,9 +1967,9 @@ static bool HandleAssignActorToDataLayer(
     }
     else
     {
-        // Check if actor was already in the data layer
-        ResponseJson->SetStringField(TEXT("reason"), TEXT("Actor may already belong to this data layer or is not compatible"));
-        FString Message = FString::Printf(TEXT("Failed to assign actor '%s' to data layer '%s'. Actor may already belong to this layer or is not compatible with data layers."), 
+        // This should rarely happen now - only if actor is incompatible with data layers
+        ResponseJson->SetStringField(TEXT("reason"), TEXT("Actor is not compatible with data layers"));
+        FString Message = FString::Printf(TEXT("Failed to assign actor '%s' to data layer '%s'. Actor may not be compatible with data layers."), 
             *ActorName, *DataLayerName);
         Subsystem->SendAutomationResponse(Socket, RequestId, false, Message, ResponseJson);
     }
@@ -1069,12 +1989,36 @@ static bool HandleConfigureHlodLayer(
 {
     using namespace LevelStructureHelpers;
 
-    FString HlodLayerName = GetJsonStringField(Payload, TEXT("hlodLayerName"), TEXT("DefaultHLOD"));
+    // CRITICAL: hlodLayerName is required - no default fallback
+    FString HlodLayerName;
+    if (Payload.IsValid())
+    {
+        Payload->TryGetStringField(TEXT("hlodLayerName"), HlodLayerName);
+    }
+    
+    if (HlodLayerName.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("hlodLayerName is required for configure_hlod_layer"), nullptr, TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
     FString HlodLayerPath = GetJsonStringField(Payload, TEXT("hlodLayerPath"), TEXT("/Game/HLOD"));
     bool bIsSpatiallyLoaded = GetJsonBoolField(Payload, TEXT("bIsSpatiallyLoaded"), true);
     int32 CellSize = GetJsonIntField(Payload, TEXT("cellSize"), 25600);
     double LoadingDistance = GetJsonNumberField(Payload, TEXT("loadingDistance"), 51200.0);
     FString LayerType = GetJsonStringField(Payload, TEXT("layerType"), TEXT("MeshMerge"));
+
+    // Security: Validate HLOD layer path format to prevent traversal attacks
+    FString SafePath = SanitizeProjectRelativePath(HlodLayerPath);
+    if (SafePath.IsEmpty())
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Invalid or unsafe HLOD layer path: %s"), *HlodLayerPath),
+            nullptr, TEXT("SECURITY_VIOLATION"));
+        return true;
+    }
+    HlodLayerPath = SafePath;
 
     // Build full path
     FString FullPath = HlodLayerPath / HlodLayerName;
@@ -1088,7 +2032,7 @@ static bool HandleConfigureHlodLayer(
     if (!AssetPackage)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            FString::Printf(TEXT("Failed to create package for HLOD layer at: %s"), *FullPath), nullptr);
+            FString::Printf(TEXT("Failed to create package for HLOD layer at: %s"), *FullPath), nullptr, TEXT("PACKAGE_CREATION_FAILED"));
         return true;
     }
 
@@ -1097,7 +2041,7 @@ static bool HandleConfigureHlodLayer(
     if (!NewHLODLayer)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to create UHLODLayer object"), nullptr);
+            TEXT("Failed to create UHLODLayer object"), nullptr, TEXT("ASSET_CREATION_FAILED"));
         return true;
     }
 
@@ -1133,7 +2077,7 @@ static bool HandleConfigureHlodLayer(
     // Save the asset
     McpSafeAssetSave(NewHLODLayer);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
     ResponseJson->SetStringField(TEXT("hlodLayerName"), HlodLayerName);
     ResponseJson->SetStringField(TEXT("hlodLayerPath"), FullPath);
     ResponseJson->SetBoolField(TEXT("isSpatiallyLoaded"), bIsSpatiallyLoaded);
@@ -1173,13 +2117,16 @@ static bool HandleCreateMinimapVolume(
     if (!WorldPartition)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("World Partition is not enabled. AWorldPartitionMiniMapVolume requires World Partition."), nullptr);
+            TEXT("World Partition is not enabled. AWorldPartitionMiniMapVolume requires World Partition."), nullptr, TEXT("WORLD_PARTITION_NOT_ENABLED"));
         return true;
     }
 
     // Spawn the AWorldPartitionMiniMapVolume
     FActorSpawnParameters SpawnParams;
-    SpawnParams.Name = FName(*VolumeName);
+    // CRITICAL FIX: Use MakeUniqueObjectName to prevent "Cannot generate unique name" crash
+    // This prevents fatal error when multiple volumes with same name are created
+    SpawnParams.Name = MakeUniqueObjectName(World, AWorldPartitionMiniMapVolume::StaticClass(), FName(*VolumeName));
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;  // Auto-generate unique name if still taken
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
     AWorldPartitionMiniMapVolume* MiniMapVolume = World->SpawnActor<AWorldPartitionMiniMapVolume>(
@@ -1192,11 +2139,11 @@ static bool HandleCreateMinimapVolume(
     if (!MiniMapVolume)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to spawn AWorldPartitionMiniMapVolume actor"), nullptr);
+            TEXT("Failed to spawn AWorldPartitionMiniMapVolume actor"), nullptr, TEXT("ACTOR_SPAWN_FAILED"));
         return true;
     }
 
-    // Set actor label
+    // Set actor label to the requested name (may differ from internal name if collision occurred)
     MiniMapVolume->SetActorLabel(*VolumeName);
 
     // Scale the volume to match the extent (AVolume uses a brush, scale affects it)
@@ -1205,17 +2152,18 @@ static bool HandleCreateMinimapVolume(
     FVector DesiredScale = VolumeExtent / 100.0; // Brush is 200 units, so divide by half
     MiniMapVolume->SetActorScale3D(DesiredScale);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, MiniMapVolume);
     ResponseJson->SetStringField(TEXT("volumeName"), VolumeName);
     ResponseJson->SetStringField(TEXT("volumeClass"), TEXT("AWorldPartitionMiniMapVolume"));
     
-    TSharedPtr<FJsonObject> LocationJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> LocationJson = McpHandlerUtils::CreateResultObject();
     LocationJson->SetNumberField(TEXT("x"), VolumeLocation.X);
     LocationJson->SetNumberField(TEXT("y"), VolumeLocation.Y);
     LocationJson->SetNumberField(TEXT("z"), VolumeLocation.Z);
     ResponseJson->SetObjectField(TEXT("volumeLocation"), LocationJson);
     
-    TSharedPtr<FJsonObject> ExtentJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ExtentJson = McpHandlerUtils::CreateResultObject();
     ExtentJson->SetNumberField(TEXT("x"), VolumeExtent.X);
     ExtentJson->SetNumberField(TEXT("y"), VolumeExtent.Y);
     ExtentJson->SetNumberField(TEXT("z"), VolumeExtent.Z);
@@ -1264,9 +2212,10 @@ static bool HandleOpenLevelBlueprint(
     FString LevelPackageName = World->GetOutermost()->GetName();
     bool bIsSavedLevel = !LevelPackageName.IsEmpty() && !LevelPackageName.StartsWith(TEXT("/Temp/"));
 
-    // For unsaved levels, GetLevelScriptBlueprint(true) may fail to create the blueprint
+    // For unsaved levels, GetLevelScriptBlueprint(false) may fail to create the blueprint
     // because it requires a valid package path
-    ULevelScriptBlueprint* LevelBP = PersistentLevel->GetLevelScriptBlueprint(true);
+    // Pass false to allow creation of Level Blueprint if it doesn't exist
+    ULevelScriptBlueprint* LevelBP = PersistentLevel->GetLevelScriptBlueprint(false);
     if (!LevelBP)
     {
         // Try to create the level blueprint manually for unsaved levels
@@ -1284,9 +2233,9 @@ static bool HandleOpenLevelBlueprint(
     // Open the blueprint editor
     GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(LevelBP);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, LevelBP);
     ResponseJson->SetStringField(TEXT("levelName"), World->GetMapName());
-    ResponseJson->SetStringField(TEXT("blueprintPath"), LevelBP->GetPathName());
 
     FString Message = FString::Printf(TEXT("Opened Level Blueprint for: %s"), *World->GetMapName());
     Subsystem->SendAutomationResponse(Socket, RequestId, true, Message, ResponseJson);
@@ -1330,11 +2279,12 @@ static bool HandleAddLevelBlueprintNode(
         return true;
     }
 
-    ULevelScriptBlueprint* LevelBP = CurrentLevel->GetLevelScriptBlueprint(true);
+    // Pass false to allow creation of Level Blueprint if it doesn't exist
+    ULevelScriptBlueprint* LevelBP = CurrentLevel->GetLevelScriptBlueprint(false);
     if (!LevelBP)
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to get Level Blueprint"), nullptr);
+            TEXT("Failed to get or create Level Blueprint"), nullptr);
         return true;
     }
 
@@ -1416,7 +2366,8 @@ static bool HandleAddLevelBlueprintNode(
     // Mark blueprint as modified
     FBlueprintEditorUtils::MarkBlueprintAsModified(LevelBP);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, LevelBP);
     ResponseJson->SetStringField(TEXT("nodeClass"), NodeClass);
     ResponseJson->SetStringField(TEXT("nodeName"), CreatedNodeName);
     ResponseJson->SetNumberField(TEXT("posX"), PosX);
@@ -1529,7 +2480,8 @@ static bool HandleConnectLevelBlueprintNodes(
 
     FBlueprintEditorUtils::MarkBlueprintAsModified(LevelBP);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, LevelBP);
     ResponseJson->SetStringField(TEXT("sourceNode"), SourceNodeName);
     ResponseJson->SetStringField(TEXT("sourcePin"), SourcePinName);
     ResponseJson->SetStringField(TEXT("targetNode"), TargetNodeName);
@@ -1568,6 +2520,22 @@ static bool HandleCreateLevelInstance(
         return true;
     }
 
+    // Validate that the level asset exists
+    FString NormalizedLevelPath = LevelAssetPath;
+    if (!NormalizedLevelPath.StartsWith(TEXT("/Game/")))
+    {
+        NormalizedLevelPath = TEXT("/Game/") + NormalizedLevelPath;
+    }
+    // Remove .umap extension if present
+    NormalizedLevelPath.RemoveFromEnd(TEXT(".umap"));
+
+    if (!FPackageName::DoesPackageExist(NormalizedLevelPath))
+    {
+        Subsystem->SendAutomationResponse(Socket, RequestId, false,
+            FString::Printf(TEXT("Level asset not found: %s"), *LevelAssetPath), nullptr, TEXT("LEVEL_NOT_FOUND"));
+        return true;
+    }
+
     UWorld* World = GetEditorWorld();
     if (!World)
     {
@@ -1587,7 +2555,9 @@ static bool HandleCreateLevelInstance(
 
     // Spawn Level Instance Actor
     FActorSpawnParameters SpawnParams;
-    SpawnParams.Name = FName(*LevelInstanceName);
+    // CRITICAL FIX: Use MakeUniqueObjectName to prevent "Cannot generate unique name" crash
+    SpawnParams.Name = MakeUniqueObjectName(World, ALevelInstance::StaticClass(), FName(*LevelInstanceName));
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
     ALevelInstance* LevelInstanceActor = World->SpawnActor<ALevelInstance>(
@@ -1605,13 +2575,15 @@ static bool HandleCreateLevelInstance(
     }
 
     LevelInstanceActor->SetActorScale3D(InstanceScale);
+    // Set actor label to the requested name (may differ from internal name if collision occurred)
     LevelInstanceActor->SetActorLabel(*LevelInstanceName);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, LevelInstanceActor);
     ResponseJson->SetStringField(TEXT("levelInstanceName"), LevelInstanceName);
     ResponseJson->SetStringField(TEXT("levelAssetPath"), LevelAssetPath);
     
-    TSharedPtr<FJsonObject> LocationJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> LocationJson = McpHandlerUtils::CreateResultObject();
     LocationJson->SetNumberField(TEXT("x"), InstanceLocation.X);
     LocationJson->SetNumberField(TEXT("y"), InstanceLocation.Y);
     LocationJson->SetNumberField(TEXT("z"), InstanceLocation.Z);
@@ -1637,6 +2609,24 @@ static bool HandleCreatePackedLevelActor(
     bool bPackBlueprints = GetJsonBoolField(Payload, TEXT("bPackBlueprints"), true);
     bool bPackStaticMeshes = GetJsonBoolField(Payload, TEXT("bPackStaticMeshes"), true);
 
+    // Validate levelAssetPath if provided
+    if (!LevelAssetPath.IsEmpty())
+    {
+        FString NormalizedLevelPath = LevelAssetPath;
+        if (!NormalizedLevelPath.StartsWith(TEXT("/Game/")))
+        {
+            NormalizedLevelPath = TEXT("/Game/") + NormalizedLevelPath;
+        }
+        NormalizedLevelPath.RemoveFromEnd(TEXT(".umap"));
+
+        if (!FPackageName::DoesPackageExist(NormalizedLevelPath))
+        {
+            Subsystem->SendAutomationResponse(Socket, RequestId, false,
+                FString::Printf(TEXT("Level asset not found: %s"), *LevelAssetPath), nullptr, TEXT("LEVEL_NOT_FOUND"));
+            return true;
+        }
+    }
+
     UWorld* World = GetEditorWorld();
     if (!World)
     {
@@ -1647,7 +2637,10 @@ static bool HandleCreatePackedLevelActor(
 
     // Spawn Packed Level Actor
     FActorSpawnParameters SpawnParams;
-    SpawnParams.Name = FName(*PackedLevelName);
+    // CRITICAL FIX: Use MakeUniqueObjectName to prevent "Cannot generate unique name" crash
+    // This prevents fatal error when multiple actors with same name are created
+    SpawnParams.Name = MakeUniqueObjectName(World, APackedLevelActor::StaticClass(), FName(*PackedLevelName));
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;  // Auto-generate unique name if still taken
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
     APackedLevelActor* PackedActor = World->SpawnActor<APackedLevelActor>(
@@ -1664,9 +2657,11 @@ static bool HandleCreatePackedLevelActor(
         return true;
     }
 
+    // Set actor label to the requested name (may differ from internal name if collision occurred)
     PackedActor->SetActorLabel(*PackedLevelName);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(ResponseJson, PackedActor);
     ResponseJson->SetStringField(TEXT("packedLevelName"), PackedLevelName);
     ResponseJson->SetStringField(TEXT("levelAssetPath"), LevelAssetPath);
     ResponseJson->SetBoolField(TEXT("packBlueprints"), bPackBlueprints);
@@ -1697,7 +2692,7 @@ static bool HandleGetLevelStructureInfo(
         return true;
     }
 
-    TSharedPtr<FJsonObject> InfoJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> InfoJson = McpHandlerUtils::CreateResultObject();
     InfoJson->SetStringField(TEXT("currentLevel"), World->GetMapName());
 
     // Get streaming levels
@@ -1709,7 +2704,7 @@ static bool HandleGetLevelStructureInfo(
     {
         if (StreamingLevel)
         {
-            SublevelsArray.Add(MakeShareable(new FJsonValueString(StreamingLevel->GetWorldAssetPackageFName().ToString())));
+            SublevelsArray.Add(MakeShared<FJsonValueString>(StreamingLevel->GetWorldAssetPackageFName().ToString()));
         }
     }
     InfoJson->SetArrayField(TEXT("sublevels"), SublevelsArray);
@@ -1735,7 +2730,7 @@ static bool HandleGetLevelStructureInfo(
     for (TActorIterator<ALevelInstance> It(World); It; ++It)
     {
         FString ActorLabel = It->GetActorLabel();
-        LevelInstancesArray.Add(MakeShareable(new FJsonValueString(ActorLabel)));
+        LevelInstancesArray.Add(MakeShared<FJsonValueString>(ActorLabel));
     }
     InfoJson->SetArrayField(TEXT("levelInstances"), LevelInstancesArray);
 
@@ -1751,7 +2746,7 @@ static bool HandleGetLevelStructureInfo(
             UHLODLayer* Layer = *It;
             if (Layer && Layer->GetOuter() && Layer->GetOuter()->GetWorld() == World)
             {
-                TSharedPtr<FJsonObject> LayerJson = MakeShared<FJsonObject>();
+                TSharedPtr<FJsonObject> LayerJson = McpHandlerUtils::CreateResultObject();
                 LayerJson->SetStringField(TEXT("name"), Layer->GetName());
                 LayerJson->SetStringField(TEXT("type"), TEXT("world_partition"));
                 // UE 5.7+: GetCellSize, GetLoadingRange, IsSpatiallyLoaded are deprecated
@@ -1786,7 +2781,7 @@ static bool HandleGetLevelStructureInfo(
                     LayerJson->SetStringField(TEXT("parentLayer"), ParentLayerSoft->GetName());
                 }
                 
-                HlodLayersArray.Add(MakeShareable(new FJsonValueObject(LayerJson)));
+                HlodLayersArray.Add(MakeShared<FJsonValueObject>(LayerJson));
             }
         }
     }
@@ -1804,11 +2799,11 @@ static bool HandleGetLevelStructureInfo(
                 if (!FoundLayers.Contains(LayerName))
                 {
                     FoundLayers.Add(LayerName);
-                    TSharedPtr<FJsonObject> LayerJson = MakeShared<FJsonObject>();
+                    TSharedPtr<FJsonObject> LayerJson = McpHandlerUtils::CreateResultObject();
                     LayerJson->SetStringField(TEXT("name"), LayerName);
                     LayerJson->SetStringField(TEXT("type"), TEXT("world_partition_hlod_actor"));
                     LayerJson->SetNumberField(TEXT("lodLevel"), HLODActor->GetLODLevel());
-                    HlodLayersArray.Add(MakeShareable(new FJsonValueObject(LayerJson)));
+                    HlodLayersArray.Add(MakeShared<FJsonValueObject>(LayerJson));
                 }
             }
         }
@@ -1831,18 +2826,18 @@ static bool HandleGetLevelStructureInfo(
         // Create layer entries for each LOD level found
         for (const auto& Pair : LodLevelCounts)
         {
-            TSharedPtr<FJsonObject> LayerJson = MakeShared<FJsonObject>();
+            TSharedPtr<FJsonObject> LayerJson = McpHandlerUtils::CreateResultObject();
             LayerJson->SetStringField(TEXT("name"), FString::Printf(TEXT("LOD_Level_%d"), Pair.Key));
             LayerJson->SetStringField(TEXT("type"), TEXT("legacy_hlod"));
             LayerJson->SetNumberField(TEXT("lodLevel"), Pair.Key);
             LayerJson->SetNumberField(TEXT("actorCount"), Pair.Value);
-            HlodLayersArray.Add(MakeShareable(new FJsonValueObject(LayerJson)));
+            HlodLayersArray.Add(MakeShared<FJsonValueObject>(LayerJson));
         }
     }
 
     InfoJson->SetArrayField(TEXT("hlodLayers"), HlodLayersArray);
 
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> ResponseJson = McpHandlerUtils::CreateResultObject();
     ResponseJson->SetObjectField(TEXT("levelStructureInfo"), InfoJson);
 
     FString Message = TEXT("Retrieved level structure information");

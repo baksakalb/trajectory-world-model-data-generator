@@ -1,15 +1,15 @@
 {
   "FileVersion": 3,
-  "Version": 1,
-  "VersionName": "0.1.0",
+  "Version": 3,
+  "VersionName": "0.1.4",
   "FriendlyName": "MCP Automation Bridge",
-  "Description": "Editor-side bridge that accepts elevated automation requests from the Unreal MCP server.",
-  "Category": "Automation",
-  "CreatedBy": "unreal-engine-mcp-server",
+  "Description": "Editor automation bridge enabling Codex and other MCP clients to control Unreal Engine via Model Context Protocol (MCP). Provides 200+ automation actions for assets, actors, levels, animation, AI, Niagara, materials, foliage, landscapes, and more. Supports UE 5.0-5.7 with TLS/SSL security.",
+  "Category": "Editor|Automation|AI",
+  "CreatedBy": "ChiR24",
   "CreatedByURL": "https://github.com/ChiR24/Unreal_mcp",
-  "DocsURL": "",
+  "DocsURL": "https://github.com/ChiR24/Unreal_mcp#readme",
   "MarketplaceURL": "",
-  "SupportURL": "",
+  "SupportURL": "https://github.com/ChiR24/Unreal_mcp/discussions",
   "CanContainContent": false,
   "IsBetaVersion": true,
   "IsExperimentalVersion": true,
@@ -54,6 +54,21 @@
     },
     {
       "Name": "ControlRig",
+      "Enabled": true,
+      "Optional": true
+    },
+    {
+      "Name": "IKRig",
+      "Enabled": true,
+      "Optional": true
+    },
+    {
+      "Name": "ChaosVehiclesPlugin",
+      "Enabled": true,
+      "Optional": true
+    },
+    {
+      "Name": "AnimationData",
       "Enabled": true,
       "Optional": true
     },

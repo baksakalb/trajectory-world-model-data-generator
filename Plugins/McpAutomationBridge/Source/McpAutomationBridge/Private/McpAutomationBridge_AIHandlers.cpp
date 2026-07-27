@@ -1,15 +1,73 @@
-#include "Dom/JsonObject.h"
+// =============================================================================
 // McpAutomationBridge_AIHandlers.cpp
-// Phase 16: AI System
-// Implements 35 actions for AI controllers, blackboards, behavior trees, EQS, perception,
-// state trees, smart objects, and mass AI.
+// =============================================================================
+// Phase 16: AI System Handlers
+//
+// Provides comprehensive AI, behavior tree, EQS, perception, state tree, smart objects,
+// and mass AI capabilities for the MCP Automation Bridge.
+//
+// HANDLERS BY CATEGORY:
+// ---------------------
+// 16.1  AI Controllers      - create_ai_controller, get_ai_controller_info, possess_pawn,
+//                              set_focus, clear_focus, run_behavior_tree
+// 16.2  Blackboard          - create_blackboard, get_blackboard_info, set_blackboard_value,
+//                              get_blackboard_value, clear_blackboard_value, add_blackboard_key
+// 16.3  Behavior Tree       - create_behavior_tree, get_behavior_tree_info, add_bt_node,
+//                              remove_bt_node, set_bt_node_property
+// 16.4  Environment Query   - create_env_query, run_env_query, add_eqs_generator, add_eqs_test
+// 16.5  AI Perception       - configure_perception, add_sight_config, add_hearing_config,
+//                              add_damage_config, get_perception_info
+// 16.6  State Tree (5.3+)   - create_state_tree, add_state_tree_state, compile_state_tree
+// 16.7  Smart Objects (5+)  - create_smart_object_definition, register_smart_object
+// 16.8  Mass AI (5+)        - create_mass_entity, spawn_mass_entities
+// 16.9  Navigation AI       - move_to_location, move_to_actor, get_nav_path, add_nav_modifier
+// 16.10 Utility Actions     - get_ai_info, validate_ai_setup, debug_ai_state
+//
+// VERSION COMPATIBILITY:
+// ----------------------
+// - UE 5.0: Basic AI, EQS, Perception, Smart Objects, Mass AI
+// - UE 5.1+: EnvQueryTest headers available (EnvQueryTest_Distance, EnvQueryTest_Trace)
+// - UE 5.3+: State Tree module available
+// - UE 5.7+: StateTreeComponentSchema moved to GameplayStateTreeModule
+//
+// REFACTORING NOTES:
+// ------------------
+// - Conditional includes for State Tree, Smart Objects, Mass AI via __has_include
+// - Helper macros (GetStringFieldAI, etc.) for JSON field access
+// - SavePackageHelperAI for safe asset saving (avoids FullyLoad on new packages)
+// - Uses MCP_HAS_* macros for feature detection
+//
+// ASSET EXISTENCE CHECK PATTERN:
+// - For operations on newly created assets (assign_behavior_tree, assign_blackboard):
+//   DoesAssetExist is SKIPPED because newly created assets may not be indexed yet.
+//   LoadObject null-check is sufficient.
+// - For operations on existing assets (add_blackboard_key, add_composite_node):
+//   DoesAssetExist IS used to fail fast for typo/wrong-path cases.
+// - This differs from NiagaraAuthoringHandlers which always uses DoesAssetExist
+//   because Niagara assets are never created and immediately modified in the same
+//   operation sequence.
+//
+// Copyright (c) 2024 MCP Automation Bridge Contributors
+// =============================================================================
 
+#include "McpVersionCompatibility.h"  // MUST be first - UE version compatibility macros
+
+// MCP Core
 #include "McpAutomationBridgeSubsystem.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridgeGlobals.h"
+#include "McpHandlerUtils.h"
+#include "Modules/ModuleManager.h"  // Required for FModuleManager::IsModuleLoaded() runtime checks
+
+// JSON
+#include "Dom/JsonObject.h"
+
+// Engine Version
 #include "Misc/EngineVersionComparison.h"
 
 #if WITH_EDITOR
+
+// Blueprint & Asset Tools
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Factories/BlueprintFactory.h"
@@ -20,7 +78,11 @@
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
 #include "HAL/FileManager.h"
+
+// AI Controller
 #include "AIController.h"
+
+// Behavior Tree
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
@@ -44,13 +106,15 @@
 #include "BehaviorTree/Decorators/BTDecorator_Blackboard.h"
 #include "BehaviorTree/Decorators/BTDecorator_Cooldown.h"
 #include "BehaviorTree/Decorators/BTDecorator_Loop.h"
+
+// Environment Query
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_ActorsOfClass.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_OnCircle.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_SimpleGrid.h"
 
-// EnvQueryTest headers are in EnvironmentQueryEditor module which may not be available in UE 5.0
+// EQS Tests (UE 5.1+)
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 #include "EnvironmentQuery/Tests/EnvQueryTest_Distance.h"
 #include "EnvironmentQuery/Tests/EnvQueryTest_Trace.h"
@@ -58,15 +122,34 @@
 #else
 #define MCP_HAS_ENVQUERY_TESTS 0
 #endif
+
+// AI Perception
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISenseConfig_Hearing.h"
 #include "Perception/AISenseConfig_Damage.h"
+#include "Perception/AISense_Sight.h"
+#include "Perception/AISense_Hearing.h"
+#include "Perception/AISense_Damage.h"
+
+// Engine Components
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
+#include "GameFramework/CharacterMovementComponent.h"
+
+// Navigation
+#include "NavModifierComponent.h"
+#include "NavAreas/NavArea.h"
+#include "NavAreas/NavArea_Default.h"
+#include "NavAreas/NavArea_Null.h"
+#include "NavAreas/NavArea_Obstacle.h"
 #endif
 
-// Attempt to include State Tree (UE 5.3+)
+// =============================================================================
+// Conditional Includes (version-dependent)
+// =============================================================================
+
+// State Tree (UE 5.3+)
 #if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 3
 #define MCP_HAS_STATE_TREE 1
 #if __has_include("StateTree.h")
@@ -75,6 +158,7 @@
 #include "StateTreeState.h"
 #include "StateTreeCompiler.h"
 #include "StateTreeCompilerLog.h"
+
 // UE 5.7+ moved StateTreeComponentSchema to GameplayStateTreeModule
 #if __has_include("Components/StateTreeComponentSchema.h")
 #include "Components/StateTreeComponentSchema.h"
@@ -93,7 +177,7 @@
 #define MCP_STATE_TREE_COMPONENT_SCHEMA_AVAILABLE 0
 #endif
 
-// Attempt to include Smart Objects (UE 5.0+)
+// Smart Objects (UE 5.0+)
 #if ENGINE_MAJOR_VERSION >= 5
 #define MCP_HAS_SMART_OBJECTS 1
 #if __has_include("SmartObjectDefinition.h")
@@ -110,7 +194,7 @@
 #define MCP_SMART_OBJECTS_HEADERS_AVAILABLE 0
 #endif
 
-// Attempt to include Mass AI (UE 5.0+)
+// Mass AI (UE 5.0+)
 #if ENGINE_MAJOR_VERSION >= 5
 #define MCP_HAS_MASS_AI 1
 #if __has_include("MassEntityConfigAsset.h")
@@ -135,6 +219,70 @@ DEFINE_LOG_CATEGORY_STATIC(LogMcpAIHandlers, Log, All);
 #define GetNumberFieldAI GetJsonNumberField
 #define GetBoolFieldAI GetJsonBoolField
 
+// =============================================================================
+// Runtime Module Check Helpers
+// =============================================================================
+// These helpers check if optional AI modules are loaded at runtime.
+// Required because DynamicallyLoadedModuleNames allows DLL to load without
+// hard dependencies, but code must verify module availability before use.
+
+/**
+ * Check if StateTree module is loaded at runtime.
+ * Returns true if module is available, false otherwise.
+ * Attempts to load the module if it exists but isn't loaded yet.
+ */
+static bool IsStateTreeModuleAvailable()
+{
+#if MCP_HAS_STATE_TREE
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("StateTreeModule")))
+    {
+        return true;
+    }
+    // Try to load it
+    if (FModuleManager::Get().ModuleExists(TEXT("StateTreeModule")))
+    {
+        return FModuleManager::Get().LoadModule(TEXT("StateTreeModule")) != nullptr;
+    }
+#endif
+    return false;
+}
+
+/**
+ * Check if SmartObjects module is loaded at runtime.
+ */
+static bool IsSmartObjectsModuleAvailable()
+{
+#if MCP_HAS_SMART_OBJECTS
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("SmartObjectsModule")))
+    {
+        return true;
+    }
+    if (FModuleManager::Get().ModuleExists(TEXT("SmartObjectsModule")))
+    {
+        return FModuleManager::Get().LoadModule(TEXT("SmartObjectsModule")) != nullptr;
+    }
+#endif
+    return false;
+}
+
+/**
+ * Check if MassEntity module is loaded at runtime.
+ */
+static bool IsMassModuleAvailable()
+{
+#if MCP_HAS_MASS_AI
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("MassEntity")))
+    {
+        return true;
+    }
+    if (FModuleManager::Get().ModuleExists(TEXT("MassEntity")))
+    {
+        return FModuleManager::Get().LoadModule(TEXT("MassEntity")) != nullptr;
+    }
+#endif
+    return false;
+}
+
 // Helper to save package
 // Note: This helper is used for NEW assets created with CreatePackage + factory.
 // FullyLoad() must NOT be called on new packages - it corrupts bulkdata in UE 5.7+.
@@ -146,11 +294,98 @@ static bool SavePackageHelperAI(UPackage* Package, UObject* Asset)
     return McpSafeAssetSave(Asset);
 }
 
+/**
+ * Sanitize and validate an asset path for AI asset creation.
+ * - Removes double slashes that cause Fatal Error in UObjectGlobals.cpp
+ * - Validates path is within a valid mount point (/Game/, /Plugin/, etc.)
+ * - Returns false and sets OutError if path is invalid (security check)
+ */
+static bool SanitizeAIAssetPath(const FString& InputPath, FString& OutSanitizedPath, FString& OutError)
+{
+    // Start with the input path
+    OutSanitizedPath = InputPath;
+    
+    // 1. Remove duplicate slashes (prevents Fatal Error in UObjectGlobals.cpp)
+    OutSanitizedPath.ReplaceInline(TEXT("//"), TEXT("/"));
+    while (OutSanitizedPath.Contains(TEXT("//")))
+    {
+        OutSanitizedPath.ReplaceInline(TEXT("//"), TEXT("/"));
+    }
+    
+    // 2. Trim leading/trailing whitespace
+    OutSanitizedPath.TrimStartAndEndInline();
+    
+    // 3. Validate that path starts with a valid mount point
+    // Valid mount points: /Game/, /Engine/, /PluginName/, etc.
+    if (!OutSanitizedPath.StartsWith(TEXT("/")))
+    {
+        OutError = FString::Printf(TEXT("Invalid path: must start with '/' (got: %s)"), *InputPath);
+        return false;
+    }
+    
+    // 4. Check for path traversal attempts (security)
+    if (OutSanitizedPath.Contains(TEXT("..")) || 
+        OutSanitizedPath.Contains(TEXT("~")) ||
+        OutSanitizedPath.Contains(TEXT("\\")))
+    {
+        OutError = FString::Printf(TEXT("Invalid path: contains forbidden characters (path traversal attempt): %s"), *InputPath);
+        return false;
+    }
+    
+    // 5. Validate path starts with known mount points
+    // Only allow /Game/ or /Engine/ as valid mount points for AI assets
+    if (!OutSanitizedPath.StartsWith(TEXT("/Game/")) && 
+        !OutSanitizedPath.StartsWith(TEXT("/Engine/")) &&
+        OutSanitizedPath != TEXT("/Game") &&
+        OutSanitizedPath != TEXT("/Engine"))
+    {
+        // Could be a path traversal attempt like /etc/passwd/Test
+        OutError = FString::Printf(TEXT("Invalid path: must start with /Game/ or /Engine/ (got: %s)"), *InputPath);
+        return false;
+    }
+    
+    return true;
+}
+
 #if WITH_EDITOR
 // Helper to create AI Controller blueprint
 static UBlueprint* CreateAIControllerBlueprint(const FString& Path, const FString& Name, FString& OutError)
 {
-    FString FullPath = Path / Name;
+    // Sanitize and validate path first
+    FString SanitizedPath;
+    if (!SanitizeAIAssetPath(Path, SanitizedPath, OutError))
+    {
+        return nullptr;
+    }
+    
+    FString FullPath = SanitizedPath / Name;
+    
+    // CRITICAL: Use UEditorAssetLibrary for reliable existence check
+    // This prevents the Kismet2.cpp assertion failure when blueprint already exists
+    // The FindObject check alone is insufficient because:
+    // 1. It checks for exact object path format
+    // 2. The package may exist even if the blueprint object doesn't
+    if (UEditorAssetLibrary::DoesAssetExist(FullPath))
+    {
+        OutError = FString::Printf(TEXT("Asset already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
+    // Also check with .AssetName suffix (blueprint object path format)
+    FString ObjectPath = FullPath + TEXT(".") + Name;
+    if (UEditorAssetLibrary::DoesAssetExist(ObjectPath))
+    {
+        OutError = FString::Printf(TEXT("Blueprint already exists: %s"), *ObjectPath);
+        return nullptr;
+    }
+    
+    // Check if package exists on disk (for assets that haven't been loaded yet)
+    if (FPackageName::DoesPackageExist(FullPath))
+    {
+        OutError = FString::Printf(TEXT("Package already exists on disk: %s"), *FullPath);
+        return nullptr;
+    }
+    
     UPackage* Package = CreatePackage(*FullPath);
     if (!Package)
     {
@@ -186,7 +421,29 @@ static UBlueprint* CreateAIControllerBlueprint(const FString& Path, const FStrin
 // Helper to create Blackboard asset
 static UBlackboardData* CreateBlackboardAsset(const FString& Path, const FString& Name, FString& OutError)
 {
-    FString FullPath = Path / Name;
+    // Sanitize and validate path first
+    FString SanitizedPath;
+    if (!SanitizeAIAssetPath(Path, SanitizedPath, OutError))
+    {
+        return nullptr;
+    }
+    
+    FString FullPath = SanitizedPath / Name;
+    
+    // Check if asset already exists
+    if (FindObject<UBlackboardData>(nullptr, *FullPath) != nullptr)
+    {
+        OutError = FString::Printf(TEXT("Asset already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
+    // Also check if the package exists
+    if (FPackageName::DoesPackageExist(FullPath))
+    {
+        OutError = FString::Printf(TEXT("Package already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
     UPackage* Package = CreatePackage(*FullPath);
     if (!Package)
     {
@@ -210,7 +467,29 @@ static UBlackboardData* CreateBlackboardAsset(const FString& Path, const FString
 // Helper to create Behavior Tree asset
 static UBehaviorTree* CreateBehaviorTreeAsset(const FString& Path, const FString& Name, FString& OutError)
 {
-    FString FullPath = Path / Name;
+    // Sanitize and validate path first
+    FString SanitizedPath;
+    if (!SanitizeAIAssetPath(Path, SanitizedPath, OutError))
+    {
+        return nullptr;
+    }
+    
+    FString FullPath = SanitizedPath / Name;
+    
+    // Check if asset already exists
+    if (FindObject<UBehaviorTree>(nullptr, *FullPath) != nullptr)
+    {
+        OutError = FString::Printf(TEXT("Asset already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
+    // Also check if the package exists
+    if (FPackageName::DoesPackageExist(FullPath))
+    {
+        OutError = FString::Printf(TEXT("Package already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
     UPackage* Package = CreatePackage(*FullPath);
     if (!Package)
     {
@@ -234,7 +513,29 @@ static UBehaviorTree* CreateBehaviorTreeAsset(const FString& Path, const FString
 // Helper to create EQS Query asset
 static UEnvQuery* CreateEQSQueryAsset(const FString& Path, const FString& Name, FString& OutError)
 {
-    FString FullPath = Path / Name;
+    // Sanitize and validate path first
+    FString SanitizedPath;
+    if (!SanitizeAIAssetPath(Path, SanitizedPath, OutError))
+    {
+        return nullptr;
+    }
+    
+    FString FullPath = SanitizedPath / Name;
+    
+    // Check if asset already exists
+    if (FindObject<UEnvQuery>(nullptr, *FullPath) != nullptr)
+    {
+        OutError = FString::Printf(TEXT("Asset already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
+    // Also check if the package exists
+    if (FPackageName::DoesPackageExist(FullPath))
+    {
+        OutError = FString::Printf(TEXT("Package already exists: %s"), *FullPath);
+        return nullptr;
+    }
+    
     UPackage* Package = CreatePackage(*FullPath);
     if (!Package)
     {
@@ -281,7 +582,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         return true;
     }
 
-    TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject());
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
 
     // =========================================================================
     // 16.1 AI Controller (3 actions)
@@ -310,6 +611,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetStringField(TEXT("controllerPath"), Blueprint->GetPathName());
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Created AI Controller: %s"), *Name));
+        McpHandlerUtils::AddVerification(Result, Blueprint);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("AI Controller created"), Result);
         return true;
     }
@@ -319,12 +621,13 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
         FString BehaviorTreePath = GetStringFieldAI(Payload, TEXT("behaviorTreePath"));
 
-        UBlueprint* Controller = LoadObject<UBlueprint>(nullptr, *ControllerPath);
-        if (!Controller)
+        // CRITICAL: Remove DoesAssetExist pre-check - newly created assets may not yet be
+        // indexed in the asset registry. Rely on LoadObject null-check instead.
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
         {
             SendAutomationError(RequestingSocket, RequestId,
-                                FString::Printf(TEXT("AI Controller not found: %s"), *ControllerPath),
-                                TEXT("NOT_FOUND"));
+                FString::Printf(TEXT("Controller blueprint not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
             return true;
         }
 
@@ -332,22 +635,21 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         if (!BT)
         {
             SendAutomationError(RequestingSocket, RequestId,
-                                FString::Printf(TEXT("Behavior Tree not found: %s"), *BehaviorTreePath),
-                                TEXT("NOT_FOUND"));
+                FString::Printf(TEXT("Behavior tree not found: %s"), *BehaviorTreePath), TEXT("NOT_FOUND"));
             return true;
         }
 
         // Set default BehaviorTree property on the generated class CDO using reflection
-        if (Controller->GeneratedClass)
+        if (ControllerBP->GeneratedClass)
         {
-            if (AAIController* CDO = Cast<AAIController>(Controller->GeneratedClass->GetDefaultObject()))
+            if (AAIController* CDO = Cast<AAIController>(ControllerBP->GeneratedClass->GetDefaultObject()))
             {
                 // Use reflection to find and set BehaviorTree-related properties
                 // Look for common property names used in AI Controller blueprints
                 bool bPropertySet = false;
                 
                 // Try to find a UBehaviorTree* property on the CDO
-                for (TFieldIterator<FObjectProperty> PropIt(Controller->GeneratedClass); PropIt; ++PropIt)
+                for (TFieldIterator<FObjectProperty> PropIt(ControllerBP->GeneratedClass); PropIt; ++PropIt)
                 {
                     FObjectProperty* ObjProp = *PropIt;
                     if (ObjProp && ObjProp->PropertyClass && ObjProp->PropertyClass->IsChildOf(UBehaviorTree::StaticClass()))
@@ -369,10 +671,10 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
                     PinType.PinSubCategoryObject = UBehaviorTree::StaticClass();
                     
                     const FName VarName = TEXT("DefaultBehaviorTree");
-                    if (FBlueprintEditorUtils::AddMemberVariable(Controller, VarName, PinType))
+                    if (FBlueprintEditorUtils::AddMemberVariable(ControllerBP, VarName, PinType))
                     {
                         // Set the default value for the variable
-                        FProperty* NewProp = Controller->GeneratedClass->FindPropertyByName(VarName);
+                        FProperty* NewProp = ControllerBP->GeneratedClass->FindPropertyByName(VarName);
                         if (FObjectProperty* ObjProp = CastField<FObjectProperty>(NewProp))
                         {
                             ObjProp->SetObjectPropertyValue(ObjProp->ContainerPtrToValuePtr<void>(CDO), BT);
@@ -389,10 +691,11 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             }
         }
 
-        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Controller);
-        McpSafeAssetSave(Controller);
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
         Result->SetStringField(TEXT("controllerPath"), ControllerPath);
         Result->SetStringField(TEXT("behaviorTreePath"), BehaviorTreePath);
+        McpHandlerUtils::AddVerification(Result, ControllerBP);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Behavior Tree reference set"), Result);
         return true;
     }
@@ -402,12 +705,13 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
         FString BlackboardPath = GetStringFieldAI(Payload, TEXT("blackboardPath"));
 
-        UBlueprint* Controller = LoadObject<UBlueprint>(nullptr, *ControllerPath);
-        if (!Controller)
+        // CRITICAL: Remove DoesAssetExist pre-check - newly created assets may not yet be
+        // indexed in the asset registry. Rely on LoadObject null-check instead.
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
         {
             SendAutomationError(RequestingSocket, RequestId,
-                                FString::Printf(TEXT("AI Controller not found: %s"), *ControllerPath),
-                                TEXT("NOT_FOUND"));
+                FString::Printf(TEXT("AI Controller not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
             return true;
         }
 
@@ -415,22 +719,20 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         if (!BB)
         {
             SendAutomationError(RequestingSocket, RequestId,
-                                FString::Printf(TEXT("Blackboard not found: %s"), *BlackboardPath),
-                                TEXT("NOT_FOUND"));
+                FString::Printf(TEXT("Blackboard not found: %s"), *BlackboardPath), TEXT("NOT_FOUND"));
             return true;
         }
 
         // Set default Blackboard property on the generated class CDO using reflection
-        // The Blueprint can call UseBlackboard() in BeginPlay with this asset reference
-        if (Controller->GeneratedClass)
+        if (ControllerBP->GeneratedClass)
         {
-            if (AAIController* CDO = Cast<AAIController>(Controller->GeneratedClass->GetDefaultObject()))
+            if (AAIController* CDO = Cast<AAIController>(ControllerBP->GeneratedClass->GetDefaultObject()))
             {
                 // Use reflection to find and set Blackboard-related properties
                 bool bPropertySet = false;
                 
                 // Try to find a UBlackboardData* property on the CDO
-                for (TFieldIterator<FObjectProperty> PropIt(Controller->GeneratedClass); PropIt; ++PropIt)
+                for (TFieldIterator<FObjectProperty> PropIt(ControllerBP->GeneratedClass); PropIt; ++PropIt)
                 {
                     FObjectProperty* ObjProp = *PropIt;
                     if (ObjProp && ObjProp->PropertyClass && ObjProp->PropertyClass->IsChildOf(UBlackboardData::StaticClass()))
@@ -452,10 +754,10 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
                     PinType.PinSubCategoryObject = UBlackboardData::StaticClass();
                     
                     const FName VarName = TEXT("DefaultBlackboard");
-                    if (FBlueprintEditorUtils::AddMemberVariable(Controller, VarName, PinType))
+                    if (FBlueprintEditorUtils::AddMemberVariable(ControllerBP, VarName, PinType))
                     {
                         // Set the default value for the variable
-                        FProperty* NewProp = Controller->GeneratedClass->FindPropertyByName(VarName);
+                        FProperty* NewProp = ControllerBP->GeneratedClass->FindPropertyByName(VarName);
                         if (FObjectProperty* ObjProp = CastField<FObjectProperty>(NewProp))
                         {
                             ObjProp->SetObjectPropertyValue(ObjProp->ContainerPtrToValuePtr<void>(CDO), BB);
@@ -472,17 +774,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             }
         }
 
-        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Controller);
-        bool bSaved = McpSafeAssetSave(Controller);
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(ControllerBP);
+        bool bSaved = McpSafeAssetSave(ControllerBP);
         Result->SetBoolField(TEXT("saved"), bSaved);
         Result->SetStringField(TEXT("controllerPath"), ControllerPath);
         Result->SetStringField(TEXT("blackboardPath"), BlackboardPath);
+        McpHandlerUtils::AddVerification(Result, ControllerBP);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Blackboard reference set"), Result);
         return true;
     }
-
-    // =========================================================================
-    // 16.2 Blackboard (3 actions)
     // =========================================================================
 
     if (SubAction == TEXT("create_blackboard_asset"))
@@ -508,6 +808,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetStringField(TEXT("blackboardPath"), Blackboard->GetPathName());
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Created Blackboard: %s"), *Name));
+        McpHandlerUtils::AddVerification(Result, Blackboard);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Blackboard created"), Result);
         return true;
     }
@@ -517,6 +818,14 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         FString BlackboardPath = GetStringFieldAI(Payload, TEXT("blackboardPath"));
         FString KeyName = GetStringFieldAI(Payload, TEXT("keyName"));
         FString KeyType = GetStringFieldAI(Payload, TEXT("keyType"));
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        if (!UEditorAssetLibrary::DoesAssetExist(BlackboardPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blackboard not found: %s"), *BlackboardPath), TEXT("NOT_FOUND"));
+            return true;
+        }
 
         UBlackboardData* Blackboard = LoadObject<UBlackboardData>(nullptr, *BlackboardPath);
         if (!Blackboard)
@@ -589,6 +898,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetNumberField(TEXT("keyIndex"), Blackboard->Keys.Num() - 1);
         Result->SetStringField(TEXT("keyName"), KeyName);
         Result->SetStringField(TEXT("keyType"), KeyType);
+        McpHandlerUtils::AddVerification(Result, Blackboard);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Blackboard key added"), Result);
         return true;
     }
@@ -632,6 +942,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetStringField(TEXT("keyName"), KeyName);
         Result->SetBoolField(TEXT("isInstanceSynced"), bInstanceSynced);
+        McpHandlerUtils::AddVerification(Result, Blackboard);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Key instance sync updated"), Result);
         return true;
     }
@@ -663,6 +974,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetStringField(TEXT("behaviorTreePath"), BT->GetPathName());
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Created Behavior Tree: %s"), *Name));
+        McpHandlerUtils::AddVerification(Result, BT);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Behavior Tree created"), Result);
         return true;
     }
@@ -705,6 +1017,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
             Result->SetStringField(TEXT("compositeType"), CompositeType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s node"), *CompositeType));
+            McpHandlerUtils::AddVerification(Result, BT);
             SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Composite node added"), Result);
         }
         else
@@ -731,22 +1044,47 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             return true;
         }
 
+        // Map task type strings to actual UE classes via template or runtime lookup
+        // Support both short names ("MoveTo") and full class names ("MoveToTask")
         UBTTaskNode* NewTask = nullptr;
-        if (TaskType.Equals(TEXT("MoveTo"), ESearchCase::IgnoreCase))
+        UClass* TaskClass = nullptr;
+        
+        // Template-based classes: use StaticClass() for known task types
+        if (TaskType.Equals(TEXT("MoveTo"), ESearchCase::IgnoreCase) ||
+            TaskType.Equals(TEXT("MoveToTask"), ESearchCase::IgnoreCase))
         {
             NewTask = NewObject<UBTTask_MoveTo>(BT);
         }
-        else if (TaskType.Equals(TEXT("Wait"), ESearchCase::IgnoreCase))
+        else if (TaskType.Equals(TEXT("Wait"), ESearchCase::IgnoreCase) ||
+                 TaskType.Equals(TEXT("WaitTask"), ESearchCase::IgnoreCase))
         {
             NewTask = NewObject<UBTTask_Wait>(BT);
         }
-        // Add more task types as needed
+        else
+        {
+            // Fallback: try runtime class lookup
+            TaskClass = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.%s"), *TaskType));
+            if (!TaskClass)
+            {
+                // Try with "BTTask_" prefix
+                TaskClass = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.BTTask_%s"), *TaskType));
+            }
+            if (TaskClass)
+            {
+                UObject* TaskObj = NewObject<UObject>(BT, TaskClass);
+                if (TaskObj && TaskObj->GetClass()->IsChildOf(UBTTaskNode::StaticClass()))
+                {
+                    NewTask = static_cast<UBTTaskNode*>(TaskObj);
+                }
+            }
+        }
 
         if (NewTask)
         {
             BT->MarkPackageDirty();
             Result->SetStringField(TEXT("taskType"), TaskType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s task"), *TaskType));
+            McpHandlerUtils::AddVerification(Result, BT);
             SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task node added"), Result);
         }
         else
@@ -774,15 +1112,19 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         }
 
         UBTDecorator* NewDecorator = nullptr;
-        if (DecoratorType.Equals(TEXT("Blackboard"), ESearchCase::IgnoreCase))
+        // Support both short names and full class names
+        if (DecoratorType.Equals(TEXT("Blackboard"), ESearchCase::IgnoreCase) ||
+            DecoratorType.Equals(TEXT("BlackboardDecorator"), ESearchCase::IgnoreCase))
         {
             NewDecorator = NewObject<UBTDecorator_Blackboard>(BT);
         }
-        else if (DecoratorType.Equals(TEXT("Cooldown"), ESearchCase::IgnoreCase))
+        else if (DecoratorType.Equals(TEXT("Cooldown"), ESearchCase::IgnoreCase) ||
+                 DecoratorType.Equals(TEXT("CooldownDecorator"), ESearchCase::IgnoreCase))
         {
             NewDecorator = NewObject<UBTDecorator_Cooldown>(BT);
         }
-        else if (DecoratorType.Equals(TEXT("Loop"), ESearchCase::IgnoreCase))
+        else if (DecoratorType.Equals(TEXT("Loop"), ESearchCase::IgnoreCase) ||
+                 DecoratorType.Equals(TEXT("LoopDecorator"), ESearchCase::IgnoreCase))
         {
             NewDecorator = NewObject<UBTDecorator_Loop>(BT);
         }
@@ -793,6 +1135,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             BT->MarkPackageDirty();
             Result->SetStringField(TEXT("decoratorType"), DecoratorType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s decorator"), *DecoratorType));
+            McpHandlerUtils::AddVerification(Result, BT);
             SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Decorator added"), Result);
         }
         else
@@ -825,6 +1168,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("serviceType"), ServiceType);
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Service %s reference created"), *ServiceType));
 
+        McpHandlerUtils::AddVerification(Result, BT);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Service added"), Result);
         return true;
     }
@@ -848,6 +1192,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("nodeId"), NodeId);
         Result->SetStringField(TEXT("message"), TEXT("Node configuration updated"));
 
+        McpHandlerUtils::AddVerification(Result, BT);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Node configured"), Result);
         return true;
     }
@@ -879,6 +1224,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetStringField(TEXT("queryPath"), Query->GetPathName());
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Created EQS Query: %s"), *Name));
+        McpHandlerUtils::AddVerification(Result, Query);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("EQS Query created"), Result);
         return true;
     }
@@ -897,18 +1243,40 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             return true;
         }
 
+        // Map generator type strings to actual UE classes via template or runtime lookup
         UEnvQueryGenerator* NewGenerator = nullptr;
-        if (GeneratorType.Equals(TEXT("ActorsOfClass"), ESearchCase::IgnoreCase))
+        UClass* GeneratorClass = nullptr;
+        if (GeneratorType.Equals(TEXT("ActorsOfClass"), ESearchCase::IgnoreCase) ||
+            GeneratorType.Equals(TEXT("EnvQueryGenerator_ActorsOfClass"), ESearchCase::IgnoreCase))
         {
             NewGenerator = NewObject<UEnvQueryGenerator_ActorsOfClass>(Query);
         }
-        else if (GeneratorType.Equals(TEXT("OnCircle"), ESearchCase::IgnoreCase))
+        else if (GeneratorType.Equals(TEXT("OnCircle"), ESearchCase::IgnoreCase) ||
+                 GeneratorType.Equals(TEXT("EnvQueryGenerator_OnCircle"), ESearchCase::IgnoreCase))
         {
             NewGenerator = NewObject<UEnvQueryGenerator_OnCircle>(Query);
         }
-        else if (GeneratorType.Equals(TEXT("SimpleGrid"), ESearchCase::IgnoreCase))
+        else if (GeneratorType.Equals(TEXT("SimpleGrid"), ESearchCase::IgnoreCase) ||
+                 GeneratorType.Equals(TEXT("EnvQueryGenerator_SimpleGrid"), ESearchCase::IgnoreCase))
         {
             NewGenerator = NewObject<UEnvQueryGenerator_SimpleGrid>(Query);
+        }
+        else
+        {
+            // Fallback: try runtime class lookup with full class name
+            GeneratorClass = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.%s"), *GeneratorType));
+            if (!GeneratorClass)
+            {
+                GeneratorClass = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.EnvQueryGenerator_%s"), *GeneratorType));
+            }
+            if (GeneratorClass)
+            {
+                UObject* GenObj = NewObject<UObject>(Query, GeneratorClass);
+                if (GenObj && GenObj->GetClass()->IsChildOf(UEnvQueryGenerator::StaticClass()))
+                {
+                    NewGenerator = static_cast<UEnvQueryGenerator*>(GenObj);
+                }
+            }
         }
 
         if (NewGenerator)
@@ -917,6 +1285,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             Query->MarkPackageDirty();
             Result->SetStringField(TEXT("generatorType"), GeneratorType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s generator"), *GeneratorType));
+            McpHandlerUtils::AddVerification(Result, Query);
             SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Generator added"), Result);
         }
         else
@@ -947,6 +1316,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("contextType"), ContextType);
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Context %s configured"), *ContextType));
 
+        McpHandlerUtils::AddVerification(Result, Query);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Context added"), Result);
         return true;
     }
@@ -1001,6 +1371,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             Query->MarkPackageDirty();
             Result->SetStringField(TEXT("testType"), TestType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s test"), *TestType));
+            McpHandlerUtils::AddVerification(Result, Query);
             SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Test added"), Result);
         }
         else
@@ -1032,6 +1403,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetNumberField(TEXT("testIndex"), TestIndex);
         Result->SetStringField(TEXT("message"), TEXT("Test scoring configured"));
 
+        McpHandlerUtils::AddVerification(Result, Query);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Scoring configured"), Result);
         return true;
     }
@@ -1043,6 +1415,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("add_ai_perception_component"))
     {
         FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(BlueprintPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
 
         UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
         if (!Blueprint)
@@ -1071,6 +1452,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
             Result->SetStringField(TEXT("componentName"), TEXT("AIPerception"));
             Result->SetStringField(TEXT("message"), TEXT("AI Perception component added"));
+            McpHandlerUtils::AddVerification(Result, Blueprint);
             SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Perception component added"), Result);
         }
         else
@@ -1086,6 +1468,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("configure_sight_config"))
     {
         FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(BlueprintPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
 
         UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
         if (!Blueprint)
@@ -1111,6 +1502,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Blueprint->MarkPackageDirty();
         Result->SetStringField(TEXT("message"), TEXT("Sight sense configured"));
+        McpHandlerUtils::AddVerification(Result, Blueprint);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Sight config set"), Result);
         return true;
     }
@@ -1118,6 +1510,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("configure_hearing_config"))
     {
         FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(BlueprintPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
 
         UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
         if (!Blueprint)
@@ -1137,6 +1538,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Blueprint->MarkPackageDirty();
         Result->SetStringField(TEXT("message"), TEXT("Hearing sense configured"));
+        McpHandlerUtils::AddVerification(Result, Blueprint);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Hearing config set"), Result);
         return true;
     }
@@ -1144,6 +1546,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("configure_damage_sense_config"))
     {
         FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(BlueprintPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
 
         UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
         if (!Blueprint)
@@ -1156,6 +1567,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Blueprint->MarkPackageDirty();
         Result->SetStringField(TEXT("message"), TEXT("Damage sense configured"));
+        McpHandlerUtils::AddVerification(Result, Blueprint);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Damage config set"), Result);
         return true;
     }
@@ -1164,6 +1576,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     {
         FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
         int32 TeamId = static_cast<int32>(GetNumberFieldAI(Payload, TEXT("teamId"), 0));
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(BlueprintPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
 
         UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
         if (!Blueprint)
@@ -1177,6 +1598,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Blueprint->MarkPackageDirty();
         Result->SetNumberField(TEXT("teamId"), TeamId);
         Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Team ID set to %d"), TeamId));
+        McpHandlerUtils::AddVerification(Result, Blueprint);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Team set"), Result);
         return true;
     }
@@ -1188,6 +1610,17 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("create_state_tree"))
     {
 #if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        // Runtime check: Verify StateTree module is actually loaded
+        // This handles the case where headers were available at compile time
+        // but the plugin is not enabled in the target project at runtime
+        if (!IsStateTreeModuleAvailable())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree plugin is not enabled in this project. Enable the StateTree plugin to use State Tree features."),
+                TEXT("STATETREE_PLUGIN_NOT_ENABLED"));
+            return true;
+        }
+        
         FString Name = GetStringFieldAI(Payload, TEXT("name"));
         FString Path = GetStringFieldAI(Payload, TEXT("path"), TEXT("/Game/AI/StateTrees"));
         FString SchemaType = GetStringFieldAI(Payload, TEXT("schemaType"), TEXT("Component"));
@@ -1245,6 +1678,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("stateTreePath"), FullPath);
         Result->SetStringField(TEXT("rootStateName"), TEXT("Root"));
         Result->SetStringField(TEXT("message"), TEXT("State Tree created with root state"));
+        McpHandlerUtils::AddVerification(Result, StateTree);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State Tree created"), Result);
 #elif MCP_HAS_STATE_TREE
         // Headers not available but version supports it
@@ -1253,6 +1687,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("stateTreePath"), Path / Name);
         Result->SetStringField(TEXT("message"), TEXT("State Tree creation registered (headers unavailable - enable StateTree plugin)"));
         Result->SetBoolField(TEXT("headersUnavailable"), true);
+        // Note: No verification since StateTree was not actually created
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State Tree registered"), Result);
 #else
         SendAutomationError(RequestingSocket, RequestId,
@@ -1352,6 +1787,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("parentState"), ParentStateName);
         Result->SetStringField(TEXT("stateType"), StateType);
         Result->SetStringField(TEXT("message"), TEXT("State added to StateTree"));
+        McpHandlerUtils::AddVerification(Result, StateTree);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State added"), Result);
 #elif MCP_HAS_STATE_TREE
         FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
@@ -1359,6 +1795,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         Result->SetStringField(TEXT("stateName"), StateName);
         Result->SetStringField(TEXT("message"), TEXT("State addition registered (headers unavailable)"));
         Result->SetBoolField(TEXT("headersUnavailable"), true);
+        // Note: No verification since StateTree headers unavailable
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State registered"), Result);
 #else
         SendAutomationError(RequestingSocket, RequestId,
@@ -1560,16 +1997,17 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             }
             else if (Behavior.Equals(TEXT("TrySelectChildrenAtRandom"), ESearchCase::IgnoreCase))
             {
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
                 FoundState->SelectionBehavior = EStateTreeStateSelectionBehavior::TrySelectChildrenAtRandom;
 #else
-                UE_LOG(LogMcpAIHandlers, Warning, TEXT("TrySelectChildrenAtRandom requires UE 5.4+. Using TrySelectChildrenInOrder instead."));
+            UE_LOG(LogMcpAIHandlers, Warning, TEXT("TrySelectChildrenAtRandom requires UE 5.5+. Using TrySelectChildrenInOrder instead."));
+
                 FoundState->SelectionBehavior = EStateTreeStateSelectionBehavior::TrySelectChildrenInOrder;
 #endif
             }
             else if (Behavior.Equals(TEXT("TrySelectChildrenWithHighestUtility"), ESearchCase::IgnoreCase))
             {
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
                 FoundState->SelectionBehavior = EStateTreeStateSelectionBehavior::TrySelectChildrenWithHighestUtility;
 #else
                 UE_LOG(LogMcpAIHandlers, Warning, TEXT("TrySelectChildrenWithHighestUtility requires UE 5.4+. Using TryEnterState instead."));
@@ -1615,6 +2053,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("create_smart_object_definition"))
     {
 #if MCP_HAS_SMART_OBJECTS && MCP_SMART_OBJECTS_HEADERS_AVAILABLE
+        // Runtime check: Verify SmartObjects module is actually loaded
+        if (!IsSmartObjectsModuleAvailable())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("SmartObjects plugin is not enabled in this project. Enable the SmartObjects plugin to use Smart Object features."),
+                TEXT("SMARTOBJECTS_PLUGIN_NOT_ENABLED"));
+            return true;
+        }
+        
         FString Name = GetStringFieldAI(Payload, TEXT("name"));
         FString Path = GetStringFieldAI(Payload, TEXT("path"), TEXT("/Game/AI/SmartObjects"));
         
@@ -1688,8 +2135,8 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         
         // Create and add a new slot using reflection to access private Slots array
         FSmartObjectSlotDefinition NewSlot;
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 1
-        // UE 5.1+ uses FVector3f/FRotator3f and has bEnabled/ID members
+#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 3
+        // UE 5.3+ uses FVector3f/FRotator3f and has bEnabled/ID members
         NewSlot.Offset = FVector3f(Offset);
         NewSlot.Rotation = FRotator3f(Rotation);
         NewSlot.bEnabled = bEnabled;
@@ -1697,7 +2144,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         NewSlot.ID = FGuid::NewGuid();
 #endif
 #else
-        // UE 5.0 uses FVector/FRotator
+        // UE 5.0-5.2 uses FVector/FRotator
         NewSlot.Offset = Offset;
         NewSlot.Rotation = Rotation;
 #endif
@@ -1909,6 +2356,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
     if (SubAction == TEXT("create_mass_entity_config"))
     {
 #if MCP_HAS_MASS_AI && MCP_MASS_AI_HEADERS_AVAILABLE
+        // Runtime check: Verify MassEntity module is actually loaded
+        if (!IsMassModuleAvailable())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("MassEntity plugin is not enabled in this project. Enable the MassEntity plugin to use Mass AI features."),
+                TEXT("MASS_PLUGIN_NOT_ENABLED"));
+            return true;
+        }
+        
         FString Name = GetStringFieldAI(Payload, TEXT("name"));
         FString Path = GetStringFieldAI(Payload, TEXT("path"), TEXT("/Game/AI/Mass"));
         
@@ -1969,6 +2425,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             return true;
         }
         
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(ConfigPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("MassEntityConfigAsset not found: %s"), *ConfigPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
         // Load the MassEntityConfigAsset
         UMassEntityConfigAsset* ConfigAsset = LoadObject<UMassEntityConfigAsset>(nullptr, *ConfigPath);
         if (!ConfigAsset)
@@ -1982,13 +2447,31 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         FMassEntityConfig& Config = ConfigAsset->GetMutableConfig();
         
         // Set parent config if provided
+        // UE 5.3+: Use SetParentAsset() method
+        // UE 5.0-5.2: Use property reflection since Parent is protected
         if (!ParentConfigPath.IsEmpty())
         {
             UMassEntityConfigAsset* ParentConfig = LoadObject<UMassEntityConfigAsset>(nullptr, *ParentConfigPath);
             if (ParentConfig)
             {
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 1
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
                 Config.SetParentAsset(*ParentConfig);
+#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+                // UE 5.1-5.2: SetValue_InContainer is available
+                static FProperty* ParentProp = FMassEntityConfig::StaticStruct()->FindPropertyByName(TEXT("Parent"));
+                if (ParentProp)
+                {
+                    ParentProp->SetValue_InContainer(&Config, &ParentConfig);
+                }
+#else
+                // UE 5.0: SetValue_InContainer not available, use CopyCompleteValue_InContainer
+                static FProperty* ParentProp = FMassEntityConfig::StaticStruct()->FindPropertyByName(TEXT("Parent"));
+                if (ParentProp)
+                {
+                    // Create a temporary struct to hold the pointer value, then copy
+                    void* DestPtr = ParentProp->ContainerPtrToValuePtr<void>(&Config);
+                    ParentProp->CopyCompleteValue(DestPtr, &ParentConfig);
+                }
 #endif
             }
         }
@@ -2068,53 +2551,128 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
     if (SubAction == TEXT("get_ai_info"))
     {
-        TSharedPtr<FJsonObject> AIInfo = MakeShareable(new FJsonObject());
+        TSharedPtr<FJsonObject> AIInfo = McpHandlerUtils::CreateResultObject();
 
-        // Check for controller
+        // --- blueprintPath: auto-discover AI setup from Pawn/Character/AIController blueprint ---
+        FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+        if (!BlueprintPath.IsEmpty())
+        {
+            BlueprintPath = SanitizeProjectRelativePath(BlueprintPath);
+            if (BlueprintPath.IsEmpty())
+            {
+                SendAutomationError(RequestingSocket, RequestId,
+                    TEXT("Invalid blueprintPath: must be a valid project-relative path"),
+                    TEXT("INVALID_PATH"));
+                return true;
+            }
+            UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+            if (BP && BP->GeneratedClass)
+            {
+                UObject* CDO = BP->GeneratedClass->GetDefaultObject();
+
+                // Pawn/Character: extract AIControllerClass
+                if (APawn* PawnCDO = Cast<APawn>(CDO))
+                {
+                    if (PawnCDO->AIControllerClass)
+                    {
+                        AIInfo->SetStringField(TEXT("controllerClass"),
+                            PawnCDO->AIControllerClass->GetName());
+                    }
+                }
+                // AIController: report directly
+                else if (Cast<AAIController>(CDO))
+                {
+                    AIInfo->SetStringField(TEXT("controllerClass"),
+                        BP->GeneratedClass->GetName());
+                }
+            }
+        }
+
+        // --- controllerPath: explicit controller blueprint (overrides blueprintPath discovery) ---
         FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
         if (!ControllerPath.IsEmpty())
         {
             UBlueprint* Controller = LoadObject<UBlueprint>(nullptr, *ControllerPath);
             if (Controller)
             {
-                AIInfo->SetStringField(TEXT("controllerClass"), Controller->GeneratedClass ? Controller->GeneratedClass->GetName() : TEXT("Unknown"));
+                AIInfo->SetStringField(TEXT("controllerClass"),
+                    Controller->GeneratedClass ? Controller->GeneratedClass->GetName() : TEXT("Unknown"));
             }
         }
 
-        // Check for behavior tree
+        // --- behaviorTreePath ---
         FString BTPath = GetStringFieldAI(Payload, TEXT("behaviorTreePath"));
         if (!BTPath.IsEmpty())
         {
             UBehaviorTree* BT = LoadObject<UBehaviorTree>(nullptr, *BTPath);
             if (BT)
             {
-                AIInfo->SetStringField(TEXT("behaviorTreeName"), BT->GetName());
+                AIInfo->SetStringField(TEXT("assignedBehaviorTree"), BT->GetName());
                 AIInfo->SetBoolField(TEXT("hasRootNode"), BT->RootNode != nullptr);
+
+                // Report associated blackboard from BT asset (only if
+                // blackboardPath was not explicitly provided, to avoid
+                // silently overwriting an explicit value)
+                FString ExplicitBBPath = GetStringFieldAI(Payload, TEXT("blackboardPath"));
+                if (BT->BlackboardAsset && ExplicitBBPath.IsEmpty())
+                {
+                    AIInfo->SetStringField(TEXT("assignedBlackboard"),
+                        BT->BlackboardAsset->GetName());
+                }
+
+                // Count BT nodes (composites + tasks + decorators + services)
+                if (BT->RootNode)
+                {
+                    int32 NodeCount = 0;
+                    TArray<UBTCompositeNode*> Stack;
+                    Stack.Add(BT->RootNode);
+                    while (Stack.Num() > 0)
+                    {
+                        UBTCompositeNode* Current = Stack.Pop();
+                        NodeCount++;
+                        NodeCount += Current->Services.Num();
+                        for (const FBTCompositeChild& Child : Current->Children)
+                        {
+                            NodeCount += Child.Decorators.Num();
+                            if (Child.ChildComposite)
+                            {
+                                Stack.Add(Child.ChildComposite);
+                            }
+                            if (Child.ChildTask)
+                            {
+                                NodeCount++;
+                                NodeCount += Child.ChildTask->Services.Num();
+                            }
+                        }
+                    }
+                    AIInfo->SetNumberField(TEXT("btNodeCount"), NodeCount);
+                }
             }
         }
 
-        // Check for blackboard
+        // --- blackboardPath ---
         FString BBPath = GetStringFieldAI(Payload, TEXT("blackboardPath"));
         if (!BBPath.IsEmpty())
         {
             UBlackboardData* BB = LoadObject<UBlackboardData>(nullptr, *BBPath);
             if (BB)
             {
+                AIInfo->SetStringField(TEXT("assignedBlackboard"), BB->GetName());
                 AIInfo->SetNumberField(TEXT("keyCount"), BB->Keys.Num());
                 TArray<TSharedPtr<FJsonValue>> KeysArray;
                 for (const FBlackboardEntry& Entry : BB->Keys)
                 {
-                    TSharedPtr<FJsonObject> KeyObj = MakeShareable(new FJsonObject());
+                    TSharedPtr<FJsonObject> KeyObj = McpHandlerUtils::CreateResultObject();
                     KeyObj->SetStringField(TEXT("name"), Entry.EntryName.ToString());
                     KeyObj->SetStringField(TEXT("type"), Entry.KeyType ? Entry.KeyType->GetClass()->GetName() : TEXT("Unknown"));
                     KeyObj->SetBoolField(TEXT("instanceSynced"), Entry.bInstanceSynced);
-                    KeysArray.Add(MakeShareable(new FJsonValueObject(KeyObj)));
+                    KeysArray.Add(MakeShared<FJsonValueObject>(KeyObj));
                 }
-                AIInfo->SetArrayField(TEXT("keys"), KeysArray);
+                AIInfo->SetArrayField(TEXT("blackboardKeys"), KeysArray);
             }
         }
 
-        // Check for EQS query
+        // --- queryPath ---
         FString QueryPath = GetStringFieldAI(Payload, TEXT("queryPath"));
         if (!QueryPath.IsEmpty())
         {
@@ -2127,6 +2685,1018 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetObjectField(TEXT("aiInfo"), AIInfo);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("AI info retrieved"), Result);
+        return true;
+    }
+
+    // =========================================================================
+    // Configuration Actions (3 new actions)
+    // =========================================================================
+
+    // set_ai_perception - Unified perception configuration (sight/hearing/damage in one call)
+    if (SubAction == TEXT("set_ai_perception"))
+    {
+        FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
+        if (ControllerPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing controllerPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
+        {
+            SendAutomationError(RequestingSocket, RequestId, 
+                FString::Printf(TEXT("Controller blueprint not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        if (!ControllerBP->SimpleConstructionScript)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Blueprint has no SimpleConstructionScript"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find or create AIPerceptionComponent
+        UAIPerceptionComponent* PerceptionComp = nullptr;
+        USCS_Node* PerceptionNode = nullptr;
+        
+        for (USCS_Node* Node : ControllerBP->SimpleConstructionScript->GetAllNodes())
+        {
+            if (Node && Node->ComponentTemplate)
+            {
+                if (UAIPerceptionComponent* Comp = Cast<UAIPerceptionComponent>(Node->ComponentTemplate))
+                {
+                    PerceptionComp = Comp;
+                    PerceptionNode = Node;
+                    break;
+                }
+            }
+        }
+
+        bool bCreatedNew = false;
+        if (!PerceptionComp)
+        {
+            // Create new perception component
+            PerceptionNode = ControllerBP->SimpleConstructionScript->CreateNode(
+                UAIPerceptionComponent::StaticClass(), TEXT("AIPerceptionComponent"));
+            if (!PerceptionNode)
+            {
+                SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create perception component node"), TEXT("CREATION_FAILED"));
+                return true;
+            }
+            ControllerBP->SimpleConstructionScript->AddNode(PerceptionNode);
+            PerceptionComp = Cast<UAIPerceptionComponent>(PerceptionNode->ComponentTemplate);
+            if (!PerceptionComp)
+            {
+                SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to cast perception component"), TEXT("CAST_FAILED"));
+                return true;
+            }
+            bCreatedNew = true;
+        }
+
+        if (!PerceptionComp)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Perception component is null"), TEXT("NULL_COMPONENT"));
+            return true;
+        }
+
+        TArray<FString> SensesConfigured;
+
+        // Configure sight sense
+        bool bEnableSight = GetBoolFieldAI(Payload, TEXT("enableSight"));
+        if (bEnableSight)
+        {
+            float SightRadius = GetNumberFieldAI(Payload, TEXT("sightRadius"), 3000.0f);
+            float LoseSightRadius = GetNumberFieldAI(Payload, TEXT("loseSightRadius"), SightRadius + 500.0f);
+            float PeripheralVisionAngle = GetNumberFieldAI(Payload, TEXT("peripheralVisionAngle"), 90.0f);
+            
+            UAISenseConfig_Sight* SightConfig = NewObject<UAISenseConfig_Sight>(PerceptionComp);
+            SightConfig->SightRadius = SightRadius;
+            SightConfig->LoseSightRadius = LoseSightRadius;
+            SightConfig->PeripheralVisionAngleDegrees = PeripheralVisionAngle;
+            SightConfig->DetectionByAffiliation.bDetectEnemies = true;
+            SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
+            SightConfig->DetectionByAffiliation.bDetectFriendlies = false;
+            SightConfig->SetMaxAge(5.0f);
+            
+            PerceptionComp->ConfigureSense(*SightConfig);
+            SensesConfigured.Add(TEXT("Sight"));
+        }
+
+        // Configure hearing sense
+        bool bEnableHearing = GetBoolFieldAI(Payload, TEXT("enableHearing"));
+        if (bEnableHearing)
+        {
+            float HearingRange = GetNumberFieldAI(Payload, TEXT("hearingRange"), 3000.0f);
+            
+            UAISenseConfig_Hearing* HearingConfig = NewObject<UAISenseConfig_Hearing>(PerceptionComp);
+            HearingConfig->HearingRange = HearingRange;
+            HearingConfig->DetectionByAffiliation.bDetectEnemies = true;
+            HearingConfig->DetectionByAffiliation.bDetectNeutrals = true;
+            HearingConfig->DetectionByAffiliation.bDetectFriendlies = false;
+            HearingConfig->SetMaxAge(5.0f);
+            
+            PerceptionComp->ConfigureSense(*HearingConfig);
+            SensesConfigured.Add(TEXT("Hearing"));
+        }
+
+        // Configure damage sense
+        bool bEnableDamage = GetBoolFieldAI(Payload, TEXT("enableDamage"));
+        if (bEnableDamage)
+        {
+            UAISenseConfig_Damage* DamageConfig = NewObject<UAISenseConfig_Damage>(PerceptionComp);
+            DamageConfig->SetMaxAge(10.0f);
+            
+            PerceptionComp->ConfigureSense(*DamageConfig);
+            SensesConfigured.Add(TEXT("Damage"));
+        }
+
+        // Set dominant sense if specified
+        FString DominantSense = GetStringFieldAI(Payload, TEXT("dominantSense"));
+        if (!DominantSense.IsEmpty())
+        {
+            if (DominantSense.Equals(TEXT("Sight"), ESearchCase::IgnoreCase))
+            {
+                PerceptionComp->SetDominantSense(UAISense_Sight::StaticClass());
+            }
+            else if (DominantSense.Equals(TEXT("Hearing"), ESearchCase::IgnoreCase))
+            {
+                PerceptionComp->SetDominantSense(UAISense_Hearing::StaticClass());
+            }
+            else if (DominantSense.Equals(TEXT("Damage"), ESearchCase::IgnoreCase))
+            {
+                PerceptionComp->SetDominantSense(UAISense_Damage::StaticClass());
+            }
+        }
+
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
+
+        TSharedPtr<FJsonObject> PerceptionResult = McpHandlerUtils::CreateResultObject();
+        PerceptionResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+        PerceptionResult->SetBoolField(TEXT("createdNew"), bCreatedNew);
+        
+        TArray<TSharedPtr<FJsonValue>> SensesArray;
+        for (const FString& Sense : SensesConfigured)
+        {
+            SensesArray.Add(MakeShared<FJsonValueString>(Sense));
+        }
+        PerceptionResult->SetArrayField(TEXT("sensesConfigured"), SensesArray);
+        
+        if (!DominantSense.IsEmpty())
+        {
+            PerceptionResult->SetStringField(TEXT("dominantSense"), DominantSense);
+        }
+
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("AI perception configured"), PerceptionResult);
+        return true;
+    }
+
+    // create_nav_modifier - Create navigation modifier component on actor
+    if (SubAction == TEXT("create_nav_modifier"))
+    {
+        FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+        if (BlueprintPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing blueprintPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+        if (!Blueprint)
+        {
+            SendAutomationError(RequestingSocket, RequestId, 
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        if (!Blueprint->SimpleConstructionScript)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Blueprint has no SimpleConstructionScript"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        FString ComponentName = GetStringFieldAI(Payload, TEXT("componentName"));
+        if (ComponentName.IsEmpty())
+        {
+            ComponentName = TEXT("NavModifierComponent");
+        }
+
+        // Create nav modifier component
+        USCS_Node* NavModNode = Blueprint->SimpleConstructionScript->CreateNode(
+            UNavModifierComponent::StaticClass(), *ComponentName);
+        if (!NavModNode)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create nav modifier node"), TEXT("CREATION_FAILED"));
+            return true;
+        }
+
+        Blueprint->SimpleConstructionScript->AddNode(NavModNode);
+        UNavModifierComponent* NavModComp = Cast<UNavModifierComponent>(NavModNode->ComponentTemplate);
+        
+        if (NavModComp)
+        {
+            // Configure fail-safe defaults
+            bool bFailsafe = GetBoolFieldAI(Payload, TEXT("failsafeToDefaultNavmesh"));
+            NavModComp->SetAreaClass(bFailsafe ? UNavArea_Default::StaticClass() : UNavArea_Obstacle::StaticClass());
+            
+            // Set area class if specified
+            FString AreaClassName = GetStringFieldAI(Payload, TEXT("areaClass"));
+            if (!AreaClassName.IsEmpty())
+            {
+                UClass* AreaClass = FindObject<UClass>(nullptr, *AreaClassName);
+                if (!AreaClass)
+                {
+                    // Try common area classes
+                    if (AreaClassName.Equals(TEXT("NavArea_Null"), ESearchCase::IgnoreCase) ||
+                        AreaClassName.Equals(TEXT("Null"), ESearchCase::IgnoreCase))
+                    {
+                        AreaClass = UNavArea_Null::StaticClass();
+                    }
+                    else if (AreaClassName.Equals(TEXT("NavArea_Obstacle"), ESearchCase::IgnoreCase) ||
+                             AreaClassName.Equals(TEXT("Obstacle"), ESearchCase::IgnoreCase))
+                    {
+                        AreaClass = UNavArea_Obstacle::StaticClass();
+                    }
+                    else if (AreaClassName.Equals(TEXT("NavArea_Default"), ESearchCase::IgnoreCase) ||
+                             AreaClassName.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
+                    {
+                        AreaClass = UNavArea_Default::StaticClass();
+                    }
+                }
+                
+                if (AreaClass && AreaClass->IsChildOf(UNavArea::StaticClass()))
+                {
+                    NavModComp->SetAreaClass(AreaClass);
+                }
+            }
+        }
+
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+        McpSafeAssetSave(Blueprint);
+
+        TSharedPtr<FJsonObject> NavModResult = McpHandlerUtils::CreateResultObject();
+        NavModResult->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+        NavModResult->SetStringField(TEXT("componentName"), ComponentName);
+        // UE 5.7: GetAreaClass() is not available on UNavModifierComponent
+        // The area class is determined by the NavArea class set on the component
+        FString AreaClassName = TEXT("Default");
+        NavModResult->SetStringField(TEXT("areaClass"), AreaClassName);
+
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Nav modifier component created"), NavModResult);
+        return true;
+    }
+
+    // set_ai_movement - Configure AI movement parameters (speed, acceleration, etc.)
+    if (SubAction == TEXT("set_ai_movement"))
+    {
+        FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+        if (BlueprintPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing blueprintPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+        if (!Blueprint)
+        {
+            SendAutomationError(RequestingSocket, RequestId, 
+                FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        if (!Blueprint->SimpleConstructionScript)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Blueprint has no SimpleConstructionScript"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find CharacterMovementComponent
+        UCharacterMovementComponent* MovementComp = nullptr;
+        for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+        {
+            if (Node && Node->ComponentTemplate)
+            {
+                if (UCharacterMovementComponent* Comp = Cast<UCharacterMovementComponent>(Node->ComponentTemplate))
+                {
+                    MovementComp = Comp;
+                    break;
+                }
+            }
+        }
+
+        if (!MovementComp)
+        {
+            // Check CDO for native component
+            if (Blueprint->GeneratedClass)
+            {
+                if (AActor* CDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject()))
+                {
+                    MovementComp = CDO->FindComponentByClass<UCharacterMovementComponent>();
+                }
+            }
+        }
+
+        if (!MovementComp)
+        {
+            SendAutomationError(RequestingSocket, RequestId, 
+                TEXT("No CharacterMovementComponent found in blueprint"), TEXT("COMPONENT_NOT_FOUND"));
+            return true;
+        }
+
+        TArray<FString> PropertiesSet;
+
+        // Walking speed
+        float MaxWalkSpeed = GetNumberFieldAI(Payload, TEXT("maxWalkSpeed"), -1.0f);
+        if (MaxWalkSpeed > 0.0f)
+        {
+            MovementComp->MaxWalkSpeed = MaxWalkSpeed;
+            PropertiesSet.Add(TEXT("MaxWalkSpeed"));
+        }
+
+        // Max acceleration
+        float MaxAcceleration = GetNumberFieldAI(Payload, TEXT("maxAcceleration"), -1.0f);
+        if (MaxAcceleration > 0.0f)
+        {
+            MovementComp->MaxAcceleration = MaxAcceleration;
+            PropertiesSet.Add(TEXT("MaxAcceleration"));
+        }
+
+        // Braking deceleration walking
+        float BrakingDeceleration = GetNumberFieldAI(Payload, TEXT("brakingDeceleration"), -1.0f);
+        if (BrakingDeceleration > 0.0f)
+        {
+            MovementComp->BrakingDecelerationWalking = BrakingDeceleration;
+            PropertiesSet.Add(TEXT("BrakingDecelerationWalking"));
+        }
+
+        // Rotation rate
+        float RotationRate = GetNumberFieldAI(Payload, TEXT("rotationRate"), -1.0f);
+        if (RotationRate > 0.0f)
+        {
+            MovementComp->RotationRate = FRotator(0.0f, RotationRate, 0.0f);
+            PropertiesSet.Add(TEXT("RotationRate"));
+        }
+
+        // Use acceleration for paths
+        // UE 5.7+: bUseAccelerationForPaths was removed from UNavMovementComponent
+        // Use bRequestedMoveUseAcceleration in UCharacterMovementComponent instead
+        bool bUseAcceleration = GetBoolFieldAI(Payload, TEXT("useAccelerationForPaths"));
+        if (Payload->HasField(TEXT("useAccelerationForPaths")))
+        {
+            MovementComp->bRequestedMoveUseAcceleration = bUseAcceleration;
+            PropertiesSet.Add(TEXT("bRequestedMoveUseAcceleration"));
+        }
+
+        // Orient rotation to movement
+        bool bOrientToMovement = GetBoolFieldAI(Payload, TEXT("orientRotationToMovement"));
+        if (Payload->HasField(TEXT("orientRotationToMovement")))
+        {
+            MovementComp->bOrientRotationToMovement = bOrientToMovement;
+            PropertiesSet.Add(TEXT("bOrientRotationToMovement"));
+        }
+
+        // Use RVO avoidance
+        bool bUseRVOAvoidance = GetBoolFieldAI(Payload, TEXT("useRVOAvoidance"));
+        if (Payload->HasField(TEXT("useRVOAvoidance")))
+        {
+            MovementComp->bUseRVOAvoidance = bUseRVOAvoidance;
+            PropertiesSet.Add(TEXT("bUseRVOAvoidance"));
+        }
+
+        // Avoidance weight
+        float AvoidanceWeight = GetNumberFieldAI(Payload, TEXT("avoidanceWeight"), -1.0f);
+        if (AvoidanceWeight >= 0.0f)
+        {
+            MovementComp->AvoidanceWeight = AvoidanceWeight;
+            PropertiesSet.Add(TEXT("AvoidanceWeight"));
+        }
+
+        // Max fly speed (for flying AI)
+        float MaxFlySpeed = GetNumberFieldAI(Payload, TEXT("maxFlySpeed"), -1.0f);
+        if (MaxFlySpeed > 0.0f)
+        {
+            MovementComp->MaxFlySpeed = MaxFlySpeed;
+            PropertiesSet.Add(TEXT("MaxFlySpeed"));
+        }
+
+        // Jump Z velocity
+        float JumpZVelocity = GetNumberFieldAI(Payload, TEXT("jumpZVelocity"), -1.0f);
+        if (JumpZVelocity > 0.0f)
+        {
+            MovementComp->JumpZVelocity = JumpZVelocity;
+            PropertiesSet.Add(TEXT("JumpZVelocity"));
+        }
+
+        FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+        McpSafeAssetSave(Blueprint);
+
+        TSharedPtr<FJsonObject> MovementResult = McpHandlerUtils::CreateResultObject();
+        MovementResult->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+        
+        TArray<TSharedPtr<FJsonValue>> PropsArray;
+        for (const FString& Prop : PropertiesSet)
+        {
+            PropsArray.Add(MakeShared<FJsonValueString>(Prop));
+        }
+        MovementResult->SetArrayField(TEXT("propertiesSet"), PropsArray);
+        MovementResult->SetNumberField(TEXT("propertyCount"), PropertiesSet.Num());
+
+        // Include current values
+        TSharedPtr<FJsonObject> CurrentValues = McpHandlerUtils::CreateResultObject();
+        CurrentValues->SetNumberField(TEXT("maxWalkSpeed"), MovementComp->MaxWalkSpeed);
+        CurrentValues->SetNumberField(TEXT("maxAcceleration"), MovementComp->MaxAcceleration);
+        CurrentValues->SetNumberField(TEXT("rotationRateYaw"), MovementComp->RotationRate.Yaw);
+        CurrentValues->SetBoolField(TEXT("orientRotationToMovement"), MovementComp->bOrientRotationToMovement);
+        CurrentValues->SetBoolField(TEXT("useRVOAvoidance"), MovementComp->bUseRVOAvoidance);
+        MovementResult->SetObjectField(TEXT("currentValues"), CurrentValues);
+
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("AI movement configured"), MovementResult);
+        return true;
+    }
+
+    // =========================================================================
+    // Aliases & Convenience Actions
+    // =========================================================================
+
+    // Alias: create_blackboard -> create_blackboard_asset
+    if (SubAction == TEXT("create_blackboard"))
+    {
+        // Redirect to existing create_blackboard_asset handler
+        FString Name = GetStringFieldAI(Payload, TEXT("name"));
+        if (Name.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing name"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        FString Path = GetStringFieldAI(Payload, TEXT("path"));
+        if (Path.IsEmpty())
+        {
+            Path = TEXT("/Game/AI/Blackboards");
+        }
+
+        FString AssetPath = Path / Name;
+        FString SanitizedPath, SanitizeError;
+        if (!SanitizeAIAssetPath(AssetPath, SanitizedPath, SanitizeError))
+        {
+            SendAutomationError(RequestingSocket, RequestId, SanitizeError, TEXT("INVALID_PATH"));
+            return true;
+        }
+
+        if (UEditorAssetLibrary::DoesAssetExist(SanitizedPath))
+        {
+            TSharedPtr<FJsonObject> ExistResult = McpHandlerUtils::CreateResultObject();
+            ExistResult->SetStringField(TEXT("blackboardPath"), SanitizedPath);
+            ExistResult->SetBoolField(TEXT("alreadyExisted"), true);
+            SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Blackboard already exists"), ExistResult);
+            return true;
+        }
+
+        UBlackboardData* NewBB = NewObject<UBlackboardData>(CreatePackage(*SanitizedPath), *FPaths::GetBaseFilename(SanitizedPath), RF_Public | RF_Standalone);
+        if (!NewBB)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create blackboard data asset"), TEXT("CREATION_FAILED"));
+            return true;
+        }
+
+        McpSafeAssetSave(NewBB);
+
+        TSharedPtr<FJsonObject> BBResult = McpHandlerUtils::CreateResultObject();
+        BBResult->SetStringField(TEXT("blackboardPath"), SanitizedPath);
+        BBResult->SetBoolField(TEXT("alreadyExisted"), false);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Blackboard created"), BBResult);
+        return true;
+    }
+
+    // Alias: setup_perception -> add_ai_perception_component (same logic)
+    if (SubAction == TEXT("setup_perception"))
+    {
+        FString ControllerPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+        if (ControllerPath.IsEmpty())
+        {
+            ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
+        }
+        if (ControllerPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing blueprintPath or controllerPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        // CRITICAL: Explicitly check if asset exists before LoadObject
+        // LoadObject may return non-null for invalid paths due to UE's path resolution behavior
+        if (!UEditorAssetLibrary::DoesAssetExist(ControllerPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blueprint not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        if (!ControllerBP->SimpleConstructionScript)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Blueprint has no SimpleConstructionScript"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find or create AIPerceptionComponent
+        UAIPerceptionComponent* PerceptionComp = nullptr;
+        bool bCreatedNew = false;
+
+        for (USCS_Node* Node : ControllerBP->SimpleConstructionScript->GetAllNodes())
+        {
+            if (Node && Node->ComponentTemplate)
+            {
+                if (UAIPerceptionComponent* Comp = Cast<UAIPerceptionComponent>(Node->ComponentTemplate))
+                {
+                    PerceptionComp = Comp;
+                    break;
+                }
+            }
+        }
+
+        if (!PerceptionComp)
+        {
+            USCS_Node* PerceptionNode = ControllerBP->SimpleConstructionScript->CreateNode(
+                UAIPerceptionComponent::StaticClass(), TEXT("AIPerceptionComponent"));
+            if (!PerceptionNode)
+            {
+                SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create perception component node"), TEXT("CREATION_FAILED"));
+                return true;
+            }
+            ControllerBP->SimpleConstructionScript->AddNode(PerceptionNode);
+            PerceptionComp = Cast<UAIPerceptionComponent>(PerceptionNode->ComponentTemplate);
+            bCreatedNew = true;
+        }
+
+        if (!PerceptionComp)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Perception component is null"), TEXT("NULL_COMPONENT"));
+            return true;
+        }
+
+        TArray<FString> SensesConfigured;
+
+        bool bEnableSight = GetBoolFieldAI(Payload, TEXT("enableSight"));
+        if (bEnableSight)
+        {
+            float SightRadius = GetNumberFieldAI(Payload, TEXT("sightRadius"), 3000.0f);
+            float LoseSightRadius = GetNumberFieldAI(Payload, TEXT("loseSightRadius"), SightRadius + 500.0f);
+            float PeripheralVisionAngle = GetNumberFieldAI(Payload, TEXT("peripheralVisionAngle"), 90.0f);
+
+            UAISenseConfig_Sight* SightConfig = NewObject<UAISenseConfig_Sight>(PerceptionComp);
+            SightConfig->SightRadius = SightRadius;
+            SightConfig->LoseSightRadius = LoseSightRadius;
+            SightConfig->PeripheralVisionAngleDegrees = PeripheralVisionAngle;
+            SightConfig->DetectionByAffiliation.bDetectEnemies = true;
+            SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
+            SightConfig->DetectionByAffiliation.bDetectFriendlies = false;
+            SightConfig->SetMaxAge(5.0f);
+
+            PerceptionComp->ConfigureSense(*SightConfig);
+            SensesConfigured.Add(TEXT("Sight"));
+        }
+
+        bool bEnableHearing = GetBoolFieldAI(Payload, TEXT("enableHearing"));
+        if (bEnableHearing)
+        {
+            float HearingRange = GetNumberFieldAI(Payload, TEXT("hearingRange"), 3000.0f);
+            UAISenseConfig_Hearing* HearingConfig = NewObject<UAISenseConfig_Hearing>(PerceptionComp);
+            HearingConfig->HearingRange = HearingRange;
+            HearingConfig->DetectionByAffiliation.bDetectEnemies = true;
+            HearingConfig->DetectionByAffiliation.bDetectNeutrals = true;
+            HearingConfig->DetectionByAffiliation.bDetectFriendlies = false;
+            HearingConfig->SetMaxAge(5.0f);
+            PerceptionComp->ConfigureSense(*HearingConfig);
+            SensesConfigured.Add(TEXT("Hearing"));
+        }
+
+        bool bEnableDamage = GetBoolFieldAI(Payload, TEXT("enableDamage"));
+        if (bEnableDamage)
+        {
+            UAISenseConfig_Damage* DamageConfig = NewObject<UAISenseConfig_Damage>(PerceptionComp);
+            DamageConfig->SetMaxAge(10.0f);
+            PerceptionComp->ConfigureSense(*DamageConfig);
+            SensesConfigured.Add(TEXT("Damage"));
+        }
+
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
+
+        TSharedPtr<FJsonObject> PerceptionResult = McpHandlerUtils::CreateResultObject();
+        PerceptionResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+        PerceptionResult->SetBoolField(TEXT("createdNew"), bCreatedNew);
+
+        TArray<TSharedPtr<FJsonValue>> SensesArray;
+        for (const FString& Sense : SensesConfigured)
+        {
+            SensesArray.Add(MakeShared<FJsonValueString>(Sense));
+        }
+        PerceptionResult->SetArrayField(TEXT("sensesConfigured"), SensesArray);
+
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("AI perception configured via setup_perception"), PerceptionResult);
+        return true;
+    }
+
+    // create_nav_link_proxy - Create a NavLinkProxy blueprint
+    if (SubAction == TEXT("create_nav_link_proxy"))
+    {
+        FString BlueprintPath = GetStringFieldAI(Payload, TEXT("blueprintPath"));
+        if (BlueprintPath.IsEmpty())
+        {
+            BlueprintPath = GetStringFieldAI(Payload, TEXT("name"));
+            if (!BlueprintPath.IsEmpty())
+            {
+                FString Path = GetStringFieldAI(Payload, TEXT("path"));
+                if (Path.IsEmpty()) Path = TEXT("/Game/AI");
+                BlueprintPath = Path / BlueprintPath;
+            }
+        }
+        if (BlueprintPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing blueprintPath or name"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        FString SanitizedPath, SanitizeError;
+        if (!SanitizeAIAssetPath(BlueprintPath, SanitizedPath, SanitizeError))
+        {
+            SendAutomationError(RequestingSocket, RequestId, SanitizeError, TEXT("INVALID_PATH"));
+            return true;
+        }
+
+        if (UEditorAssetLibrary::DoesAssetExist(SanitizedPath))
+        {
+            TSharedPtr<FJsonObject> ExistResult = McpHandlerUtils::CreateResultObject();
+            ExistResult->SetStringField(TEXT("blueprintPath"), SanitizedPath);
+            ExistResult->SetBoolField(TEXT("alreadyExisted"), true);
+            SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("NavLinkProxy blueprint already exists"), ExistResult);
+            return true;
+        }
+
+        UClass* NavLinkProxyClass = FindObject<UClass>(nullptr, TEXT("/Script/NavigationSystem.NavLinkProxy"));
+        if (!NavLinkProxyClass)
+        {
+            NavLinkProxyClass = AActor::StaticClass();
+        }
+
+        UBlueprint* NavLinkBP = FKismetEditorUtilities::CreateBlueprint(
+            NavLinkProxyClass,
+            CreatePackage(*SanitizedPath),
+            *FPaths::GetBaseFilename(SanitizedPath),
+            BPTYPE_Normal,
+            UBlueprint::StaticClass(),
+            UBlueprintGeneratedClass::StaticClass());
+
+        if (!NavLinkBP)
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create NavLinkProxy blueprint"), TEXT("CREATION_FAILED"));
+            return true;
+        }
+
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(NavLinkBP);
+        McpSafeAssetSave(NavLinkBP);
+
+        TSharedPtr<FJsonObject> NavResult = McpHandlerUtils::CreateResultObject();
+        NavResult->SetStringField(TEXT("blueprintPath"), SanitizedPath);
+        NavResult->SetBoolField(TEXT("alreadyExisted"), false);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("NavLinkProxy blueprint created"), NavResult);
+        return true;
+    }
+
+    // set_focus - Set focus actor variable on AI controller blueprint
+    if (SubAction == TEXT("set_focus"))
+    {
+        FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
+        if (ControllerPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing controllerPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        FString FocusActorName = GetStringFieldAI(Payload, TEXT("focusActorName"));
+        if (FocusActorName.IsEmpty())
+        {
+            FocusActorName = GetStringFieldAI(Payload, TEXT("targetActor"));
+        }
+
+        // Load the blueprint - LoadObject handles path resolution
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Controller blueprint not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Add a FocusActor variable to the BP
+        FEdGraphPinType PinType;
+        PinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+        PinType.PinSubCategoryObject = AActor::StaticClass();
+        FBlueprintEditorUtils::AddMemberVariable(ControllerBP, TEXT("FocusActor"), PinType);
+
+        FBlueprintEditorUtils::MarkBlueprintAsModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
+
+        TSharedPtr<FJsonObject> FocusResult = McpHandlerUtils::CreateResultObject();
+        FocusResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+        FocusResult->SetStringField(TEXT("focusActorName"), FocusActorName);
+        FocusResult->SetBoolField(TEXT("focusSet"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Focus actor variable set on controller"), FocusResult);
+        return true;
+    }
+
+    // clear_focus - Clear focus actor variable on AI controller blueprint
+    if (SubAction == TEXT("clear_focus"))
+    {
+        FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
+        if (ControllerPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing controllerPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        // Load blueprint - rely on LoadObject without DoesAssetExist pre-check
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
+        FBlueprintEditorUtils::RemoveMemberVariable(ControllerBP, TEXT("FocusActor"));
+
+        FBlueprintEditorUtils::MarkBlueprintAsModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
+
+        TSharedPtr<FJsonObject> ClearResult = McpHandlerUtils::CreateResultObject();
+        ClearResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+        ClearResult->SetBoolField(TEXT("focusCleared"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Focus cleared on controller"), ClearResult);
+        return true;
+    }
+
+    // set_blackboard_value - Set a default key value on a blackboard asset
+    if (SubAction == TEXT("set_blackboard_value"))
+    {
+        FString BBPath = GetStringFieldAI(Payload, TEXT("blackboardPath"));
+        if (BBPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing blackboardPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        FString KeyName = GetStringFieldAI(Payload, TEXT("keyName"));
+        if (KeyName.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing keyName"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        UBlackboardData* BBData = LoadObject<UBlackboardData>(nullptr, *BBPath);
+        if (!BBData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blackboard not found: %s"), *BBPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Find the key and set its value
+        bool bKeyFound = false;
+        bool bValueSet = false;
+        FString ValueStr = GetStringFieldAI(Payload, TEXT("value"));
+        
+        for (FBlackboardEntry& Key : BBData->Keys)
+        {
+            if (Key.EntryName.ToString() == KeyName)
+            {
+                bKeyFound = true;
+                
+                // Set the default value based on key type
+                // Note: DefaultValue properties on BlackboardKeyType are only available in UE 5.5+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
+                if (Key.KeyType && !ValueStr.IsEmpty())
+                {
+                    if (UBlackboardKeyType_Bool* BoolKey = Cast<UBlackboardKeyType_Bool>(Key.KeyType))
+                    {
+                        BoolKey->bDefaultValue = ValueStr.ToLower() == TEXT("true") || ValueStr == TEXT("1");
+                        bValueSet = true;
+                    }
+                    else if (UBlackboardKeyType_Int* IntKey = Cast<UBlackboardKeyType_Int>(Key.KeyType))
+                    {
+                        IntKey->DefaultValue = FCString::Atoi(*ValueStr);
+                        bValueSet = true;
+                    }
+                    else if (UBlackboardKeyType_Float* FloatKey = Cast<UBlackboardKeyType_Float>(Key.KeyType))
+                    {
+                        FloatKey->DefaultValue = FCString::Atof(*ValueStr);
+                        bValueSet = true;
+                    }
+                    else if (UBlackboardKeyType_Vector* VectorKey = Cast<UBlackboardKeyType_Vector>(Key.KeyType))
+                    {
+                        VectorKey->DefaultValue.InitFromString(ValueStr);
+                        VectorKey->bUseDefaultValue = true;
+                        bValueSet = true;
+                    }
+                    else if (UBlackboardKeyType_Rotator* RotatorKey = Cast<UBlackboardKeyType_Rotator>(Key.KeyType))
+                    {
+                        RotatorKey->DefaultValue.InitFromString(ValueStr);
+                        RotatorKey->bUseDefaultValue = true;
+                        bValueSet = true;
+                    }
+                    else if (UBlackboardKeyType_Name* NameKey = Cast<UBlackboardKeyType_Name>(Key.KeyType))
+                    {
+                        NameKey->DefaultValue = FName(*ValueStr);
+                        bValueSet = true;
+                    }
+                    else if (UBlackboardKeyType_String* StringKey = Cast<UBlackboardKeyType_String>(Key.KeyType))
+                    {
+                        StringKey->DefaultValue = ValueStr;
+                        bValueSet = true;
+                    }
+                    else
+                    {
+                        // Unsupported key type - note in response
+                        bValueSet = false;
+                    }
+                }
+#else
+                // UE 5.0-5.4: DefaultValue properties not available on BlackboardKeyType
+                // Value setting requires UE 5.5+
+                bValueSet = false;
+#endif
+                break;
+            }
+        }
+
+        if (!bKeyFound)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Key '%s' not found in blackboard"), *KeyName), TEXT("KEY_NOT_FOUND"));
+            return true;
+        }
+
+        McpSafeAssetSave(BBData);
+
+        TSharedPtr<FJsonObject> SetResult = McpHandlerUtils::CreateResultObject();
+        SetResult->SetStringField(TEXT("blackboardPath"), BBPath);
+        SetResult->SetStringField(TEXT("keyName"), KeyName);
+        SetResult->SetStringField(TEXT("value"), ValueStr);
+        SetResult->SetBoolField(TEXT("valueSet"), bValueSet);
+        
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
+        SendAutomationResponse(RequestingSocket, RequestId, true, 
+            bValueSet ? TEXT("Blackboard value set") : TEXT("Key found but value not set (unsupported type)"), SetResult);
+#else
+        SendAutomationResponse(RequestingSocket, RequestId, true, 
+            TEXT("Key found. Note: set_blackboard_value requires UE 5.5+ for value setting."), SetResult);
+#endif
+        return true;
+    }
+
+    // get_blackboard_value - Get a key's info from a blackboard asset
+    if (SubAction == TEXT("get_blackboard_value"))
+    {
+        FString BBPath = GetStringFieldAI(Payload, TEXT("blackboardPath"));
+        if (BBPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing blackboardPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        FString KeyName = GetStringFieldAI(Payload, TEXT("keyName"));
+        if (KeyName.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing keyName"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        UBlackboardData* BBData = LoadObject<UBlackboardData>(nullptr, *BBPath);
+        if (!BBData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Blackboard not found: %s"), *BBPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Find the key
+        bool bKeyFound = false;
+        FString KeyType = TEXT("Unknown");
+        bool bInstanceSynced = false;
+
+        for (const FBlackboardEntry& Key : BBData->Keys)
+        {
+            if (Key.EntryName.ToString() == KeyName)
+            {
+                bKeyFound = true;
+                bInstanceSynced = Key.bInstanceSynced;
+                if (Key.KeyType)
+                {
+                    KeyType = Key.KeyType->GetClass()->GetName();
+                }
+                break;
+            }
+        }
+
+        if (!bKeyFound)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Key '%s' not found in blackboard"), *KeyName), TEXT("KEY_NOT_FOUND"));
+            return true;
+        }
+
+        TSharedPtr<FJsonObject> GetResult = McpHandlerUtils::CreateResultObject();
+        GetResult->SetStringField(TEXT("blackboardPath"), BBPath);
+        GetResult->SetStringField(TEXT("keyName"), KeyName);
+        GetResult->SetStringField(TEXT("keyType"), KeyType);
+        GetResult->SetBoolField(TEXT("instanceSynced"), bInstanceSynced);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Blackboard value retrieved"), GetResult);
+        return true;
+    }
+
+    // run_behavior_tree - Alias for assign_behavior_tree
+    if (SubAction == TEXT("run_behavior_tree"))
+    {
+        FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
+        if (ControllerPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing controllerPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        FString BTPath = GetStringFieldAI(Payload, TEXT("behaviorTreePath"));
+        if (BTPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing behaviorTreePath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        // Load assets directly - DoesAssetExist pre-check can fail on newly created assets
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Controller blueprint not found: %s"), *ControllerPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UBehaviorTree* BT = LoadObject<UBehaviorTree>(nullptr, *BTPath);
+        if (!BT)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Behavior tree not found: %s"), *BTPath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Store the BT reference as a variable on the controller
+        FEdGraphPinType PinType;
+        PinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+        PinType.PinSubCategoryObject = UBehaviorTree::StaticClass();
+        FBlueprintEditorUtils::AddMemberVariable(ControllerBP, TEXT("AssignedBehaviorTree"), PinType);
+
+        FBlueprintEditorUtils::MarkBlueprintAsModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
+
+        TSharedPtr<FJsonObject> RunResult = McpHandlerUtils::CreateResultObject();
+        RunResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+        RunResult->SetStringField(TEXT("behaviorTreePath"), BTPath);
+        RunResult->SetBoolField(TEXT("assigned"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Behavior tree assigned for running"), RunResult);
+        return true;
+    }
+
+    // stop_behavior_tree - Remove behavior tree assignment from controller
+    if (SubAction == TEXT("stop_behavior_tree"))
+    {
+        FString ControllerPath = GetStringFieldAI(Payload, TEXT("controllerPath"));
+        if (ControllerPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("Missing controllerPath"), TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+
+        UBlueprint* ControllerBP = LoadObject<UBlueprint>(nullptr, *ControllerPath);
+        if (!ControllerBP)
+        {
+            TSharedPtr<FJsonObject> StopResult = McpHandlerUtils::CreateResultObject();
+            StopResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+            StopResult->SetBoolField(TEXT("stopped"), false);
+            SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Behavior tree stopped (controller not found)"), StopResult);
+            return true;
+        }
+
+        // Remove the BT variable to "stop" it
+        FBlueprintEditorUtils::RemoveMemberVariable(ControllerBP, TEXT("AssignedBehaviorTree"));
+
+        FBlueprintEditorUtils::MarkBlueprintAsModified(ControllerBP);
+        McpSafeAssetSave(ControllerBP);
+
+        TSharedPtr<FJsonObject> StopResult = McpHandlerUtils::CreateResultObject();
+        StopResult->SetStringField(TEXT("controllerPath"), ControllerPath);
+        StopResult->SetBoolField(TEXT("stopped"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Behavior tree stopped"), StopResult);
         return true;
     }
 

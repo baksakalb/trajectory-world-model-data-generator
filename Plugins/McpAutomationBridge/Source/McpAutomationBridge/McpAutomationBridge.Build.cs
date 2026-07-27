@@ -2,9 +2,32 @@ using UnrealBuildTool;
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using EpicGames.Core;
 
 public class McpAutomationBridge : ModuleRules
 {
+    // ============================================================================
+    // NATIVE WINDOWS API FOR ACTUAL MEMORY DETECTION
+    // ============================================================================
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        internal uint dwLength;
+        internal uint dwMemoryLoad;
+        internal ulong ullTotalPhys;
+        internal ulong ullAvailPhys;
+        internal ulong ullTotalPageFile;
+        internal ulong ullAvailPageFile;
+        internal ulong ullTotalVirtual;
+        internal ulong ullAvailVirtual;
+        internal ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
     /// <summary>
     /// Configures build rules, dependencies, and compile-time feature definitions for the McpAutomationBridge module based on the provided build target.
     /// </summary>
@@ -24,67 +47,83 @@ public class McpAutomationBridge : ModuleRules
         // ============================================================================
         // DYNAMIC MEMORY-BASED BUILD CONFIGURATION
         // ============================================================================
-        // Automatically adjust build parallelism based on available system memory
+        // Automatically adjust build parallelism based on ACTUAL available system memory
         // to prevent "compiler is out of heap space" errors (C1060)
         
-        long AvailableMemoryMB = GetAvailableMemoryMB();
-        bool bIsLowMemorySystem = AvailableMemoryMB < 8192; // Less than 8GB
-        bool bIsVeryLowMemorySystem = AvailableMemoryMB < 4096; // Less than 4GB
+        long AvailableMemoryMB = GetActualAvailableMemoryMB();
+        long TotalMemoryMB = GetTotalPhysicalMemoryMB();
         
-        Console.WriteLine(string.Format("McpAutomationBridge: Detected {0}MB available memory", AvailableMemoryMB));
-        
-        // Disable PCH to prevent virtual memory exhaustion on systems with limited RAM
-        // This is the most reliable workaround for C3859/C1076 errors
-        PCHUsage = PCHUsageMode.NoPCHs;
-        
-        // Enable Unity builds for faster compilation on systems with sufficient memory
-        // Unity builds combine multiple source files which speeds up compilation significantly
-        // Only disable for very low memory systems (< 8GB) to prevent C1060 heap errors
-        bUseUnity = !bIsLowMemorySystem;
-        Console.WriteLine(string.Format("McpAutomationBridge: Unity builds {0}", bUseUnity ? "enabled" : "disabled (low memory system)"));
-         
-        // Disable Adaptive Unity to prevent files from being excluded from unity builds
-        // bUseAdaptiveUnityBuild was removed in UE 5.7, use reflection to set it safely
-        try
-        {
-            var prop = GetType().GetProperty("bUseAdaptiveUnityBuild");
-            if (prop != null && !bIsVeryLowMemorySystem) { prop.SetValue(this, false); }
-        }
-        catch { /* Property doesn't exist in this UE version */ }
-         
-        // bMergeUnityFiles was also removed in UE 5.7
-        try
-        {
-            var prop = GetType().GetProperty("bMergeUnityFiles");
-            if (prop != null && !bIsLowMemorySystem) { prop.SetValue(this, true); }
-        }
-        catch { /* Property doesn't exist in this UE version */ }
-        
-        // Set max parallel actions based on available memory
-        // Each compiler instance needs ~1-2GB of RAM
-        try
-        {
-            var prop = GetType().GetProperty("MaxParallelActions");
-            if (prop != null)
-            {
-                int MaxActions = bIsVeryLowMemorySystem ? 1 : (bIsLowMemorySystem ? 2 : 4);
-                prop.SetValue(this, MaxActions);
-                Console.WriteLine(string.Format("McpAutomationBridge: Max parallel actions set to {0}", MaxActions));
-            }
-        }
-        catch { /* Property doesn't exist in this UE version */ }
-
-        // UE 5.0 + MSVC: Suppress warnings from engine headers using Clang-only __has_feature macro
-        if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion == 0)
+        // ============================================================================
+        // UE 5.0-5.2 + MSVC: Disable undefined-identifier-to-errors and define __has_feature macro
+        // ============================================================================
+        // UE 5.0's TargetRules.bUndefinedIdentifierErrors defaults to true, which causes
+        // UBT to add /we4668 to ALL C++ compilation commands (VCToolChain.cs:675).
+        // The UE 5.0 engine header ConcurrentLinearAllocator.h line 26 uses the Clang-only
+        // __has_feature macro. MSVC doesn't recognize it and emits C4668 (undefined macro
+        // in #if directive). With /we4668, this becomes a fatal error.
+        // We fix it at the root:
+        //   1. Set bUndefinedIdentifierErrors = false to remove /we4668
+        //   2. Add __has_feature(...)=0 to GlobalDefinitions so that the macro is defined
+        //      for ALL compilations (including SharedPCH), and discards its arguments.
+        // This propagates to GlobalCompileEnvironment and the SharedPCH compile command.
+        if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion <= 2)
         {
             if (Target.Platform == UnrealTargetPlatform.Win64)
             {
-                // C4668: '__has_feature' is not defined as a preprocessor macro
-                // C4067: unexpected tokens following preprocessor directive
-                PublicDefinitions.Add("__has_feature(x)=0");
-                Console.WriteLine("McpAutomationBridge: Added MSVC warning suppression for UE 5.0");
+                try
+                {
+                    var innerField = typeof(ReadOnlyTargetRules).GetField("Inner",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (innerField != null)
+                    {
+                        var targetRules = (TargetRules)innerField.GetValue(Target);
+                        if (targetRules != null)
+                        {
+#pragma warning disable 618  // bUndefinedIdentifierErrors is obsolete in UE5.5+, but we need it for older versions
+                            if (targetRules.bUndefinedIdentifierErrors)
+                            {
+                                targetRules.bUndefinedIdentifierErrors = false;
+                                Console.WriteLine("McpAutomationBridge: Disabled bUndefinedIdentifierErrors for UE 5.0-5.2 MSVC build");
+                            }
+#pragma warning restore 618
+
+                            // Add __has_feature macro to global definitions (affects all compilations, including SharedPCH)
+                            // Define as non-variadic macro that discards its argument, e.g., __has_feature(address_sanitizer) -> 0
+                            const string HasFeatureDefine = "__has_feature(x)=0";
+                            if (!targetRules.GlobalDefinitions.Contains(HasFeatureDefine))
+                            {
+                                targetRules.GlobalDefinitions.Add(HasFeatureDefine);
+                                Console.WriteLine("McpAutomationBridge: Added __has_feature(x)=0 to GlobalDefinitions");
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Non-fatal; may succeed via alternative mechanisms
+                }
+                Console.WriteLine(string.Format("McpAutomationBridge: Applied MSVC __has_feature compatibility for UE 5.{0}", Target.Version.MinorVersion));
             }
         }
+
+        // UBT already handles parallelism based on 1.5GB/action globally
+        // Our job is to prevent HUGE compilation units that exceed heap space
+        
+        // IMPORTANT: Unity builds combine many .cpp files into one compilation unit
+        // This causes each compiler process to need 3-6GB+ heap space instead of 1.5GB
+        // For a module with 50+ handler files, unity builds cause heap exhaustion
+        // even with plenty of RAM, because Windows page file space is limited
+        
+        Console.WriteLine(string.Format("McpAutomationBridge: Detected {0}MB available memory (of {1}MB total)", AvailableMemoryMB, TotalMemoryMB));
+        
+        // Disable PCH to prevent virtual memory exhaustion
+        PCHUsage = PCHUsageMode.NoPCHs;
+        
+        // Unity builds enabled - combine files for faster compilation
+        // Note: If you get "compiler out of heap space" errors, install BuildConfiguration.xml
+        // from plugins/McpAutomationBridge/Config/BuildConfiguration.xml to %AppData%\Unreal Engine\UnrealBuildTool\
+        bUseUnity = true;
+        Console.WriteLine("McpAutomationBridge: Unity builds enabled");
 
 PublicDependencyModuleNames.AddRange(new string[]
         {
@@ -96,14 +135,13 @@ PublicDependencyModuleNames.AddRange(new string[]
 
         if (Target.bBuildEditor)
         {
-            // Editor-only Public Dependencies
+            // Editor-only Public Dependencies (required for all editor builds)
             PublicDependencyModuleNames.AddRange(new string[] 
             { 
-                "LevelSequenceEditor", "Sequencer", "MovieSceneTools", "Niagara", "NiagaraEditor", "UnrealEd",
-                "WorldPartitionEditor", "DataLayerEditor", "EnhancedInput", "InputEditor",
-                // Required for linking symbols used in handlers (already in base: AIModule, Landscape, Engine)
-                "BehaviorTreeEditor",  // UBehaviorTreeGraphNode classes
+                "Sequencer", "MovieSceneTools", "Niagara", "UnrealEd",
+                "WorldPartitionEditor", "DataLayerEditor",
                 "MaterialEditor"  // UMaterialExpressionRotator and other material expressions
+                // Optional plugins are handled by AddOptionalDynamicModule() below with delay-load
             });
 
             PrivateDependencyModuleNames.AddRange(new string[]
@@ -111,10 +149,8 @@ PublicDependencyModuleNames.AddRange(new string[]
                 "ApplicationCore","Slate","SlateCore","Projects","InputCore","DeveloperSettings","Settings","EngineSettings",
                 "Sockets","Networking","EditorSubsystem","EditorScriptingUtilities","BlueprintGraph","SSL",
                 "Kismet","KismetCompiler","AssetRegistry","AssetTools","SourceControl",
-                "AudioEditor", "DataValidation", "NiagaraEditor",
-                // Phase 24: GAS, Audio, and missing module dependencies
-                "GameplayAbilities",  // Required for UAttributeSet, UGameplayEffect, UGameplayAbility, etc.
-                "AudioMixer"          // Required for FAudioEQEffect::ClampValues
+                "AudioEditor", "AudioMixer"
+                // Optional plugins are handled by AddOptionalDynamicModule() below with delay-load
             });
 
             // Add OpenSSL for TLS support (requires WITH_SSL)
@@ -122,42 +158,86 @@ PublicDependencyModuleNames.AddRange(new string[]
 
             PrivateDependencyModuleNames.AddRange(new string[]
             {
-"LandscapeEditor","LandscapeEditorUtilities","Foliage","FoliageEdit",
+                "LandscapeEditor","LandscapeEditorUtilities","Foliage","FoliageEdit",
                 "AnimGraph","AnimationBlueprintLibrary","Persona","ToolMenus","EditorWidgets","PropertyEditor","LevelEditor",
-                "ControlRig","ControlRigDeveloper","ControlRigEditor","RigVM","RigVMDeveloper","UMG","UMGEditor","ProceduralMeshComponent","MergeActors",
-                "EnvironmentQueryEditor", "RenderCore", "RHI", "AutomationController", "GameplayDebugger", "TraceLog", "TraceAnalysis", "AIGraph",
+                "RigVM","RigVMDeveloper","UMG","UMGEditor","MergeActors",
+                "RenderCore", "RHI", "AutomationController", "GameplayDebugger", "TraceLog", "TraceAnalysis", "AIGraph",
                 "MeshUtilities", "MaterialUtilities", "PhysicsCore", "ClothingSystemRuntimeCommon",
-                // Phase 6: Geometry Script (GeometryScripting plugin dependency in .uplugin ensures availability)
-                "GeometryCore", "GeometryScriptingCore", "GeometryScriptingEditor", "GeometryFramework", "DynamicMesh", "MeshDescription", "StaticMeshDescription",
-                // Phase 24: Navigation volumes
+                "GeometryCore", "GeometryFramework", "DynamicMesh", "MeshDescription", "StaticMeshDescription",
                 "NavigationSystem"
+                // Optional plugins are handled by AddOptionalDynamicModule() below with delay-load
             });
 
             // --- Feature Detection Logic ---
 
             string EngineDir = Path.GetFullPath(Target.RelativeEnginePath);
 
-            // Phase 11: MetaSound modules (conditional - may not be available in all UE versions)
-            TryAddConditionalModule(Target, EngineDir, "MetasoundEngine", "MetasoundEngine");
-            TryAddConditionalModule(Target, EngineDir, "MetasoundFrontend", "MetasoundFrontend");
-            TryAddConditionalModule(Target, EngineDir, "MetasoundEditor", "MetasoundEditor");
+            // =========================================================================
+            // OPTIONAL PLUGINS - Dynamic Loading
+            // =========================================================================
+            // All plugins marked Optional: true in .uplugin must use dynamic loading
+            // to prevent hard DLL imports that fail when plugins are not enabled.
 
-            // Phase 16: AI Systems - StateTree, SmartObjects, MassAI (conditional based on plugin availability)
-            // These modules may not be available in all UE versions or plugin configurations
-            TryAddConditionalModule(Target, EngineDir, "StateTreeModule", "StateTreeModule");
-            TryAddConditionalModule(Target, EngineDir, "StateTreeEditorModule", "StateTreeEditorModule");
-            TryAddConditionalModule(Target, EngineDir, "SmartObjectsModule", "SmartObjectsModule");
-            TryAddConditionalModule(Target, EngineDir, "SmartObjectsEditorModule", "SmartObjectsEditorModule");
-            TryAddConditionalModule(Target, EngineDir, "MassEntity", "MassEntity");
-            TryAddConditionalModule(Target, EngineDir, "MassSpawner", "MassSpawner");
-            TryAddConditionalModule(Target, EngineDir, "MassActors", "MassActors");
+            // Phase 24: GAS - Gameplay Ability System (optional plugin)
+            AddOptionalDynamicModule(Target, EngineDir, "GameplayAbilities", "GameplayAbilities");
 
-            // Phase 22: Voice Chat and Online Subsystem (conditional - for sessions handlers)
-            // VoiceChat module is from the VoiceChat plugin
-            TryAddConditionalModule(Target, EngineDir, "VoiceChat", "VoiceChat");
-            // OnlineSubsystem provides IOnlineVoice for muting
-            TryAddConditionalModule(Target, EngineDir, "OnlineSubsystem", "OnlineSubsystem");
-            TryAddConditionalModule(Target, EngineDir, "OnlineSubsystemUtils", "OnlineSubsystemUtils");
+            // Phase 11: MetaSound modules (optional plugin)
+            // Note: MetasoundFrontend exports data symbols (FrontendInvalidID) so cannot use delay-load
+            AddOptionalDynamicModule(Target, EngineDir, "MetasoundEngine", "MetasoundEngine");
+            AddOptionalConditionalModule(Target, EngineDir, "MetasoundFrontend", "MetasoundFrontend");  // Has data symbols
+            AddOptionalDynamicModule(Target, EngineDir, "MetasoundEditor", "MetasoundEditor");
+
+            // Phase 16: AI Systems - StateTree, SmartObjects, MassAI (optional plugins)
+            AddOptionalDynamicModule(Target, EngineDir, "StateTreeModule", "StateTreeModule");
+            AddOptionalDynamicModule(Target, EngineDir, "StateTreeEditorModule", "StateTreeEditorModule");
+            AddOptionalDynamicModule(Target, EngineDir, "SmartObjectsModule", "SmartObjectsModule");
+            AddOptionalDynamicModule(Target, EngineDir, "SmartObjectsEditorModule", "SmartObjectsEditorModule");
+            AddOptionalDynamicModule(Target, EngineDir, "MassEntity", "MassEntity");
+            AddOptionalDynamicModule(Target, EngineDir, "MassSpawner", "MassSpawner");
+            AddOptionalDynamicModule(Target, EngineDir, "MassActors", "MassActors");
+            // Note: MassGameplay is a plugin name, not a module name. The MassGameplay plugin contains
+            // modules like MassActors, MassSpawner, MassCommon, MassMovement, etc.
+
+            // Phase 22: Online Subsystem (optional plugins)
+            AddOptionalDynamicModule(Target, EngineDir, "OnlineSubsystem", "OnlineSubsystem");
+            AddOptionalDynamicModule(Target, EngineDir, "OnlineSubsystemUtils", "OnlineSubsystemUtils");
+
+            // ControlRig (optional plugin) - for animation rigging and IK
+            AddOptionalDynamicModule(Target, EngineDir, "ControlRig", "ControlRig");
+            AddOptionalDynamicModule(Target, EngineDir, "ControlRigDeveloper", "ControlRigDeveloper");
+            AddOptionalDynamicModule(Target, EngineDir, "ControlRigEditor", "ControlRigEditor");
+
+            // ProceduralMeshComponent (optional plugin) - for procedural geometry
+            AddOptionalDynamicModule(Target, EngineDir, "ProceduralMeshComponent", "ProceduralMeshComponent");
+
+            // EnvironmentQueryEditor (optional plugin) - for EQS authoring
+            AddOptionalDynamicModule(Target, EngineDir, "EnvironmentQueryEditor", "EnvironmentQueryEditor");
+
+            // GeometryScripting (optional plugin) - for geometry scripting
+            AddOptionalDynamicModule(Target, EngineDir, "GeometryScriptingCore", "GeometryScriptingCore");
+            AddOptionalDynamicModule(Target, EngineDir, "GeometryScriptingEditor", "GeometryScriptingEditor");
+
+            // LevelSequenceEditor (optional plugin) - for Sequencer/Cinematics
+            AddOptionalDynamicModule(Target, EngineDir, "LevelSequenceEditor", "LevelSequenceEditor");
+
+            // NiagaraEditor (optional plugin) - for Niagara authoring
+            AddOptionalDynamicModule(Target, EngineDir, "NiagaraEditor", "NiagaraEditor");
+
+            // EnhancedInput (optional plugin) - for Enhanced Input system
+            AddOptionalDynamicModule(Target, EngineDir, "EnhancedInput", "EnhancedInput");
+            AddOptionalDynamicModule(Target, EngineDir, "InputEditor", "InputEditor");
+
+            // BehaviorTreeEditor (optional plugin) - for Behavior Tree graph editing
+            AddOptionalDynamicModule(Target, EngineDir, "BehaviorTreeEditor", "BehaviorTreeEditor");
+
+            // DataValidation (optional plugin) - for data validation
+            AddOptionalDynamicModule(Target, EngineDir, "DataValidation", "DataValidation");
+
+            // Phase: IKRig and Vehicles (optional plugins)
+            AddOptionalDynamicModule(Target, EngineDir, "IKRig", "IKRig");
+            AddOptionalDynamicModule(Target, EngineDir, "IKRigEditor", "IKRigEditor");
+            AddOptionalDynamicModule(Target, EngineDir, "ChaosVehicles", "ChaosVehicles");
+            AddOptionalDynamicModule(Target, EngineDir, "AnimationData", "AnimationData");
 
             // Ensure editor builds expose full Blueprint graph editing APIs.
             PublicDefinitions.Add("MCP_HAS_K2NODE_HEADERS=1");
@@ -224,6 +304,20 @@ PublicDependencyModuleNames.AddRange(new string[]
             PublicDefinitions.Add("MCP_HAS_EDGRAPH_SCHEMA_K2=0");
             PublicDefinitions.Add("MCP_HAS_SUBOBJECT_DATA_SUBSYSTEM=0");
             PublicDefinitions.Add("MCP_HAS_WP_FOR_EACH_DATALAYER=0");
+        }
+
+        // ============================================================================
+        // COMPILER WARNING SETTINGS (UE 5.6+ Compatibility)
+        // ============================================================================
+        // UE 5.6+ treats variable shadowing (C4456, C4458, C4459) as errors by default.
+        // Use ShadowVariableWarningLevel directly on ModuleRules - works in all UE versions.
+        // UE 5.0-5.5: Direct property on ModuleRules
+        // UE 5.6-5.7: Forwarding property to CppCompileWarningSettings.ShadowVariableWarningLevel
+        // This allows compilation while we systematically fix shadowing issues.
+        // TODO: Fix variable shadowing in handler files, then remove this override
+        if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 6)
+        {
+            ShadowVariableWarningLevel = WarningLevel.Warning;
         }
     }
 
@@ -334,64 +428,79 @@ PublicDependencyModuleNames.AddRange(new string[]
     }
 
     /// <summary>
-    /// Gets the approximate available physical memory in MB.
-    /// Uses a simple heuristic based on environment and process info.
+    /// Gets the ACTUAL available physical memory in MB using Windows API.
+    /// Falls back to conservative estimate if detection fails.
     /// </summary>
     /// <returns>Available memory in MB.</returns>
-    private long GetAvailableMemoryMB()
+    private long GetActualAvailableMemoryMB()
     {
         try
         {
-            // Check for UE_BUILD_CONFIGURATION environment variable
-            // This can be set to hint at memory constraints
-            string MemoryHint = Environment.GetEnvironmentVariable("UE_BUILD_MEMORY_MB");
-            if (!string.IsNullOrEmpty(MemoryHint))
+            // Try Windows API first (most accurate)
+            if (Environment.OSVersion.Platform == PlatformID.Win32NT)
             {
-                long HintValue;
-                if (long.TryParse(MemoryHint, out HintValue) && HintValue > 0)
+                var memStatus = new MEMORYSTATUSEX();
+                memStatus.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+                
+                if (GlobalMemoryStatusEx(ref memStatus))
                 {
-                    return HintValue;
+                    // Return available physical memory in MB
+                    return (long)(memStatus.ullAvailPhys / (1024 * 1024));
                 }
             }
-            
-            // Check for MSBuild's max CPU count - if low, system might be constrained
-            string ProcessorCount = Environment.GetEnvironmentVariable("NUMBER_OF_PROCESSORS");
-            if (!string.IsNullOrEmpty(ProcessorCount))
-            {
-                int CpuCount;
-                if (int.TryParse(ProcessorCount, out CpuCount))
-                {
-                    // Rough heuristic: assume 2GB per core minimum, 4GB per core recommended
-                    // For systems with many cores, assume more RAM
-                    long EstimatedMemory = CpuCount * 2048; // 2GB per core minimum
-                    
-                    // Cap the estimate to reasonable bounds
-                    if (EstimatedMemory > 65536) return 65536; // Max 64GB
-                    if (EstimatedMemory < 4096) return 4096;   // Min 4GB
-                    
-                    return EstimatedMemory;
-                }
-            }
-            
-            // Conservative default
-            return 8192; // Assume 8GB if we can't determine
         }
         catch
         {
-            // Default to conservative estimate
-            return 8192; // Assume 8GB
+            // Fall through to heuristics
         }
+        
+        // Fallback: Check for environment variable hint
+        string MemoryHint = Environment.GetEnvironmentVariable("UE_BUILD_MEMORY_MB");
+        if (!string.IsNullOrEmpty(MemoryHint))
+        {
+            long HintValue;
+            if (long.TryParse(MemoryHint, out HintValue) && HintValue > 0)
+            {
+                return HintValue;
+            }
+        }
+        
+        // Conservative fallback - assume 4GB available
+        return 4096;
     }
 
     /// <summary>
-    /// Conditionally adds a module dependency if it exists in the engine or plugins directories.
-    /// Used for optional AI modules that may not be available in all UE versions (StateTree, SmartObjects, MassEntity).
+    /// Gets the total physical memory in MB using Windows API.
     /// </summary>
-    /// <param name="Target">Build target settings.</param>
+    /// <returns>Total memory in MB.</returns>
+    private long GetTotalPhysicalMemoryMB()
+    {
+        try
+        {
+            if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+            {
+                var memStatus = new MEMORYSTATUSEX();
+                memStatus.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+                
+                if (GlobalMemoryStatusEx(ref memStatus))
+                {
+                    return (long)(memStatus.ullTotalPhys / (1024 * 1024));
+                }
+            }
+        }
+        catch { }
+        
+        return 8192; // Conservative fallback
+    }
+
+    /// <summary>
+    /// Searches for an optional module in standard engine and plugin locations.
+    /// Checks Runtime/Editor source directories and common plugin subdirectories.
+    /// </summary>
     /// <param name="EngineDir">Absolute path to the engine root directory.</param>
-    /// <param name="ModuleName">The module name to add to dependencies if found.</param>
-    /// <param name="SearchName">The directory name to search for in engine/plugin paths.</param>
-    private void TryAddConditionalModule(ReadOnlyTargetRules Target, string EngineDir, string ModuleName, string SearchName)
+    /// <param name="SearchName">The directory name to search for.</param>
+    /// <returns>True if the module directory was found, false otherwise.</returns>
+    private bool FindOptionalModule(string EngineDir, string SearchName)
     {
         try
         {
@@ -399,16 +508,14 @@ PublicDependencyModuleNames.AddRange(new string[]
             string RuntimePath = Path.Combine(EngineDir, "Source", "Runtime", SearchName);
             if (Directory.Exists(RuntimePath))
             {
-                PrivateDependencyModuleNames.Add(ModuleName);
-                return;
+                return true;
             }
 
             // Check Editor modules
             string EditorPath = Path.Combine(EngineDir, "Source", "Editor", SearchName);
             if (Directory.Exists(EditorPath))
             {
-                PrivateDependencyModuleNames.Add(ModuleName);
-                return;
+                return true;
             }
 
             // Check Plugins directory
@@ -421,29 +528,94 @@ PublicDependencyModuleNames.AddRange(new string[]
                     Path.Combine(PluginsDir, "AI", SearchName),
                     Path.Combine(PluginsDir, "Runtime", SearchName),
                     Path.Combine(PluginsDir, "Experimental", SearchName),
+                    Path.Combine(PluginsDir, "Developer", SearchName),
+                    Path.Combine(PluginsDir, "Animation", SearchName),
+                    Path.Combine(PluginsDir, "Online", SearchName),  // OnlineSubsystem, VoiceChat
+                    Path.Combine(PluginsDir, "Animation", "IKRig", "Source", SearchName),
+                    Path.Combine(PluginsDir, "Animation", "ControlRig", "Source", SearchName),
                     Path.Combine(PluginsDir, "Runtime", "MassEntity", "Source", SearchName),
                     Path.Combine(PluginsDir, "Runtime", "MassGameplay", "Source", SearchName),
                     Path.Combine(PluginsDir, "Runtime", "SmartObjects", "Source", SearchName),
-                    Path.Combine(PluginsDir, "Runtime", "StateTree", "Source", SearchName)
+                    Path.Combine(PluginsDir, "Runtime", "StateTree", "Source", SearchName),
+                    Path.Combine(PluginsDir, "Experimental", "ChaosVehiclesPlugin", "Source", SearchName)
                 };
 
                 foreach (string SearchPath in SearchPaths)
                 {
                     if (Directory.Exists(SearchPath))
                     {
-                        PrivateDependencyModuleNames.Add(ModuleName);
-                        return;
+                        return true;
                     }
                 }
 
-                // Fallback: bounded depth search (max 4 levels) to avoid slow unbounded recursion
-                if (SearchDirectoryBounded(PluginsDir, SearchName, 4))
-                {
-                    PrivateDependencyModuleNames.Add(ModuleName);
-                    return;
-                }
+                // Fallback: bounded depth search (max 4 levels)
+                return SearchDirectoryBounded(PluginsDir, SearchName, 4);
             }
         }
         catch { /* Module not available - this is expected for optional modules */ }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Adds an optional module conditionally - only if it exists.
+    /// Used for optional AI modules that may not be available in all UE versions (StateTree, SmartObjects, MassEntity).
+    /// </summary>
+    /// <param name="Target">Build target settings.</param>
+    /// <param name="EngineDir">Absolute path to the engine root directory.</param>
+    /// <param name="ModuleName">The module name to add to dependencies if found.</param>
+    /// <param name="SearchName">The directory name to search for in engine/plugin paths.</param>
+    private void TryAddConditionalModule(ReadOnlyTargetRules Target, string EngineDir, string ModuleName, string SearchName)
+    {
+        if (FindOptionalModule(EngineDir, SearchName))
+        {
+            PrivateDependencyModuleNames.Add(ModuleName);
+        }
+    }
+
+    /// <summary>
+    /// Adds an optional module as a dependency with Windows delay-load support.
+    /// 
+    /// NOTE: Delay-load only works for function imports. Modules that export DATA symbols
+    /// (variables, constants like `FrontendInvalidID`) cannot be delay-loaded and will fail
+    /// with LNK1194. For those modules, use AddOptionalConditionalModule() instead.
+    /// </summary>
+    private bool AddOptionalDynamicModule(ReadOnlyTargetRules Target, string EngineDir, string ModuleName, string SearchName)
+    {
+        if (FindOptionalModule(EngineDir, SearchName))
+        {
+            // Add to PrivateDependencyModuleNames - this is REQUIRED for linking
+            PrivateDependencyModuleNames.Add(ModuleName);
+
+            // On Windows, add delay-load flag so the DLL loads even if optional plugins are missing
+            // Note: This only works for function imports, not data symbols
+            if (Target.Platform == UnrealTargetPlatform.Win64)
+            {
+                PublicDelayLoadDLLs.Add(string.Format("UnrealEditor-{0}.dll", ModuleName));
+            }
+
+            Console.WriteLine(string.Format("McpAutomationBridge: Added optional module '{0}' with delay-load", ModuleName));
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Adds an optional module conditionally - only if it exists.
+    /// Use this for modules that export DATA symbols (cannot use delay-load).
+    /// The plugin will only work in projects where these modules are enabled.
+    /// </summary>
+    private bool AddOptionalConditionalModule(ReadOnlyTargetRules Target, string EngineDir, string ModuleName, string SearchName)
+    {
+        if (FindOptionalModule(EngineDir, SearchName))
+        {
+            // Add as hard dependency - no delay-load
+            PrivateDependencyModuleNames.Add(ModuleName);
+            Console.WriteLine(string.Format("McpAutomationBridge: Added optional module '{0}' (conditional)", ModuleName));
+            return true;
+        }
+
+        return false;
     }
 }

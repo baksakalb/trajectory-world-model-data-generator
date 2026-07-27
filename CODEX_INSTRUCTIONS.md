@@ -1,18 +1,28 @@
 # Codex MCP Instructions (he_grenade_game)
 
-Last updated: 2026-02-12
+Last updated: 2026-05-25
 
 ## Purpose
 - Primary Codex quick-reference for this project.
+- Codex is the only maintained agent workflow for this project. Do not add or rely on other-agent-specific instructions.
 - Single deep reference for tool payloads and responses: `MCP_TOOL_CALL_MATRIX.json`.
 - Historical deep-audit narrative is intentionally removed to avoid duplicate maintenance.
 
+## Current MCP Stack
+- Implementation: `ChiR24/Unreal_mcp`.
+- Local Codex server checkout: `C:\Users\baris\.codex\tools\Unreal_mcp`.
+- MCP server package: `unreal-engine-mcp-server@0.5.21`.
+- Project bridge plugin: `McpAutomationBridge 0.1.4`.
+- Engine: Unreal Engine `5.7.2`.
+- Bridge port: Unreal listens on `0.0.0.0:8091`; Codex connects to `127.0.0.1:8091`.
+- Last verified live on 2026-05-25: rebuilt bridge DLL, `36/36` tools enabled, live calls passed for `manage_lighting:list_light_types`, `control_actor:list`, and `manage_asset:list /Game`.
+
 ## Mandatory Read-Time Health Check
-- Run this exact sequence immediately after reading this file and before any other Unreal MCP work.
-1. `control_editor` with `action=console_command`, `command=stat none`
-2. read `ue://health` and confirm connected
-3. read `ue://automation-bridge` and confirm connected
-4. `manage_level` with `action=list_levels`
+- Run this sequence immediately after reading this file and before any other Unreal MCP work.
+1. Confirm Unreal is open on `he_grenade_game - Unreal Editor` and port `8091` is listening.
+2. Run `node check.mjs --json` from the project root and confirm all checks pass.
+3. Warm up Codex MCP with a read-only call such as `manage_lighting` with `action=list_light_types` or `control_actor` with `action=list`.
+4. If `manage_tools` / `manage_pipeline` are exposed in the Codex tool surface, confirm `manage_tools:get_status` reports `36/36` tools enabled and set categories to all with `manage_pipeline:set_categories`.
 - If any step fails, follow `## Health and Dead-Server Behavior`, then repeat from step 1.
 
 ## Canonical Codex Setup
@@ -76,6 +86,18 @@ bRequireCapabilityToken=False
 6. Wait for bridge readiness (port `8091`) and run the Mandatory Read-Time Health Check sequence.
 - If a direct build fails due live coding lock, use the full close/build/reopen flow above.
 
+## MCP Bridge Update Workflow
+- Use this focused workflow when updating only `Plugins/McpAutomationBridge` from `C:\Users\baris\.codex\tools\Unreal_mcp\plugins\McpAutomationBridge`.
+1. Close Unreal Editor and verify no `UnrealEditor`, `UnrealBuildTool`, `dotnet`, `cl`, or `link` build processes are running.
+2. Sync bridge `Source`, `Config`, and top-level plugin metadata from the local `Unreal_mcp` checkout into `Plugins\McpAutomationBridge`.
+3. Remove only `Plugins\McpAutomationBridge\Binaries` and `Plugins\McpAutomationBridge\Intermediate`, after verifying the resolved path is inside this project's `Plugins\McpAutomationBridge` folder.
+4. Build only the bridge module:
+   `C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat he_grenade_gameEditor Win64 Development "C:\Users\baris\Documents\Unreal Projects\he_grenade_game\he_grenade_game.uproject" -Module=McpAutomationBridge -NoHotReload -NoLiveCoding -WaitMutex`
+5. Wait for `Link [x64] UnrealEditor-McpAutomationBridge.dll` and `Result: Succeeded`.
+6. Reopen the project with the exact quoted `.uproject` command from `## Startup Sequence (Reliable)`.
+7. Verify the rebuilt DLL has a fresh timestamp, port `8091` is listening, `node check.mjs --json` passes, and live read-only MCP calls succeed.
+- This bridge-only build can still compile 70+ actions and take around 10 minutes. That is expected if the output shows `Compile [x64] McpAutomationBridge...`.
+
 ## Health and Dead-Server Behavior
 - `ue://health` may show disconnected immediately after startup; this can be normal before first bridge call.
 - If tool calls fail with transport errors:
@@ -85,6 +107,7 @@ bRequireCapabilityToken=False
 4. Re-check `ue://health` and `ue://automation-bridge`.
 5. Re-run `manage_level:list_levels`.
 - If still down, clear stale `node/npx` Unreal MCP processes, then refresh Codex again.
+- If the in-chat `mcp__unreal_engine__` namespace says `Transport closed` after killing/rebuilding the MCP server, the server and Unreal bridge may still be healthy. Restart or reload the Codex session so the MCP client reconnects to the rebuilt server.
 
 ## Basic Tool Calling Pattern
 - All calls require `action`.
@@ -106,7 +129,7 @@ bRequireCapabilityToken=False
 ## Tool Surface Snapshot (High Level)
 - Use this list first when choosing the tool family:
 `animation_physics, build_environment, control_actor, control_editor, inspect, manage_ai, manage_asset, manage_audio, manage_behavior_tree, manage_blueprint, manage_character, manage_combat, manage_effect, manage_game_framework, manage_gas, manage_geometry, manage_input, manage_interaction, manage_inventory, manage_level, manage_level_structure, manage_lighting, manage_material_authoring, manage_navigation, manage_networking, manage_performance, manage_sequence, manage_sessions, manage_skeleton, manage_splines, manage_texture, manage_volumes, manage_widget_authoring, system_control`
-- Not currently exposed to Codex function surface: `manage_pipeline`.
+- Latest server also exposes dynamic management tools `manage_tools` and `manage_pipeline`. Some Codex sessions may need an MCP reconnect before those appear in the generated function surface.
 
 ## Quick Selector Hints
 - Mostly action-only baseline calls: `build_environment`, `control_actor`, `inspect`, `manage_game_framework`, `manage_level`, `manage_level_structure`, `manage_lighting`, `manage_navigation`, `manage_performance`, `manage_sequence`, `manage_sessions`, `manage_volumes`, `system_control`.
@@ -115,9 +138,9 @@ bRequireCapabilityToken=False
 - Create/author actions often need `name` plus `path` or `savePath` (for example `manage_behavior_tree`, `manage_input`).
 
 ## Current Known Limits (This Stack)
-- `manage_asset` query-style flows (`search_assets`, `find_by_tag`, `get_source_control_state`) currently misroute to sessions and fail with `Unknown manage_sessions action: asset_query`.
-- `manage_splines` actions currently misroute and fail with `Unknown manage_sessions action: <subAction>`.
-- `manage_level:get_summary` is stateful; it works after `manage_level:load` tracks that level.
+- Do not rely on old February 2026 misroute notes; after the 2026-05-25 update, core live probes succeeded through the consolidated tools path.
+- `manage_level:get_summary` may still be stateful; prefer `manage_level:list_levels` for health checks.
+- If a specific action fails, verify the exact `tool + action` payload against `MCP_TOOL_CALL_MATRIX.json`, then retry with a minimal read-only probe before assuming the capability is missing.
 
 ## Failure Triage Order
 1. Run the Mandatory Read-Time Health Check sequence.
@@ -128,10 +151,10 @@ bRequireCapabilityToken=False
 6. If capability is still unavailable, follow `ESCAPE_HATCH` (non-MCP Python fallback).
 
 ## Minimal Safe Probe Set
-- `control_editor` -> `console_command` (`stat none`)
-- `manage_level` -> `list_levels`
+- `manage_lighting` -> `list_light_types`
 - `control_actor` -> `list`
-- `system_control` -> `get_project_settings`
+- `manage_asset` -> `list` with `path=/Game`, `limit=5`
+- `manage_tools` -> `get_status` when exposed in the Codex tool surface
 
 ## Escape Hatch Reference
 - If required operations remain blocked after matrix-guided MCP retries, use the non-MCP fallback in `ESCAPE_HATCH`.
@@ -140,7 +163,7 @@ bRequireCapabilityToken=False
 
 ## End-of-File Enforcement
 - Before any scene-editing call, run this exact sequence in order:
-1. `control_editor` -> `console_command` (`stat none`)
-2. read `ue://health`
-3. read `ue://automation-bridge`
-4. `manage_level` -> `list_levels`
+1. `node check.mjs --json`
+2. `manage_lighting` -> `list_light_types`
+3. `control_actor` -> `list`
+4. `manage_asset` -> `list` with `path=/Game`, `limit=5`
