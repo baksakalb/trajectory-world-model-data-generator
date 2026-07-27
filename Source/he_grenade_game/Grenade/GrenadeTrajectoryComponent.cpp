@@ -7,6 +7,7 @@
 #include "GameFramework/Controller.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "GlobalRenderResources.h"
 #include "Grenade/GrenadeSim.h"
 #include "Grenade/GrenadeThrowerComponent.h"
 #include "Grenade/Breakables/BreakableTile.h"
@@ -14,6 +15,8 @@
 
 namespace
 {
+	constexpr TCHAR TrajectoryRendererBuildId[] = TEXT("single-ribbon-v3");
+
 	static TAutoConsoleVariable<int32> CVarGGTrajectoryEnabled(
 		TEXT("gg.Grenade.DebugTrajectory"),
 		1,
@@ -65,7 +68,7 @@ namespace
 		OutRenderPoints.Add(SimulationPoints[0]);
 
 		const float SafeMaxSegmentLengthCm = FMath::Max(1.0f, MaxSegmentLengthCm);
-		const int32 SafeMinSmoothSubsteps = FMath::Clamp(MinSmoothSubsteps, 1, 4);
+		const int32 SafeMinSmoothSubsteps = FMath::Clamp(MinSmoothSubsteps, 1, 8);
 
 		auto IsHardCorner = [&HardCornerFlags](int32 PointIndex)
 			{
@@ -120,6 +123,208 @@ namespace
 		}
 	}
 
+	void AddCanvasTriangle(
+		TArray<FCanvasUVTri>& Triangles,
+		const FVector2D& A,
+		const FVector2D& B,
+		const FVector2D& C,
+		const FLinearColor& ColorA,
+		const FLinearColor& ColorB,
+		const FLinearColor& ColorC)
+	{
+		FCanvasUVTri& Triangle = Triangles.Emplace_GetRef();
+		Triangle.V0_Pos = A;
+		Triangle.V1_Pos = B;
+		Triangle.V2_Pos = C;
+		Triangle.V0_UV = FVector2D::ZeroVector;
+		Triangle.V1_UV = FVector2D::ZeroVector;
+		Triangle.V2_UV = FVector2D::ZeroVector;
+		Triangle.V0_Color = ColorA;
+		Triangle.V1_Color = ColorB;
+		Triangle.V2_Color = ColorC;
+	}
+
+	void DrawContinuousScreenRibbon(
+		UCanvas* Canvas,
+		const TArray<FVector2D>& InputPoints,
+		float Thickness,
+		const FLinearColor& Color)
+	{
+		if (!Canvas || InputPoints.Num() < 2)
+		{
+			return;
+		}
+
+		TArray<FVector2D> Points;
+		Points.Reserve(InputPoints.Num());
+		for (const FVector2D& Point : InputPoints)
+		{
+			if (Points.IsEmpty() || FVector2D::Distance(Points.Last(), Point) >= 0.1f)
+			{
+				Points.Add(Point);
+			}
+		}
+
+		if (Points.Num() < 2)
+		{
+			return;
+		}
+
+		const float HalfWidth = FMath::Max(0.25f, Thickness * 0.5f);
+		const float FeatherWidth = 1.0f;
+		const FLinearColor TransparentColor(Color.R, Color.G, Color.B, 0.0f);
+
+		TArray<FVector2D> InnerLeft;
+		TArray<FVector2D> InnerRight;
+		TArray<FVector2D> OuterLeft;
+		TArray<FVector2D> OuterRight;
+		InnerLeft.SetNumUninitialized(Points.Num());
+		InnerRight.SetNumUninitialized(Points.Num());
+		OuterLeft.SetNumUninitialized(Points.Num());
+		OuterRight.SetNumUninitialized(Points.Num());
+
+		for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
+		{
+			const FVector2D PreviousDirection = PointIndex > 0
+				? (Points[PointIndex] - Points[PointIndex - 1]).GetSafeNormal()
+				: (Points[1] - Points[0]).GetSafeNormal();
+			const FVector2D NextDirection = PointIndex + 1 < Points.Num()
+				? (Points[PointIndex + 1] - Points[PointIndex]).GetSafeNormal()
+				: (Points.Last() - Points[Points.Num() - 2]).GetSafeNormal();
+
+			const FVector2D PreviousNormal(-PreviousDirection.Y, PreviousDirection.X);
+			const FVector2D NextNormal(-NextDirection.Y, NextDirection.X);
+			FVector2D JoinNormal = (PreviousNormal + NextNormal).GetSafeNormal();
+			if (JoinNormal.IsNearlyZero())
+			{
+				JoinNormal = NextNormal;
+			}
+
+			const float JoinDenominator = FMath::Max(
+				0.25f,
+				FMath::Abs(FVector2D::DotProduct(JoinNormal, NextNormal)));
+			const float InnerJoinLength = FMath::Min(HalfWidth / JoinDenominator, HalfWidth * 2.0f);
+			const float OuterHalfWidth = HalfWidth + FeatherWidth;
+			const float OuterJoinLength = FMath::Min(
+				OuterHalfWidth / JoinDenominator,
+				OuterHalfWidth * 2.0f);
+
+			InnerLeft[PointIndex] = Points[PointIndex] + (JoinNormal * InnerJoinLength);
+			InnerRight[PointIndex] = Points[PointIndex] - (JoinNormal * InnerJoinLength);
+			OuterLeft[PointIndex] = Points[PointIndex] + (JoinNormal * OuterJoinLength);
+			OuterRight[PointIndex] = Points[PointIndex] - (JoinNormal * OuterJoinLength);
+		}
+
+		TArray<FCanvasUVTri> Triangles;
+		Triangles.Reserve(((Points.Num() - 1) * 6) + 52);
+
+		for (int32 SegmentIndex = 0; SegmentIndex + 1 < Points.Num(); ++SegmentIndex)
+		{
+			const int32 NextIndex = SegmentIndex + 1;
+
+			// Solid center: every section shares its edge vertices with the next section.
+			AddCanvasTriangle(
+				Triangles,
+				InnerLeft[SegmentIndex],
+				InnerRight[SegmentIndex],
+				InnerLeft[NextIndex],
+				Color,
+				Color,
+				Color);
+			AddCanvasTriangle(
+				Triangles,
+				InnerRight[SegmentIndex],
+				InnerRight[NextIndex],
+				InnerLeft[NextIndex],
+				Color,
+				Color,
+				Color);
+
+			// One-pixel transparent fringe provides anti-aliased outer edges.
+			AddCanvasTriangle(
+				Triangles,
+				OuterLeft[SegmentIndex],
+				InnerLeft[SegmentIndex],
+				OuterLeft[NextIndex],
+				TransparentColor,
+				Color,
+				TransparentColor);
+			AddCanvasTriangle(
+				Triangles,
+				InnerLeft[SegmentIndex],
+				InnerLeft[NextIndex],
+				OuterLeft[NextIndex],
+				Color,
+				Color,
+				TransparentColor);
+			AddCanvasTriangle(
+				Triangles,
+				InnerRight[SegmentIndex],
+				OuterRight[SegmentIndex],
+				InnerRight[NextIndex],
+				Color,
+				TransparentColor,
+				Color);
+			AddCanvasTriangle(
+				Triangles,
+				OuterRight[SegmentIndex],
+				OuterRight[NextIndex],
+				InnerRight[NextIndex],
+				TransparentColor,
+				TransparentColor,
+				Color);
+		}
+
+		constexpr int32 CapSides = 16;
+		auto AddRoundCap = [&](const FVector2D& Center)
+			{
+				FVector2D PreviousInner = Center + FVector2D(HalfWidth, 0.0f);
+				FVector2D PreviousOuter = Center + FVector2D(HalfWidth + FeatherWidth, 0.0f);
+				for (int32 SideIndex = 1; SideIndex <= CapSides; ++SideIndex)
+				{
+					const float Angle = (2.0f * PI * SideIndex) / CapSides;
+					const FVector2D Direction(FMath::Cos(Angle), FMath::Sin(Angle));
+					const FVector2D NextInner = Center + (Direction * HalfWidth);
+					const FVector2D NextOuter = Center + (Direction * (HalfWidth + FeatherWidth));
+
+					AddCanvasTriangle(
+						Triangles,
+						Center,
+						PreviousInner,
+						NextInner,
+						Color,
+						Color,
+						Color);
+					AddCanvasTriangle(
+						Triangles,
+						PreviousInner,
+						PreviousOuter,
+						NextInner,
+						Color,
+						TransparentColor,
+						Color);
+					AddCanvasTriangle(
+						Triangles,
+						PreviousOuter,
+						NextOuter,
+						NextInner,
+						TransparentColor,
+						TransparentColor,
+						Color);
+
+					PreviousInner = NextInner;
+					PreviousOuter = NextOuter;
+				}
+			};
+
+		AddRoundCap(Points[0]);
+		AddRoundCap(Points.Last());
+
+		FCanvasTriangleItem RibbonItem(Triangles, GWhiteTexture);
+		RibbonItem.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(RibbonItem);
+	}
+
 }
 
 UGrenadeTrajectoryComponent::UGrenadeTrajectoryComponent()
@@ -131,6 +336,14 @@ UGrenadeTrajectoryComponent::UGrenadeTrajectoryComponent()
 void UGrenadeTrajectoryComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	UE_LOG(
+		LogTemp,
+		Display,
+		TEXT("Grenade trajectory renderer active: %s (compiled %s %s)"),
+		TrajectoryRendererBuildId,
+		TEXT(__DATE__),
+		TEXT(__TIME__));
 
 	if (AActor* OwnerActor = GetOwner())
 	{
@@ -188,30 +401,38 @@ void UGrenadeTrajectoryComponent::DrawTrajectoryOverlay(
 			continue;
 		}
 
-		FVector2D PreviousScreenPoint = FVector2D::ZeroVector;
-		bool bPreviousProjected = PlayerController->ProjectWorldLocationToScreen(
-			Run[0],
-			PreviousScreenPoint,
-			true);
-
-		for (int32 PointIndex = 1; PointIndex < Run.Num(); ++PointIndex)
+		TArray<FVector2D> ProjectedRun;
+		ProjectedRun.Reserve(Run.Num());
+		for (const FVector& WorldPoint : Run)
 		{
 			FVector2D ScreenPoint = FVector2D::ZeroVector;
 			const bool bProjected = PlayerController->ProjectWorldLocationToScreen(
-				Run[PointIndex],
+				WorldPoint,
 				ScreenPoint,
 				true);
 
-			if (bPreviousProjected && bProjected)
+			if (bProjected)
 			{
-				FCanvasLineItem LineItem(PreviousScreenPoint, ScreenPoint);
-				LineItem.SetColor(CachedTrajectoryColor);
-				LineItem.LineThickness = SafeLineThickness;
-				Canvas->DrawItem(LineItem);
+				ProjectedRun.Add(ScreenPoint);
 			}
+			else if (ProjectedRun.Num() >= 2)
+			{
+				DrawContinuousScreenRibbon(
+					Canvas,
+					ProjectedRun,
+					SafeLineThickness,
+					CachedTrajectoryColor);
+				ProjectedRun.Reset();
+			}
+		}
 
-			PreviousScreenPoint = ScreenPoint;
-			bPreviousProjected = bProjected;
+		if (ProjectedRun.Num() >= 2)
+		{
+			DrawContinuousScreenRibbon(
+				Canvas,
+				ProjectedRun,
+				SafeLineThickness,
+				CachedTrajectoryColor);
 		}
 	}
 
@@ -534,8 +755,8 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	BuildSmoothedRenderPath(
 		TrajectoryPoints,
 		HardCornerFlags,
-		MaxRenderSegmentLengthCm,
-		MinRenderSubstepsPerSimulationStep,
+		FMath::Min(MaxRenderSegmentLengthCm, 8.0f),
+		FMath::Max(MinRenderSubstepsPerSimulationStep, 4),
 		RenderPoints);
 
 	CachedTrajectoryColor = Thrower->IsStateGreen() ? AvailableColor : CooldownColor;
