@@ -6,7 +6,11 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Grenade/GrenadeActor.h"
+#include "GrenadeGameState.h"
+#include "GrenadePlayerState.h"
 #include "he_grenade_gameCharacter.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 namespace
 {
@@ -71,11 +75,12 @@ void UGrenadeThrowerComponent::BeginPlay()
 
 	SetThrowState(EGrenadeThrowState::Ready);
 
-	if (CVarGGGrenadeNetworkSelfTest.GetValueOnGameThread() != 0)
+	if (CVarGGGrenadeNetworkSelfTest.GetValueOnGameThread() != 0
+		|| FParse::Param(FCommandLine::Get(), TEXT("GGNetworkSelfTest")))
 	{
 		if (const APawn* OwnerPawn = Cast<APawn>(GetOwner()); OwnerPawn && OwnerPawn->IsLocallyControlled())
 		{
-			const float DelaySeconds = GetOwner() && GetOwner()->HasAuthority() ? 2.0f : 2.5f;
+			const float DelaySeconds = GetOwner() && GetOwner()->HasAuthority() ? 7.0f : 7.1f;
 			GetWorld()->GetTimerManager().SetTimer(
 				NetworkSelfTestTimerHandle,
 				this,
@@ -99,13 +104,20 @@ void UGrenadeThrowerComponent::BeginPlay()
 
 void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	Super::EndPlay(EndPlayReason);
-
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(CooldownTimerHandle);
 		World->GetTimerManager().ClearTimer(NetworkSelfTestTimerHandle);
 	}
+
+	for (const TPair<uint32, TWeakObjectPtr<AGrenadeActor>>& Pair : PredictedGrenades)
+	{
+		if (AGrenadeActor* PredictedGrenade = Pair.Value.Get())
+		{
+			PredictedGrenade->CancelPredictedVisual();
+		}
+	}
+	PredictedGrenades.Reset();
 
 	bThrowInputHeld = false;
 	bBufferedThrowPress = false;
@@ -116,6 +128,7 @@ void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	LastHeldDurationSeconds = 0.0f;
 	SetComponentTickEnabled(false);
+	Super::EndPlay(EndPlayReason);
 }
 
 void UGrenadeThrowerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -145,6 +158,11 @@ void UGrenadeThrowerComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
 void UGrenadeThrowerComponent::OnThrowPressed()
 {
+	if (!IsGameplayReady())
+	{
+		return;
+	}
+
 	if (bThrowInputHeld)
 	{
 		return;
@@ -346,9 +364,24 @@ bool UGrenadeThrowerComponent::BuildCurrentLaunchParams(FGrenadeLaunchParams& Ou
 	return true;
 }
 
+bool UGrenadeThrowerComponent::IsGameplayReady() const
+{
+	const UWorld* World = GetWorld();
+	const AGrenadeGameState* GameState =
+		World ? World->GetGameState<AGrenadeGameState>() : nullptr;
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	const AGrenadePlayerState* PlayerState =
+		OwnerPawn ? OwnerPawn->GetPlayerState<AGrenadePlayerState>() : nullptr;
+	return GameState
+		&& GameState->HasCompleteArenaState()
+		&& GameState->GetGrenadeMatchPhase() == EGGMatchPhase::InProgress
+		&& PlayerState
+		&& PlayerState->IsArenaReady();
+}
+
 void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* LaunchParamsOverride)
 {
-	if (ThrowState != EGrenadeThrowState::Ready || !GetWorld())
+	if (ThrowState != EGrenadeThrowState::Ready || !GetWorld() || !IsGameplayReady())
 	{
 		return;
 	}
@@ -397,39 +430,307 @@ void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* Launc
 			VelocityDelta);
 	}
 
+	FGrenadeThrowRequest Request;
+	if (!BuildThrowRequest(LaunchParams, Request))
+	{
+		return;
+	}
+
 	if (GetOwner() && GetOwner()->HasAuthority())
 	{
-		SpawnGrenadeAuthoritative(LaunchParams);
+		ProcessAuthoritativeThrow(Request);
 	}
 	else
 	{
-		ServerThrowGrenade(LaunchParams);
+		SpawnPredictedGrenade(Request.ThrowId, LaunchParams);
+		ServerThrowGrenade(Request);
 	}
 
 	EnterCooldown();
 }
 
-void UGrenadeThrowerComponent::ServerThrowGrenade_Implementation(FGrenadeLaunchParams LaunchParams)
+bool UGrenadeThrowerComponent::BuildThrowRequest(
+	const FGrenadeLaunchParams& LaunchParams,
+	FGrenadeThrowRequest& OutRequest)
 {
-	if (ThrowState != EGrenadeThrowState::Ready || !GetOwner() || !GetOwner()->HasAuthority())
+	const ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
+	const UWorld* World = GetWorld();
+	const AGrenadeGameState* GameState = World ? World->GetGameState<AGrenadeGameState>() : nullptr;
+	if (!OwnerCharacter || !World || !GameState)
+	{
+		return false;
+	}
+
+	const FVector InheritedVelocity =
+		OwnerCharacter->GetVelocity() * FMath::Max(0.0f, ThrowInheritVelocityFactor);
+	const FVector AimDirection = (LaunchParams.InitialVelocity - InheritedVelocity).GetSafeNormal();
+	if (AimDirection.IsNearlyZero() || AimDirection.ContainsNaN())
+	{
+		return false;
+	}
+
+	FVector ViewLocation = FVector::ZeroVector;
+	FRotator ViewRotation = FRotator::ZeroRotator;
+	if (const Ahe_grenade_gameCharacter* GGCharacter = Cast<Ahe_grenade_gameCharacter>(OwnerCharacter))
+	{
+		if (const UCameraComponent* FirstPersonCamera = GGCharacter->GetFirstPersonCameraComponent())
+		{
+			ViewLocation = FirstPersonCamera->GetComponentLocation();
+			ViewRotation = FirstPersonCamera->GetComponentRotation();
+		}
+		else
+		{
+			OwnerCharacter->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+		}
+	}
+	else
+	{
+		OwnerCharacter->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+	}
+
+	const float HeldDuration = FMath::Clamp(GetHeldDurationSeconds(), 0.0f, 65.535f);
+	const float ChargeAlpha = FMath::Clamp(
+		HeldDuration / FMath::Max(0.01f, ChargeDurationSeconds),
+		0.0f,
+		1.0f);
+
+	OutRequest.ThrowId = NextLocalThrowId++;
+	if (NextLocalThrowId == 0)
+	{
+		NextLocalThrowId = 1;
+	}
+	OutRequest.AimDirection = AimDirection;
+	OutRequest.ViewRotation = ViewRotation.GetNormalized();
+	OutRequest.ChargeQuantized = static_cast<uint16>(FMath::RoundToInt(ChargeAlpha * 65535.0f));
+	OutRequest.HeldDurationMilliseconds =
+		static_cast<uint16>(FMath::RoundToInt(HeldDuration * 1000.0f));
+	OutRequest.FuseMilliseconds = static_cast<uint16>(FMath::Clamp(
+		FMath::RoundToInt(LaunchParams.FuseSeconds * 1000.0f),
+		1,
+		65535));
+	OutRequest.ClientReleaseServerWorldTimeSeconds = GameState->GetServerWorldTimeSeconds();
+	OutRequest.ArenaLayoutRevision = GameState->GetArenaLayoutRevision();
+	return true;
+}
+
+bool UGrenadeThrowerComponent::ValidateAndBuildServerLaunch(
+	const FGrenadeThrowRequest& Request,
+	FGrenadeLaunchParams& OutLaunchParams,
+	FString& OutRejectionReason) const
+{
+	const ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
+	const UWorld* World = GetWorld();
+	const AGrenadeGameState* GameState = World ? World->GetGameState<AGrenadeGameState>() : nullptr;
+	if (!OwnerCharacter
+		|| !OwnerCharacter->HasAuthority()
+		|| !GameState
+		|| !GameState->HasCompleteArenaState()
+		|| GameState->GetGrenadeMatchPhase() != EGGMatchPhase::InProgress)
+	{
+		OutRejectionReason = TEXT("gameplay-not-ready");
+		return false;
+	}
+
+	if (Request.ThrowId == 0 || Request.ThrowId <= LastAcceptedServerThrowId)
+	{
+		OutRejectionReason = TEXT("non-monotonic-id");
+		return false;
+	}
+	if (Request.ArenaLayoutRevision != GameState->GetArenaLayoutRevision())
+	{
+		OutRejectionReason = TEXT("layout-revision");
+		return false;
+	}
+
+	const float ServerNow = GameState->GetServerWorldTimeSeconds();
+	const float TimestampAge = ServerNow - Request.ClientReleaseServerWorldTimeSeconds;
+	if (!FMath::IsFinite(Request.ClientReleaseServerWorldTimeSeconds)
+		|| TimestampAge < -0.25f
+		|| TimestampAge > 1.5f)
+	{
+		OutRejectionReason = TEXT("timestamp");
+		return false;
+	}
+	if (World->GetTimeSeconds() + KINDA_SMALL_NUMBER < NextServerThrowAllowedWorldTimeSeconds)
+	{
+		OutRejectionReason = TEXT("cooldown");
+		return false;
+	}
+
+	const FVector AimDirection = FVector(Request.AimDirection);
+	const float AimLength = AimDirection.Size();
+	if (AimDirection.ContainsNaN()
+		|| !FMath::IsFinite(AimLength)
+		|| AimLength < 0.95f
+		|| AimLength > 1.05f
+		|| Request.ViewRotation.ContainsNaN())
+	{
+		OutRejectionReason = TEXT("aim-data");
+		return false;
+	}
+
+	const FVector ViewForward = Request.ViewRotation.Vector().GetSafeNormal();
+	const float ViewAimDot = FMath::Clamp(
+		FVector::DotProduct(ViewForward, AimDirection.GetSafeNormal()),
+		-1.0f,
+		1.0f);
+	if (FMath::RadiansToDegrees(FMath::Acos(ViewAimDot)) > 85.0f)
+	{
+		OutRejectionReason = TEXT("aim-cone");
+		return false;
+	}
+
+	const float HeldDuration =
+		static_cast<float>(Request.HeldDurationMilliseconds) / 1000.0f;
+	const float RequestedCharge =
+		static_cast<float>(Request.ChargeQuantized) / 65535.0f;
+	const float ExpectedCharge = FMath::Clamp(
+		HeldDuration / FMath::Max(0.01f, ChargeDurationSeconds),
+		0.0f,
+		1.0f);
+	const float RequestedFuse =
+		static_cast<float>(Request.FuseMilliseconds) / 1000.0f;
+	const float ExpectedFuse = FMath::Max(0.0f, FuseSeconds - HeldDuration);
+	if (HeldDuration < 0.0f
+		|| HeldDuration > FuseSeconds + 0.25f
+		|| FMath::Abs(RequestedCharge - ExpectedCharge) > 0.03f
+		|| FMath::Abs(RequestedFuse - ExpectedFuse) > 0.075f
+		|| RequestedFuse <= KINDA_SMALL_NUMBER)
+	{
+		OutRejectionReason = TEXT("charge-or-fuse");
+		return false;
+	}
+
+	FVector ViewLocation = FVector::ZeroVector;
+	FRotator ServerViewRotation = FRotator::ZeroRotator;
+	OwnerCharacter->GetActorEyesViewPoint(ViewLocation, ServerViewRotation);
+	const float ControlRotationDelta = FMath::Abs(
+		FRotator::NormalizeAxis(Request.ViewRotation.Yaw - ServerViewRotation.Yaw));
+	if (ControlRotationDelta > 100.0f)
+	{
+		OutRejectionReason = TEXT("view-rotation");
+		return false;
+	}
+
+	const bool bIsCrouched =
+		OwnerCharacter->GetCharacterMovement()
+		&& OwnerCharacter->GetCharacterMovement()->IsCrouching();
+	const bool bApplyCrouchAdjustment = bEnableCrouchThrowAdjustment && bIsCrouched;
+	FRotator SpawnReferenceRotation = Request.ViewRotation.GetNormalized();
+	if (bApplyCrouchAdjustment)
+	{
+		SpawnReferenceRotation.Pitch += CrouchThrowPitchOffsetDegrees;
+	}
+
+	const FRotationMatrix SpawnBasis(SpawnReferenceRotation);
+	OutLaunchParams.SpawnLocation = ViewLocation
+		+ SpawnBasis.GetScaledAxis(EAxis::X) * ThrowSpawnOffset.X
+		+ SpawnBasis.GetScaledAxis(EAxis::Y) * ThrowSpawnOffset.Y
+		+ SpawnBasis.GetScaledAxis(EAxis::Z) * ThrowSpawnOffset.Z;
+	if (bApplyCrouchAdjustment)
+	{
+		OutLaunchParams.SpawnLocation.Z -= FMath::Max(0.0f, CrouchThrowSpawnDropCm);
+	}
+
+	const float ThrowSpeed = FMath::Lerp(
+		MinThrowSpeedCmPerSec,
+		MaxThrowSpeedCmPerSec,
+		ExpectedCharge);
+	OutLaunchParams.InitialVelocity =
+		AimDirection.GetSafeNormal() * ThrowSpeed
+		+ OwnerCharacter->GetVelocity() * FMath::Max(0.0f, ThrowInheritVelocityFactor);
+	OutLaunchParams.FuseSeconds = RequestedFuse;
+	OutLaunchParams.bCanThrowNow = true;
+
+	constexpr float MaxAllowedSpawnDistanceCm = 250.0f;
+	const float MaxAllowedSpeed =
+		MaxThrowSpeedCmPerSec
+		+ OwnerCharacter->GetVelocity().Size() * FMath::Max(0.0f, ThrowInheritVelocityFactor)
+		+ 100.0f;
+	if (FVector::DistSquared(OutLaunchParams.SpawnLocation, OwnerCharacter->GetActorLocation())
+			> FMath::Square(MaxAllowedSpawnDistanceCm)
+		|| OutLaunchParams.InitialVelocity.SizeSquared() > FMath::Square(MaxAllowedSpeed))
+	{
+		OutRejectionReason = TEXT("spawn-or-velocity-bounds");
+		return false;
+	}
+
+	return true;
+}
+
+void UGrenadeThrowerComponent::ProcessAuthoritativeThrow(const FGrenadeThrowRequest& Request)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{
 		return;
 	}
 
-	FGrenadeLaunchParams SafeLaunchParams;
-	if (!SanitizeClientLaunchParams(LaunchParams, SafeLaunchParams))
+	FGrenadeLaunchParams LaunchParams;
+	FString RejectionReason;
+	if (!ValidateAndBuildServerLaunch(Request, LaunchParams, RejectionReason))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Rejected invalid grenade launch request from %s."), *GetNameSafe(GetOwner()));
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("GRENADE_THROW_REJECT Owner=%s ThrowId=%u Reason=%s"),
+			*GetNameSafe(GetOwner()),
+			Request.ThrowId,
+			*RejectionReason);
+		if (Cast<APawn>(GetOwner()) && !CastChecked<APawn>(GetOwner())->IsLocallyControlled())
+		{
+			ClientRejectGrenadeThrow(Request.ThrowId);
+		}
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Server accepted client grenade request from %s."), *GetNameSafe(GetOwner()));
-	SpawnGrenadeAuthoritative(SafeLaunchParams);
+	LastAcceptedServerThrowId = Request.ThrowId;
+	NextServerThrowAllowedWorldTimeSeconds =
+		GetWorld()->GetTimeSeconds() + FMath::Max(0.0f, ReloadCooldownSeconds);
+	SpawnGrenadeAuthoritative(Request.ThrowId, LaunchParams);
 	EnterCooldown();
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("GRENADE_THROW_ACCEPT Owner=%s ThrowId=%u LayoutRevision=%d"),
+		*GetNameSafe(GetOwner()),
+		Request.ThrowId,
+		Request.ArenaLayoutRevision);
+}
+
+void UGrenadeThrowerComponent::ServerThrowGrenade_Implementation(FGrenadeThrowRequest Request)
+{
+	ProcessAuthoritativeThrow(Request);
+}
+
+void UGrenadeThrowerComponent::ClientRejectGrenadeThrow_Implementation(uint32 ThrowId)
+{
+	if (TWeakObjectPtr<AGrenadeActor>* PredictedPtr = PredictedGrenades.Find(ThrowId))
+	{
+		if (AGrenadeActor* PredictedGrenade = PredictedPtr->Get())
+		{
+			PredictedGrenade->CancelPredictedVisual();
+		}
+		PredictedGrenades.Remove(ThrowId);
+	}
+	UE_LOG(LogTemp, Warning, TEXT("GRENADE_PREDICTION_REJECT ThrowId=%u"), ThrowId);
 }
 
 void UGrenadeThrowerComponent::RunNetworkSelfTestThrow()
 {
+	if (!IsGameplayReady())
+	{
+		if (GetWorld())
+		{
+			GetWorld()->GetTimerManager().SetTimer(
+				NetworkSelfTestTimerHandle,
+				this,
+				&UGrenadeThrowerComponent::RunNetworkSelfTestThrow,
+				0.5f,
+				false);
+		}
+		return;
+	}
+
 	FGrenadeLaunchParams LaunchParams;
 	if (ThrowState == EGrenadeThrowState::Ready && BuildCurrentLaunchParams(LaunchParams))
 	{
@@ -443,9 +744,14 @@ void UGrenadeThrowerComponent::RunNetworkSelfTestThrow()
 	}
 }
 
-void UGrenadeThrowerComponent::SpawnGrenadeAuthoritative(const FGrenadeLaunchParams& LaunchParams)
+void UGrenadeThrowerComponent::SpawnGrenadeAuthoritative(
+	uint32 ThrowId,
+	const FGrenadeLaunchParams& LaunchParams)
 {
-	if (!GetWorld() || !GetOwner() || !GetOwner()->HasAuthority())
+	if (!GetWorld()
+		|| GetWorld()->GetNetMode() == NM_Client
+		|| !GetOwner()
+		|| !GetOwner()->HasAuthority())
 	{
 		return;
 	}
@@ -466,7 +772,8 @@ void UGrenadeThrowerComponent::SpawnGrenadeAuthoritative(const FGrenadeLaunchPar
 		// authoritative actor's replication settings at runtime as well.
 		Grenade->SetReplicates(true);
 		Grenade->SetReplicateMovement(true);
-		Grenade->InitializeGrenade(
+		Grenade->InitializeAuthoritativeGrenade(
+			ThrowId,
 			LaunchParams.SpawnLocation,
 			LaunchParams.InitialVelocity,
 			LaunchParams.FuseSeconds,
@@ -476,7 +783,8 @@ void UGrenadeThrowerComponent::SpawnGrenadeAuthoritative(const FGrenadeLaunchPar
 		UE_LOG(
 			LogTemp,
 			Log,
-			TEXT("Authoritative grenade spawned for %s at (%.1f, %.1f, %.1f)."),
+			TEXT("Authoritative grenade ThrowId=%u spawned for %s at (%.1f, %.1f, %.1f)."),
+			ThrowId,
 			*GetNameSafe(GetOwner()),
 			LaunchParams.SpawnLocation.X,
 			LaunchParams.SpawnLocation.Y,
@@ -484,39 +792,56 @@ void UGrenadeThrowerComponent::SpawnGrenadeAuthoritative(const FGrenadeLaunchPar
 	}
 }
 
-bool UGrenadeThrowerComponent::SanitizeClientLaunchParams(
-	const FGrenadeLaunchParams& ClientLaunchParams,
-	FGrenadeLaunchParams& OutLaunchParams) const
+void UGrenadeThrowerComponent::SpawnPredictedGrenade(
+	uint32 ThrowId,
+	const FGrenadeLaunchParams& LaunchParams)
 {
-	const AActor* OwnerActor = GetOwner();
-	if (!OwnerActor
-		|| ClientLaunchParams.SpawnLocation.ContainsNaN()
-		|| ClientLaunchParams.InitialVelocity.ContainsNaN()
-		|| !FMath::IsFinite(ClientLaunchParams.FuseSeconds))
+	if (!GetWorld() || !GetOwner() || GetOwner()->HasAuthority())
 	{
-		return false;
+		return;
 	}
 
-	constexpr float MaxAllowedSpawnDistanceCm = 250.0f;
-	if (FVector::DistSquared(ClientLaunchParams.SpawnLocation, OwnerActor->GetActorLocation())
-		> FMath::Square(MaxAllowedSpawnDistanceCm))
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = GetOwner();
+	SpawnParams.Instigator = Cast<APawn>(GetOwner());
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	UClass* SpawnClass = GrenadeClass ? GrenadeClass.Get() : AGrenadeActor::StaticClass();
+	if (AGrenadeActor* PredictedGrenade = GetWorld()->SpawnActor<AGrenadeActor>(
+		SpawnClass,
+		LaunchParams.SpawnLocation,
+		FRotator::ZeroRotator,
+		SpawnParams))
 	{
-		return false;
+		PredictedGrenade->InitializePredictedVisual(
+			ThrowId,
+			LaunchParams.SpawnLocation,
+			LaunchParams.InitialVelocity,
+			LaunchParams.FuseSeconds,
+			SimulationConfig,
+			GetOwner());
+		PredictedGrenades.Add(ThrowId, PredictedGrenade);
+		UE_LOG(LogTemp, Display, TEXT("GRENADE_PREDICTION_SPAWN ThrowId=%u"), ThrowId);
+	}
+}
+
+void UGrenadeThrowerComponent::ReconcilePredictedGrenade(
+	uint32 ThrowId,
+	AGrenadeActor* AuthoritativeGrenade)
+{
+	if (!AuthoritativeGrenade)
+	{
+		return;
 	}
 
-	const float OwnerSpeedContribution = OwnerActor->GetVelocity().Size() * FMath::Max(0.0f, ThrowInheritVelocityFactor);
-	const float MaxAllowedSpeed = FMath::Max(MinThrowSpeedCmPerSec, MaxThrowSpeedCmPerSec)
-		+ OwnerSpeedContribution
-		+ 100.0f;
-	if (ClientLaunchParams.InitialVelocity.SizeSquared() > FMath::Square(MaxAllowedSpeed))
+	if (TWeakObjectPtr<AGrenadeActor>* PredictedPtr = PredictedGrenades.Find(ThrowId))
 	{
-		return false;
+		if (AGrenadeActor* PredictedGrenade = PredictedPtr->Get())
+		{
+			PredictedGrenade->BeginPredictionReconciliation(AuthoritativeGrenade);
+		}
+		PredictedGrenades.Remove(ThrowId);
 	}
-
-	OutLaunchParams = ClientLaunchParams;
-	OutLaunchParams.FuseSeconds = FMath::Clamp(ClientLaunchParams.FuseSeconds, 0.05f, FMath::Max(0.1f, FuseSeconds));
-	OutLaunchParams.bCanThrowNow = true;
-	return true;
 }
 
 void UGrenadeThrowerComponent::EnterCooldown()
@@ -592,11 +917,26 @@ void UGrenadeThrowerComponent::DetonateInHand()
 
 	if (GetOwner() && GetOwner()->HasAuthority())
 	{
+		FRotator ViewRotation = FRotator::ZeroRotator;
+		GetOwner()->GetActorEyesViewPoint(ExplosionOrigin, ViewRotation);
 		DetonateInHandAuthoritative(ExplosionOrigin);
 	}
 	else
 	{
-		ServerDetonateInHand(ExplosionOrigin);
+		const uint32 ActionId = NextLocalThrowId++;
+		if (NextLocalThrowId == 0)
+		{
+			NextLocalThrowId = 1;
+		}
+		const AGrenadeGameState* GameState =
+			World->GetGameState<AGrenadeGameState>();
+		ServerDetonateInHand(
+			ActionId,
+			static_cast<uint16>(FMath::Clamp(
+				FMath::RoundToInt(GetHeldDurationSeconds() * 1000.0f),
+				0,
+				65535)),
+			GameState ? GameState->GetServerWorldTimeSeconds() : 0.0f);
 	}
 
 	bDetonatedInHandThisHold = true;
@@ -611,20 +951,37 @@ void UGrenadeThrowerComponent::DetonateInHand()
 	EnterCooldown();
 }
 
-void UGrenadeThrowerComponent::ServerDetonateInHand_Implementation(FVector_NetQuantize ExplosionOrigin)
+void UGrenadeThrowerComponent::ServerDetonateInHand_Implementation(
+	uint32 ActionId,
+	uint16 HeldDurationMilliseconds,
+	float ClientServerWorldTimeSeconds)
 {
-	if (ThrowState != EGrenadeThrowState::Ready || !GetOwner() || !GetOwner()->HasAuthority())
+	const AGrenadeGameState* GameState =
+		GetWorld() ? GetWorld()->GetGameState<AGrenadeGameState>() : nullptr;
+	const float HeldDuration = static_cast<float>(HeldDurationMilliseconds) / 1000.0f;
+	const float TimestampAge = GameState
+		? GameState->GetServerWorldTimeSeconds() - ClientServerWorldTimeSeconds
+		: BIG_NUMBER;
+	if (ThrowState != EGrenadeThrowState::Ready
+		|| !GetOwner()
+		|| !GetOwner()->HasAuthority()
+		|| !IsGameplayReady()
+		|| ActionId == 0
+		|| ActionId <= LastAcceptedServerThrowId
+		|| HeldDuration < FuseSeconds - 0.075f
+		|| TimestampAge < -0.25f
+		|| TimestampAge > 1.5f
+		|| GetWorld()->GetTimeSeconds() + KINDA_SMALL_NUMBER < NextServerThrowAllowedWorldTimeSeconds)
 	{
 		return;
 	}
 
-	constexpr float MaxAllowedExplosionOffsetCm = 250.0f;
-	const FVector OwnerLocation = GetOwner()->GetActorLocation();
-	if (FVector::DistSquared(ExplosionOrigin, OwnerLocation) > FMath::Square(MaxAllowedExplosionOffsetCm))
-	{
-		ExplosionOrigin = OwnerLocation;
-	}
-
+	LastAcceptedServerThrowId = ActionId;
+	NextServerThrowAllowedWorldTimeSeconds =
+		GetWorld()->GetTimeSeconds() + FMath::Max(0.0f, ReloadCooldownSeconds);
+	FVector ExplosionOrigin = FVector::ZeroVector;
+	FRotator ViewRotation = FRotator::ZeroRotator;
+	GetOwner()->GetActorEyesViewPoint(ExplosionOrigin, ViewRotation);
 	DetonateInHandAuthoritative(ExplosionOrigin);
 	EnterCooldown();
 }

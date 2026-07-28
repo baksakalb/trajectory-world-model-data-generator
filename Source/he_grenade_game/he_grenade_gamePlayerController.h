@@ -24,11 +24,11 @@ public:
 	/** Constructor */
 	Ahe_grenade_gamePlayerController();
 
-	void ConfirmArenaLayout(int32 LayoutRevision, int64 LayoutChecksum);
+	void ConfirmArenaState(int32 LayoutRevision, int64 LayoutChecksum, int32 ArenaStateRevision);
 
 protected:
 	UFUNCTION(Server, Reliable)
-	void ServerConfirmArenaLayout(int32 LayoutRevision, int64 LayoutChecksum);
+	void ServerConfirmArenaState(int32 LayoutRevision, int64 LayoutChecksum, int32 ArenaStateRevision);
 
 	/** Input Mapping Contexts */
 	UPROPERTY(EditAnywhere, Category="Input|Input Mappings")

@@ -8,6 +8,7 @@
 #include "he_grenade_gameCameraManager.h"
 #include "Grenade/GrenadeHUD.h"
 #include "GrenadePlayerState.h"
+#include "he_grenade_gameGameMode.h"
 #include "Blueprint/UserWidget.h"
 #include "he_grenade_game.h"
 #include "Widgets/Input/SVirtualJoystick.h"
@@ -18,28 +19,30 @@ Ahe_grenade_gamePlayerController::Ahe_grenade_gamePlayerController()
 	PlayerCameraManagerClass = Ahe_grenade_gameCameraManager::StaticClass();
 }
 
-void Ahe_grenade_gamePlayerController::ConfirmArenaLayout(const int32 LayoutRevision, const int64 LayoutChecksum)
+void Ahe_grenade_gamePlayerController::ConfirmArenaState(
+	const int32 LayoutRevision,
+	const int64 LayoutChecksum,
+	const int32 ArenaStateRevision)
 {
 	if (IsLocalController())
 	{
-		ServerConfirmArenaLayout(LayoutRevision, LayoutChecksum);
+		ServerConfirmArenaState(LayoutRevision, LayoutChecksum, ArenaStateRevision);
 	}
 }
 
-void Ahe_grenade_gamePlayerController::ServerConfirmArenaLayout_Implementation(
+void Ahe_grenade_gamePlayerController::ServerConfirmArenaState_Implementation(
 	const int32 LayoutRevision,
-	const int64 LayoutChecksum)
+	const int64 LayoutChecksum,
+	const int32 ArenaStateRevision)
 {
-	if (AGrenadePlayerState* GrenadePlayerState = GetPlayerState<AGrenadePlayerState>())
+	if (Ahe_grenade_gameGameMode* GameMode =
+		GetWorld() ? GetWorld()->GetAuthGameMode<Ahe_grenade_gameGameMode>() : nullptr)
 	{
-		GrenadePlayerState->SetArenaReady(LayoutRevision, LayoutChecksum);
-		UE_LOG(
-			Loghe_grenade_game,
-			Log,
-			TEXT("Server accepted arena readiness from %s: revision %d checksum %lld."),
-			*GetNameSafe(this),
+		GameMode->HandleArenaStateReady(
+			this,
 			LayoutRevision,
-			LayoutChecksum);
+			LayoutChecksum,
+			ArenaStateRevision);
 	}
 }
 

@@ -22,11 +22,11 @@ struct FStateTreeLineOfSightToTargetConditionInstanceData
 	
 	/** Targeting character */
 	UPROPERTY(EditAnywhere, Category = "Context")
-	AShooterNPC* Character;
+	AShooterNPC* Character = nullptr;
 
 	/** Target to check line of sight for */
 	UPROPERTY(EditAnywhere, Category = "Condition")
-	AActor* Target;
+	AActor* Target = nullptr;
 
 	/** Max allowed line of sight cone angle, in degrees */
 	UPROPERTY(EditAnywhere, Category = "Condition")
@@ -40,7 +40,8 @@ struct FStateTreeLineOfSightToTargetConditionInstanceData
 	UPROPERTY(EditAnywhere, Category = "Condition")
 	bool bMustHaveLineOfSight = true;
 };
-STATETREE_POD_INSTANCEDATA(FStateTreeLineOfSightToTargetConditionInstanceData);
+UE_STATETREE_CONSTRUCTED_TRIVIALLY_COPIED_NO_DESTRUCTOR_INSTANCEDATA(
+	FStateTreeLineOfSightToTargetConditionInstanceData);
 
 /**
  *  StateTree condition to check if the character is grounded

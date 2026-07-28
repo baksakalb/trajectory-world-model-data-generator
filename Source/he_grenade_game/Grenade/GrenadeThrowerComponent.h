@@ -32,6 +32,37 @@ struct FGrenadeLaunchParams
 	bool bCanThrowNow = false;
 };
 
+/** Compact client intent. The server derives the authoritative spawn and velocity. */
+USTRUCT()
+struct FGrenadeThrowRequest
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	uint32 ThrowId = 0;
+
+	UPROPERTY()
+	FVector_NetQuantizeNormal AimDirection = FVector::ForwardVector;
+
+	UPROPERTY()
+	FRotator ViewRotation = FRotator::ZeroRotator;
+
+	UPROPERTY()
+	uint16 ChargeQuantized = 0;
+
+	UPROPERTY()
+	uint16 HeldDurationMilliseconds = 0;
+
+	UPROPERTY()
+	uint16 FuseMilliseconds = 0;
+
+	UPROPERTY()
+	float ClientReleaseServerWorldTimeSeconds = 0.0f;
+
+	UPROPERTY()
+	int32 ArenaLayoutRevision = INDEX_NONE;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGrenadeStateChanged, EGrenadeThrowState, NewState);
 
 UCLASS(ClassGroup = (Grenade), BlueprintType, Blueprintable, meta = (BlueprintSpawnableComponent))
@@ -129,6 +160,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Grenade")
 	const FGrenadeSimConfig& GetSimulationConfig() const { return SimulationConfig; }
 
+	/** Called by the replicated authoritative grenade on its owning client. */
+	void ReconcilePredictedGrenade(uint32 ThrowId, AGrenadeActor* AuthoritativeGrenade);
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -137,8 +171,15 @@ protected:
 private:
 	void BeginThrowHold();
 	void TryThrowGrenade(const FGrenadeLaunchParams* LaunchParamsOverride = nullptr);
-	void SpawnGrenadeAuthoritative(const FGrenadeLaunchParams& LaunchParams);
-	bool SanitizeClientLaunchParams(const FGrenadeLaunchParams& ClientLaunchParams, FGrenadeLaunchParams& OutLaunchParams) const;
+	bool BuildThrowRequest(const FGrenadeLaunchParams& LaunchParams, FGrenadeThrowRequest& OutRequest);
+	bool ValidateAndBuildServerLaunch(
+		const FGrenadeThrowRequest& Request,
+		FGrenadeLaunchParams& OutLaunchParams,
+		FString& OutRejectionReason) const;
+	void ProcessAuthoritativeThrow(const FGrenadeThrowRequest& Request);
+	void SpawnGrenadeAuthoritative(uint32 ThrowId, const FGrenadeLaunchParams& LaunchParams);
+	void SpawnPredictedGrenade(uint32 ThrowId, const FGrenadeLaunchParams& LaunchParams);
+	bool IsGameplayReady() const;
 	void DetonateInHandAuthoritative(const FVector& ExplosionOrigin);
 	void EnterCooldown();
 	void ExitCooldown();
@@ -153,10 +194,16 @@ private:
 	bool ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity, float ThrowSpeedCmPerSec) const;
 
 	UFUNCTION(Server, Reliable)
-	void ServerThrowGrenade(FGrenadeLaunchParams LaunchParams);
+	void ServerThrowGrenade(FGrenadeThrowRequest Request);
+
+	UFUNCTION(Client, Reliable)
+	void ClientRejectGrenadeThrow(uint32 ThrowId);
 
 	UFUNCTION(Server, Reliable)
-	void ServerDetonateInHand(FVector_NetQuantize ExplosionOrigin);
+	void ServerDetonateInHand(
+		uint32 ActionId,
+		uint16 HeldDurationMilliseconds,
+		float ClientServerWorldTimeSeconds);
 
 	void RunNetworkSelfTestThrow();
 
@@ -174,4 +221,8 @@ private:
 	float ControlArcRaiseHoldStartWorldTimeSeconds = 0.0f;
 	float LastHeldDurationSeconds = 0.0f;
 	FGrenadeLaunchParams HeldLaunchSnapshot;
+	uint32 NextLocalThrowId = 1;
+	uint32 LastAcceptedServerThrowId = 0;
+	float NextServerThrowAllowedWorldTimeSeconds = 0.0f;
+	TMap<uint32, TWeakObjectPtr<AGrenadeActor>> PredictedGrenades;
 };

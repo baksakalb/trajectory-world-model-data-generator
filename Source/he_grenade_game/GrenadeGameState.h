@@ -4,12 +4,17 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameStateBase.h"
+#include "Net/Serialization/FastArraySerializer.h"
 #include "UObject/SoftObjectPath.h"
 #include "GrenadeGameState.generated.h"
 
 class AActor;
 class ABreakableTile;
 class ABreakableTileGrid;
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
+class USceneComponent;
+class UStaticMeshComponent;
 
 UENUM(BlueprintType)
 enum class EGGMatchPhase : uint8
@@ -23,13 +28,37 @@ enum class EGGMatchPhase : uint8
 	ReturningToMenu
 };
 
+UENUM(BlueprintType)
+enum class EArenaObjectType : uint8
+{
+	FloorTile,
+	BreakableObstacle,
+	StaticObstacle
+};
+
+UENUM(BlueprintType)
+enum class EArenaObjectState : uint8
+{
+	Intact,
+	Destroyed
+};
+
+UENUM()
+enum class EArenaDestructionCause : uint8
+{
+	None,
+	Grenade,
+	FloorCollapse,
+	Test
+};
+
 USTRUCT()
-struct FReplicatedArenaGridLayout
+struct FArenaSnapshotHeader
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
-	FTransform Transform;
+	uint16 SchemaVersion = 1;
 
 	UPROPERTY()
 	int32 TilesX = 0;
@@ -47,31 +76,94 @@ struct FReplicatedArenaGridLayout
 	float TileThicknessScale = 0.0f;
 
 	UPROPERTY()
-	FVector GridLocalOriginOffset = FVector::ZeroVector;
-
-	UPROPERTY()
-	FSoftObjectPath FloorMaterialPath;
+	FVector ArenaOrigin = FVector::ZeroVector;
 
 	UPROPERTY()
 	FSoftObjectPath TrajectoryMaterialPath;
+
+	UPROPERTY()
+	FSoftObjectPath GrenadeMaterialPath;
+
+	UPROPERTY()
+	int32 ObjectCount = 0;
+
+	UPROPERTY()
+	int32 ComponentRecordCount = 0;
+
+	UPROPERTY()
+	int32 DestructibleCount = 0;
 };
 
 USTRUCT()
-struct FReplicatedArenaActorLayout
+struct FArenaAssetDefinition
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
-	FTransform Transform;
+	uint16 AssetId = 0;
 
+	UPROPERTY()
+	FSoftObjectPath MeshPath;
+
+	UPROPERTY()
+	FSoftObjectPath MaterialPath;
+
+	UPROPERTY()
+	FName CollisionProfile = NAME_None;
+};
+
+USTRUCT()
+struct FArenaComponentLayout
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	uint16 AssetId = 0;
+
+	UPROPERTY()
+	FTransform RelativeTransform = FTransform::Identity;
+
+	UPROPERTY()
+	bool bVisible = true;
+};
+
+USTRUCT()
+struct FArenaObjectLayout
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 ArenaId = INDEX_NONE;
+
+	UPROPERTY()
+	EArenaObjectType Type = EArenaObjectType::StaticObstacle;
+
+	/** Single-component objects store the component world transform here. */
+	UPROPERTY()
+	FTransform Transform = FTransform::Identity;
+
+	UPROPERTY()
+	int16 GridX = -1;
+
+	UPROPERTY()
+	int16 GridY = -1;
+
+	UPROPERTY()
+	int16 CollapseRing = -1;
+
+	/** Non-zero for the common single-component representation. */
+	UPROPERTY()
+	uint16 PrimaryAssetId = 0;
+
+	/** Composite objects refer to a contiguous range of component records. */
 	UPROPERTY()
 	int32 FirstComponentIndex = 0;
 
 	UPROPERTY()
-	int32 ComponentCount = 0;
+	int16 ComponentCount = 0;
 
 	UPROPERTY()
-	bool bBreakableTile = false;
+	bool bDestructible = false;
 
 	UPROPERTY()
 	bool bBreakOnGrenadeImpact = false;
@@ -81,36 +173,84 @@ struct FReplicatedArenaActorLayout
 };
 
 USTRUCT()
-struct FReplicatedArenaMeshLayout
+struct FReplicatedFloorCollapseState
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
-	FSoftObjectPath MeshPath;
+	bool bActive = false;
 
 	UPROPERTY()
-	FSoftObjectPath MaterialPath;
+	int32 RingIndex = INDEX_NONE;
 
 	UPROPERTY()
-	FVector RelativeLocation = FVector::ZeroVector;
+	float EndServerTime = 0.0f;
 
 	UPROPERTY()
-	FRotator RelativeRotation = FRotator::ZeroRotator;
+	float Duration = 0.0f;
 
 	UPROPERTY()
-	FVector RelativeScale = FVector::OneVector;
+	int32 Revision = 0;
+};
+
+USTRUCT()
+struct FArenaMutableStateItem : public FFastArraySerializerItem
+{
+	GENERATED_BODY()
 
 	UPROPERTY()
-	FName CollisionProfile = NAME_None;
+	int32 ArenaId = INDEX_NONE;
 
 	UPROPERTY()
-	bool bVisible = true;
+	EArenaObjectState State = EArenaObjectState::Intact;
+
+	UPROPERTY()
+	int32 StateRevision = 0;
+
+	UPROPERTY()
+	EArenaDestructionCause Cause = EArenaDestructionCause::None;
+};
+
+class AGrenadeGameState;
+
+USTRUCT()
+struct FArenaMutableStateArray : public FFastArraySerializer
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<FArenaMutableStateItem> Items;
+
+	bool NetDeltaSerialize(FNetDeltaSerializeInfo& DeltaParms)
+	{
+		return FFastArraySerializer::FastArrayDeltaSerialize<FArenaMutableStateItem, FArenaMutableStateArray>(
+			Items,
+			DeltaParms,
+			*this);
+	}
+
+	void SetOwner(AGrenadeGameState* InOwner) { Owner = InOwner; }
+	void PostReplicatedAdd(const TArrayView<int32>& AddedIndices, int32 FinalSize);
+	void PostReplicatedChange(const TArrayView<int32>& ChangedIndices, int32 FinalSize);
+	void PostReplicatedReceive(const FFastArraySerializer::FPostReplicatedReceiveParameters& Parameters);
+
+private:
+	AGrenadeGameState* Owner = nullptr;
+};
+
+template<>
+struct TStructOpsTypeTraits<FArenaMutableStateArray> : public TStructOpsTypeTraitsBase2<FArenaMutableStateArray>
+{
+	enum
+	{
+		WithNetDeltaSerializer = true
+	};
 };
 
 /**
- * Replicated match state shared by the listen server and every client.
- * Timed phases use Unreal's synchronized server clock instead of replicating
- * a countdown value every frame.
+ * Replicated match state and the one arena protocol shared by server and clients.
+ * The server owns all mutation. Runtime components are deterministic mirrors of
+ * the explicit snapshot and are owned by this same replicated actor everywhere.
  */
 UCLASS()
 class HE_GRENADE_GAME_API AGrenadeGameState : public AGameStateBase
@@ -120,8 +260,9 @@ class HE_GRENADE_GAME_API AGrenadeGameState : public AGameStateBase
 public:
 	AGrenadeGameState();
 
-	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Match")
 	EGGMatchPhase GetGrenadeMatchPhase() const { return GrenadeMatchPhase; }
@@ -135,14 +276,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Grenade|Match")
 	int32 GetMatchStateRevision() const { return MatchStateRevision; }
 
-	/** Server-only phase transition. A non-positive duration creates an untimed phase. */
 	void SetGrenadeMatchPhase(EGGMatchPhase NewPhase, float DurationSeconds = 0.0f);
 
-	/** Server-only: captures the completed generated arena, not its random seed. */
+	/** Server-only capture and realization of the completed generated arena. */
 	void PublishGeneratedArena(
 		ABreakableTileGrid* Grid,
-		class UMaterialInterface* FloorMaterial,
-		class UMaterialInterface* TrajectoryMaterial);
+		UMaterialInterface* FloorMaterial,
+		UMaterialInterface* TrajectoryMaterial,
+		UMaterialInterface* GrenadeMaterial);
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Arena")
 	int32 GetArenaLayoutRevision() const { return ArenaLayoutRevision; }
@@ -151,12 +292,38 @@ public:
 	int64 GetArenaLayoutChecksum() const { return ArenaLayoutChecksum; }
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Arena")
-	bool HasAppliedArenaLayout() const { return AppliedArenaLayoutRevision == ArenaLayoutRevision && ArenaLayoutRevision > 0; }
+	int32 GetArenaStateRevision() const { return ArenaStateRevision; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena")
+	bool HasAppliedArenaLayout() const;
+
+	bool HasCompleteArenaState() const;
+	int32 GetArenaDestructibleCount() const { return ArenaHeader.DestructibleCount; }
+	int32 GetArenaTilesX() const { return ArenaHeader.TilesX; }
+	int32 GetArenaTilesY() const { return ArenaHeader.TilesY; }
+	const FSoftObjectPath& GetGrenadeMaterialPath() const { return ArenaHeader.GrenadeMaterialPath; }
+
+	bool IsArenaObjectDestroyed(int32 ArenaId) const;
+	bool ResolveArenaHit(
+		const FHitResult& Hit,
+		int32& OutArenaId,
+		bool& bOutBreakable,
+		bool& bOutBounceBeforeBreaking) const;
+	void AppendArenaObjectIgnoredComponents(int32 ArenaId, FCollisionQueryParams& QueryParams) const;
+
+	/** Server-only state mutation. */
+	bool DestroyArenaObject(int32 ArenaId, EArenaDestructionCause Cause);
+
+	/** Local-only cosmetic highlight used by trajectory preview. */
+	void SetLocalTrajectoryHighlight(int32 ArenaId, bool bHighlighted);
 
 	void SetFloorCollapseState(bool bActive, int32 RingIndex, float DurationSeconds);
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
-	bool IsFloorCollapseActive() const { return bReplicatedFloorCollapseActive; }
+	bool IsFloorCollapseActive() const { return FloorCollapseState.bActive; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	int32 GetFloorCollapseRing() const { return FloorCollapseState.RingIndex; }
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
 	float GetFloorCollapseTimeRemaining() const;
@@ -164,20 +331,58 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
 	float GetFloorCollapseProgress() const;
 
+	void GetFloorArenaIdsForRing(int32 RingIndex, TArray<int32>& OutArenaIds) const;
+	bool GetArenaObjectType(int32 ArenaId, EArenaObjectType& OutType) const;
+	bool FindIntactArenaObjectBounds(
+		EArenaObjectType Type,
+		int32& OutArenaId,
+		FBox& OutWorldBounds,
+		int32 ExcludedArenaId = INDEX_NONE) const;
+
+	/** Called by Fast Array receive callbacks. */
+	void HandleArenaStateItemsChanged(const TArrayView<int32>& ChangedIndices);
+	void HandleArenaStateReceiveComplete();
+
 private:
+	static constexpr uint16 CurrentArenaSchemaVersion = 1;
+
 	UFUNCTION()
 	void OnRep_ArenaLayout();
 
-	void BuildClientArenaReplica();
-	void ClearClientArenaReplica();
-	int64 CalculateArenaLayoutChecksum() const;
-	void RefreshAuthoritativeBreakStates();
-	void ApplyReplicatedArenaState();
+	UFUNCTION()
+	void OnRep_ArenaStateRevision();
 
 	UFUNCTION()
-	void OnRep_ArenaState();
+	void OnRep_FloorCollapseState();
 
-	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Match", meta = (AllowPrivateAccess = "true"))
+	UFUNCTION()
+	void OnRep_MatchPhase();
+
+	void ClearRuntimeArena();
+	bool BuildRuntimeArena();
+	UStaticMeshComponent* CreateRuntimeComponent(
+		int32 ArenaId,
+		int32 ComponentIndex,
+		const FArenaAssetDefinition& Asset,
+		const FTransform& WorldTransform,
+		bool bVisible);
+	const FArenaAssetDefinition* FindAsset(uint16 AssetId) const;
+	const FArenaObjectLayout* FindObjectLayout(int32 ArenaId) const;
+	void RebuildLookupMaps();
+	void ApplyAllArenaStates();
+	void ApplyArenaStateItem(const FArenaMutableStateItem& Item);
+	void ApplyArenaObjectPresentation(int32 ArenaId);
+	void InvalidateCharacterBasesForObject(int32 ArenaId);
+	void UpdateCollapseWarningVisuals();
+	void UpdateObjectMaterials(int32 ArenaId);
+	void TryConfirmArenaReady();
+	int64 CalculateArenaLayoutChecksum() const;
+	int32 EstimateArenaSnapshotBytes() const;
+
+	UPROPERTY(VisibleAnywhere, Category = "Arena")
+	TObjectPtr<USceneComponent> ArenaRoot;
+
+	UPROPERTY(ReplicatedUsing = OnRep_MatchPhase, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Match", meta = (AllowPrivateAccess = "true"))
 	EGGMatchPhase GrenadeMatchPhase = EGGMatchPhase::Lobby;
 
 	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Match", meta = (AllowPrivateAccess = "true"))
@@ -187,51 +392,48 @@ private:
 	int32 MatchStateRevision = 0;
 
 	UPROPERTY(Replicated)
-	FReplicatedArenaGridLayout ArenaGridLayout;
+	FArenaSnapshotHeader ArenaHeader;
 
 	UPROPERTY(Replicated)
-	TArray<FReplicatedArenaActorLayout> ArenaActors;
+	TArray<FArenaAssetDefinition> ArenaAssets;
 
 	UPROPERTY(Replicated)
-	TArray<FReplicatedArenaMeshLayout> ArenaMeshes;
+	TArray<FArenaObjectLayout> ArenaObjects;
+
+	UPROPERTY(Replicated)
+	TArray<FArenaComponentLayout> ArenaComponents;
 
 	UPROPERTY(Replicated)
 	int64 ArenaLayoutChecksum = 0;
 
-	/** Kept after every layout payload field so its notification observes a complete snapshot. */
+	/** Replicated after all snapshot payload fields. */
 	UPROPERTY(ReplicatedUsing = OnRep_ArenaLayout)
 	int32 ArenaLayoutRevision = 0;
 
+	UPROPERTY(Replicated)
+	FArenaMutableStateArray ArenaMutableState;
+
+	UPROPERTY(ReplicatedUsing = OnRep_ArenaStateRevision)
+	int32 ArenaStateRevision = 0;
+
+	UPROPERTY(ReplicatedUsing = OnRep_FloorCollapseState)
+	FReplicatedFloorCollapseState FloorCollapseState;
+
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<AActor>> ClientArenaActors;
+	TArray<TObjectPtr<UStaticMeshComponent>> RuntimeComponents;
 
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<ABreakableTile>> ClientFloorTiles;
-
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<ABreakableTile>> ClientLayoutBreakables;
-
-	TArray<TWeakObjectPtr<ABreakableTile>> ServerFloorTiles;
-	TArray<TWeakObjectPtr<ABreakableTile>> ServerLayoutBreakables;
-
-	UPROPERTY(ReplicatedUsing = OnRep_ArenaState)
-	TArray<uint8> ReplicatedFloorBrokenStates;
-
-	UPROPERTY(ReplicatedUsing = OnRep_ArenaState)
-	TArray<uint8> ReplicatedActorBrokenStates;
-
-	UPROPERTY(Replicated)
-	bool bReplicatedFloorCollapseActive = false;
-
-	UPROPERTY(Replicated)
-	int32 ReplicatedFloorCollapseRing = INDEX_NONE;
-
-	UPROPERTY(Replicated)
-	float FloorCollapseEndServerTime = 0.0f;
-
-	UPROPERTY(Replicated)
-	float FloorCollapseDuration = 0.0f;
+	TMap<int32, int32> ObjectIndexByArenaId;
+	TMap<uint16, int32> AssetIndexById;
+	TMap<int32, int32> MutableIndexByArenaId;
+	TMap<int32, TArray<TWeakObjectPtr<UStaticMeshComponent>>> ComponentsByArenaId;
+	TMap<TWeakObjectPtr<UPrimitiveComponent>, int32> ArenaIdByComponent;
+	TMap<TWeakObjectPtr<UStaticMeshComponent>, TWeakObjectPtr<UMaterialInterface>> BaseMaterialByComponent;
+	TMap<TWeakObjectPtr<UStaticMeshComponent>, TWeakObjectPtr<UMaterialInstanceDynamic>> WarningMIDByComponent;
+	TSet<int32> LocalTrajectoryHighlights;
+	TMap<int32, float> LocalWarningAlpha;
 
 	int32 AppliedArenaLayoutRevision = INDEX_NONE;
-	float BreakStateRefreshAccumulator = 0.0f;
+	int32 LastReadyAttemptLayoutRevision = INDEX_NONE;
+	int32 LastReadyAttemptStateRevision = INDEX_NONE;
+	float NetworkMetricsAccumulator = 0.0f;
 };

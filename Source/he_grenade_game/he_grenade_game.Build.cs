@@ -10,8 +10,10 @@ public class he_grenade_game : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new string[] {
 			"Core",
+			"CoreOnline",
 			"CoreUObject",
 			"Engine",
+			"NetCore",
 			"RenderCore",
 			"InputCore",
 			"EnhancedInput",

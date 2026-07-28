@@ -10,7 +10,7 @@
 #include "GlobalRenderResources.h"
 #include "Grenade/GrenadeSim.h"
 #include "Grenade/GrenadeThrowerComponent.h"
-#include "Grenade/Breakables/BreakableTile.h"
+#include "GrenadeGameState.h"
 #include "he_grenade_gameCharacter.h"
 
 namespace
@@ -486,15 +486,15 @@ void UGrenadeTrajectoryComponent::DrawTrajectoryOverlay(
 
 void UGrenadeTrajectoryComponent::ClearHighlightedTiles()
 {
-	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : HighlightedTiles)
+	if (AGrenadeGameState* ArenaState = GetArenaGameState())
 	{
-		if (ABreakableTile* Tile = TilePtr.Get())
+		for (const int32 ArenaObjectId : HighlightedArenaObjectIds)
 		{
-			Tile->SetTrajectoryHighlighted(false);
+			ArenaState->SetLocalTrajectoryHighlight(ArenaObjectId, false);
 		}
 	}
 
-	HighlightedTiles.Reset();
+	HighlightedArenaObjectIds.Reset();
 }
 
 void UGrenadeTrajectoryComponent::ClearTrajectoryVisual()
@@ -504,57 +504,68 @@ void UGrenadeTrajectoryComponent::ClearTrajectoryVisual()
 	CachedExplosionTip = FVector::ZeroVector;
 }
 
-void UGrenadeTrajectoryComponent::SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles)
+void UGrenadeTrajectoryComponent::SyncHighlightedTiles(const TSet<int32>& DesiredArenaObjectIds)
 {
-	TArray<TWeakObjectPtr<ABreakableTile>> TilesToRemove;
-	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : HighlightedTiles)
+	AGrenadeGameState* ArenaState = GetArenaGameState();
+	if (!ArenaState)
 	{
-		if (!TilePtr.IsValid() || !DesiredTiles.Contains(TilePtr))
+		HighlightedArenaObjectIds.Reset();
+		return;
+	}
+
+	TArray<int32> ArenaObjectsToRemove;
+	for (const int32 ArenaObjectId : HighlightedArenaObjectIds)
+	{
+		if (!DesiredArenaObjectIds.Contains(ArenaObjectId))
 		{
-			TilesToRemove.Add(TilePtr);
+			ArenaObjectsToRemove.Add(ArenaObjectId);
 		}
 	}
 
-	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : TilesToRemove)
+	for (const int32 ArenaObjectId : ArenaObjectsToRemove)
 	{
-		if (ABreakableTile* Tile = TilePtr.Get())
-		{
-			Tile->SetTrajectoryHighlighted(false);
-		}
-		HighlightedTiles.Remove(TilePtr);
+		ArenaState->SetLocalTrajectoryHighlight(ArenaObjectId, false);
+		HighlightedArenaObjectIds.Remove(ArenaObjectId);
 	}
 
-	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : DesiredTiles)
+	for (const int32 ArenaObjectId : DesiredArenaObjectIds)
 	{
-		ABreakableTile* Tile = TilePtr.Get();
-		if (!Tile)
+		if (!HighlightedArenaObjectIds.Contains(ArenaObjectId))
 		{
-			continue;
-		}
-
-		if (!HighlightedTiles.Contains(TilePtr))
-		{
-			Tile->SetTrajectoryHighlighted(true);
-			HighlightedTiles.Add(TilePtr);
+			ArenaState->SetLocalTrajectoryHighlight(ArenaObjectId, true);
+			HighlightedArenaObjectIds.Add(ArenaObjectId);
 		}
 	}
 }
 
-ABreakableTile* UGrenadeTrajectoryComponent::ResolveBreakableTile(const FHitResult& Hit) const
+FGrenadeArenaHit UGrenadeTrajectoryComponent::ResolveArenaHit(const FHitResult& Hit) const
 {
-	AActor* HitActor = Hit.GetActor();
-	if (!HitActor && Hit.GetComponent())
+	FGrenadeArenaHit Result;
+	if (const AGrenadeGameState* ArenaState = GetArenaGameState())
 	{
-		HitActor = Hit.GetComponent()->GetOwner();
+		ArenaState->ResolveArenaHit(
+			Hit,
+			Result.ArenaObjectId,
+			Result.bBreakable,
+			Result.bBounceBeforeBreaking);
 	}
+	return Result;
+}
 
-	ABreakableTile* Tile = Cast<ABreakableTile>(HitActor);
-	if (!Tile || Tile->IsBroken() || !Tile->CanBreakOnGrenadeImpact())
+void UGrenadeTrajectoryComponent::AppendIgnoredArenaObject(
+	int32 ArenaObjectId,
+	FCollisionQueryParams& QueryParams) const
+{
+	if (const AGrenadeGameState* ArenaState = GetArenaGameState())
 	{
-		return nullptr;
+		ArenaState->AppendArenaObjectIgnoredComponents(ArenaObjectId, QueryParams);
 	}
+}
 
-	return Tile;
+AGrenadeGameState* UGrenadeTrajectoryComponent::GetArenaGameState() const
+{
+	const UWorld* World = GetWorld();
+	return World ? World->GetGameState<AGrenadeGameState>() : nullptr;
 }
 
 bool UGrenadeTrajectoryComponent::ResolveViewLocation(FVector& OutViewLocation) const
@@ -694,7 +705,7 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 	const FGrenadeSimConfig& SimConfig = Thrower->GetSimulationConfig();
 	FGrenadeSimState SimState;
 	FGrenadeSim::InitializeState(SimState, LaunchParams.SpawnLocation, LaunchParams.InitialVelocity, LaunchParams.FuseSeconds);
-	TSet<TWeakObjectPtr<ABreakableTile>> HitTilesThisFrame;
+	TSet<int32> HitArenaObjectsThisFrame;
 
 	TArray<FVector> TrajectoryPoints;
 	TrajectoryPoints.Reserve(MaxSimulationSteps + 1);
@@ -717,7 +728,11 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 			SimState,
 			StepTime,
 			OwnerActor,
-			[this](const FHitResult& Hit) { return ResolveBreakableTile(Hit); });
+			[this](const FHitResult& Hit) { return ResolveArenaHit(Hit); },
+			[this](int32 ArenaObjectId, FCollisionQueryParams& QueryParams)
+			{
+				AppendIgnoredArenaObject(ArenaObjectId, QueryParams);
+			});
 
 		if (!SimState.Position.Equals(PreviousPosition, 0.01f))
 		{
@@ -731,9 +746,9 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 
 		if (StepResult.bBrokeTile)
 		{
-			if (ABreakableTile* Tile = StepResult.BrokenTile.Get())
+			if (StepResult.BrokenArenaObjectId != INDEX_NONE)
 			{
-				HitTilesThisFrame.Add(Tile);
+				HitArenaObjectsThisFrame.Add(StepResult.BrokenArenaObjectId);
 			}
 		}
 
@@ -749,7 +764,7 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 		}
 	}
 
-	SyncHighlightedTiles(HitTilesThisFrame);
+	SyncHighlightedTiles(HitArenaObjectsThisFrame);
 
 	TArray<FVector> RenderPoints;
 	BuildSmoothedRenderPath(

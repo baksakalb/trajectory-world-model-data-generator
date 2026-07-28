@@ -2,6 +2,7 @@
 
 #include "he_grenade_gameGameMode.h"
 
+#include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMesh.h"
@@ -12,10 +13,15 @@
 #include "Grenade/Breakables/BreakableTile.h"
 #include "Grenade/Breakables/BreakableTileGrid.h"
 #include "Grenade/GrenadeHUD.h"
+#include "Grenade/GrenadeActor.h"
+#include "Grenade/GrenadeThrowerComponent.h"
 #include "GrenadeGameState.h"
 #include "GrenadePlayerState.h"
+#include "he_grenade_gameCharacter.h"
 #include "he_grenade_game.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "UObject/ConstructorHelpers.h"
 
 namespace
@@ -54,12 +60,120 @@ Ahe_grenade_gameGameMode::Ahe_grenade_gameGameMode()
 		FRotator::ZeroRotator,
 		FVector(0.0f, 0.0f, 2606.0f),
 		FVector::OneVector);
+
+	int32 CommandLineArenaSeed = 0;
+	if (FParse::Value(
+		FCommandLine::Get(),
+		TEXT("-GGArenaSeed="),
+		CommandLineArenaSeed))
+	{
+		ArenaSeed = CommandLineArenaSeed;
+	}
 }
 
 void Ahe_grenade_gameGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	if (AGrenadePlayerState* PlayerState =
+		NewPlayer ? NewPlayer->GetPlayerState<AGrenadePlayerState>() : nullptr)
+	{
+		if (PlayerState->GetUniqueId().IsValid())
+		{
+			PlayerState->SetEOSProductUserId(PlayerState->GetUniqueId().ToString());
+		}
+	}
 	GetOrAssignSpawnSide(NewPlayer);
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		if (GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::Reconnecting)
+		{
+			GetWorldTimerManager().ClearTimer(ReconnectGraceTimerHandle);
+		}
+	}
+}
+
+void Ahe_grenade_gameGameMode::HandleArenaStateReady(
+	APlayerController* Player,
+	const int32 LayoutRevision,
+	const int64 LayoutChecksum,
+	const int32 ArenaStateRevision)
+{
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	AGrenadePlayerState* PlayerState =
+		Player ? Player->GetPlayerState<AGrenadePlayerState>() : nullptr;
+	if (!HasAuthority()
+		|| !Player
+		|| !PlayerState
+		|| !GrenadeGameState
+		|| !GrenadeGameState->HasCompleteArenaState()
+		|| LayoutRevision != GrenadeGameState->GetArenaLayoutRevision()
+		|| LayoutChecksum != GrenadeGameState->GetArenaLayoutChecksum()
+		|| ArenaStateRevision != GrenadeGameState->GetArenaStateRevision())
+	{
+		UE_LOG(
+			Loghe_grenade_game,
+			Warning,
+			TEXT("ARENA_READY_REJECT Player=%s Layout=%d State=%d"),
+			*GetNameSafe(Player),
+			LayoutRevision,
+			ArenaStateRevision);
+		return;
+	}
+
+	PlayerState->SetArenaReady(LayoutRevision, LayoutChecksum, ArenaStateRevision);
+	UE_LOG(
+		Loghe_grenade_game,
+		Display,
+		TEXT("ARENA_READY_ACCEPT Player=%s Layout=%d State=%d"),
+		*GetNameSafe(Player),
+		LayoutRevision,
+		ArenaStateRevision);
+	EvaluateArenaReadiness();
+}
+
+bool Ahe_grenade_gameGameMode::IsPlayerGameplayReady(const AController* Controller) const
+{
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	const AGrenadePlayerState* PlayerState =
+		Controller ? Controller->GetPlayerState<AGrenadePlayerState>() : nullptr;
+	return GrenadeGameState
+		&& GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::InProgress
+		&& PlayerState
+		&& PlayerState->IsArenaReady()
+		&& PlayerState->GetReadyLayoutRevision() == GrenadeGameState->GetArenaLayoutRevision()
+		&& PlayerState->GetReadyLayoutChecksum() == GrenadeGameState->GetArenaLayoutChecksum();
+}
+
+void Ahe_grenade_gameGameMode::Logout(AController* Exiting)
+{
+	if (const AGrenadePlayerState* PlayerState =
+		Exiting ? Exiting->GetPlayerState<AGrenadePlayerState>() : nullptr)
+	{
+		const int32* ExistingSide = SpawnSideByController.Find(Exiting);
+		if (ExistingSide && !PlayerState->GetEOSProductUserId().IsEmpty())
+		{
+			SpawnSideByOnlineIdentity.Add(
+				PlayerState->GetEOSProductUserId(),
+				*ExistingSide);
+		}
+	}
+	SpawnSideByController.Remove(Exiting);
+	Super::Logout(Exiting);
+
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (GrenadeGameState
+		&& GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::InProgress)
+	{
+		GrenadeGameState->SetGrenadeMatchPhase(
+			EGGMatchPhase::Reconnecting,
+			FMath::Max(1.0f, ReconnectGraceSeconds));
+		GetWorldTimerManager().SetTimer(
+			ReconnectGraceTimerHandle,
+			this,
+			&Ahe_grenade_gameGameMode::ExpireReconnectGrace,
+			FMath::Max(1.0f, ReconnectGraceSeconds),
+			false);
+	}
 }
 
 void Ahe_grenade_gameGameMode::EliminatePlayer(AController* Controller)
@@ -75,6 +189,25 @@ void Ahe_grenade_gameGameMode::EliminatePlayer(AController* Controller)
 		Pawn->Destroy();
 	}
 
+	if (AGrenadePlayerState* GrenadePlayerState =
+		Controller->GetPlayerState<AGrenadePlayerState>())
+	{
+		const AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+		const float RespawnServerTime = GrenadeGameState
+			? GrenadeGameState->GetServerWorldTimeSeconds()
+				+ FMath::Max(0.05f, RespawnDelaySeconds)
+			: 0.0f;
+		GrenadePlayerState->SetLifeState(false, RespawnServerTime);
+		UE_LOG(
+			Loghe_grenade_game,
+			Display,
+			TEXT("PLAYER_ELIMINATED Controller=%s Deaths=%d ArenaRevision=%d RespawnServerTime=%.3f"),
+			*GetNameSafe(Controller),
+			GrenadePlayerState->GetDeathCount(),
+			GrenadeGameState ? GrenadeGameState->GetArenaStateRevision() : INDEX_NONE,
+			RespawnServerTime);
+	}
+
 	const TWeakObjectPtr<AController> WeakController(Controller);
 	FTimerHandle RespawnTimer;
 	GetWorldTimerManager().SetTimer(
@@ -85,7 +218,21 @@ void Ahe_grenade_gameGameMode::EliminatePlayer(AController* Controller)
 			{
 				if (AController* ValidController = WeakController.Get())
 				{
-					RestartPlayer(ValidController);
+					if (IsPlayerGameplayReady(ValidController))
+					{
+						RestartPlayer(ValidController);
+						if (AGrenadePlayerState* PlayerState =
+							ValidController->GetPlayerState<AGrenadePlayerState>())
+						{
+							PlayerState->SetLifeState(true);
+							UE_LOG(
+								Loghe_grenade_game,
+								Display,
+								TEXT("PLAYER_RESPAWNED Controller=%s Deaths=%d"),
+								*GetNameSafe(ValidController),
+								PlayerState->GetDeathCount());
+						}
+					}
 				}
 			}),
 		FMath::Max(0.05f, RespawnDelaySeconds),
@@ -96,7 +243,12 @@ void Ahe_grenade_gameGameMode::Tick(const float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!bFloorCollapseActive || !ActiveBreakableGrid)
+	TickAuthorityVerificationScenarios();
+
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!bFloorCollapseActive
+		|| !GrenadeGameState
+		|| GrenadeGameState->GetGrenadeMatchPhase() != EGGMatchPhase::InProgress)
 	{
 		return;
 	}
@@ -114,16 +266,22 @@ void Ahe_grenade_gameGameMode::Tick(const float DeltaSeconds)
 	{
 		bFloorCollapseActive = false;
 		FloorCollapseTimeRemaining = 0.0f;
-		CurrentFloorRingTiles.Reset();
-		if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+		CurrentFloorRingArenaIds.Reset();
+		if (GrenadeGameState)
 		{
 			GrenadeGameState->SetFloorCollapseState(false, INDEX_NONE, 0.0f);
+			UE_LOG(
+				Loghe_grenade_game,
+				Display,
+				TEXT("FLOOR_COLLAPSE_COMPLETE StateRevision=%d"),
+				GrenadeGameState->GetArenaStateRevision());
+			GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::PostMatch);
 		}
 		return;
 	}
 
 	FloorCollapseTimeRemaining = FMath::Max(1.0f, FloorRingCollapseIntervalSeconds);
-	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	if (GrenadeGameState)
 	{
 		GrenadeGameState->SetFloorCollapseState(
 			true,
@@ -147,6 +305,13 @@ float Ahe_grenade_gameGameMode::GetFloorCollapseProgress() const
 
 void Ahe_grenade_gameGameMode::BeginPlay()
 {
+	if (FParse::Param(FCommandLine::Get(), TEXT("GGFastCollapse")))
+	{
+		MatchStartCountdownSeconds = 1.0f;
+		FloorRingCollapseIntervalSeconds = 3.0f;
+		RespawnDelaySeconds = 0.75f;
+	}
+
 	Super::BeginPlay();
 
 	if (!bArenaGeneratedThisMatch)
@@ -206,7 +371,7 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 	bHasGeneratedSpawnTransforms = false;
 	bArenaGeneratedThisMatch = false;
 	bFloorCollapseActive = false;
-	CurrentFloorRingTiles.Reset();
+	CurrentFloorRingArenaIds.Reset();
 	LearningObjectFootprints.Reset();
 	CurrentFloorCollapseRing = 0;
 	MaximumFloorCollapseRing = INDEX_NONE;
@@ -272,9 +437,7 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 		}
 
 		FloorTile->Tags.AddUnique(GeneratedArenaTag);
-		FloorTile->bStartBroken = false;
 		FloorTile->SetVisualMaterials(FloorTileMaterial, TrajectoryHighlightMaterial);
-		FloorTile->ResetTile();
 	}
 
 	const float TileHalfHeightCm = CubeHalfSizeCm * SpawnedGrid->TileThicknessScale;
@@ -324,16 +487,21 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 		WS->KillZ = TileTopSurfaceZ - FMath::Max(200.0f, KillZDropCm);
 	}
 
-	bArenaGeneratedThisMatch = true;
-	InitializeFloorRingCollapse();
-
 	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
 	{
 		GrenadeGameState->PublishGeneratedArena(
 			SpawnedGrid,
 			FloorTileMaterial,
-			TrajectoryHighlightMaterial);
+			TrajectoryHighlightMaterial,
+			GrenadeMaterial);
 	}
+	bArenaGeneratedThisMatch = true;
+
+	// The generated actors are capture-time scaffolding only. Runtime collision and visuals
+	// now live exclusively on the replicated GameState's stable-ID component mirrors.
+	ClearExistingArenaActors();
+	ActiveBreakableGrid = nullptr;
+	EvaluateArenaReadiness();
 
 	UE_LOG(
 		Loghe_grenade_game,
@@ -350,33 +518,37 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 void Ahe_grenade_gameGameMode::InitializeFloorRingCollapse()
 {
 	bFloorCollapseActive = false;
-	CurrentFloorRingTiles.Reset();
+	CurrentFloorRingArenaIds.Reset();
 	CurrentFloorCollapseRing = 0;
 	FloorCollapseTimeRemaining = 0.0f;
 
-	if (!bEnableFloorRingCollapse || !ActiveBreakableGrid)
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!bEnableFloorRingCollapse || !GrenadeGameState)
 	{
 		return;
 	}
 
 	MaximumFloorCollapseRing =
-		(FMath::Min(ActiveBreakableGrid->TilesX, ActiveBreakableGrid->TilesY) - 1) / 2;
+		(FMath::Min(
+			GrenadeGameState->GetArenaTilesX(),
+			GrenadeGameState->GetArenaTilesY()) - 1) / 2;
 	if (MaximumFloorCollapseRing < 0)
 	{
 		return;
 	}
 
-	FloorCollapseTimeRemaining = FMath::Max(1.0f, FloorRingCollapseIntervalSeconds);
+	const float InitialCollapseDelaySeconds =
+		FParse::Param(FCommandLine::Get(), TEXT("GGAuthorityScenarios"))
+			? 24.0f
+			: FloorRingCollapseIntervalSeconds;
+	FloorCollapseTimeRemaining = FMath::Max(1.0f, InitialCollapseDelaySeconds);
 	bFloorCollapseActive = true;
 	CacheCurrentFloorRingTiles();
 	UpdateFloorRingWarning();
-	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
-	{
-		GrenadeGameState->SetFloorCollapseState(
-			true,
-			CurrentFloorCollapseRing,
-			FloorCollapseTimeRemaining);
-	}
+	GrenadeGameState->SetFloorCollapseState(
+		true,
+		CurrentFloorCollapseRing,
+		FloorCollapseTimeRemaining);
 
 	UE_LOG(
 		Loghe_grenade_game,
@@ -384,56 +556,415 @@ void Ahe_grenade_gameGameMode::InitializeFloorRingCollapse()
 		TEXT("Floor ring collapse armed. Rings=%d Interval=%.1fs FirstRingTiles=%d"),
 		MaximumFloorCollapseRing + 1,
 		FloorCollapseTimeRemaining,
-		CurrentFloorRingTiles.Num());
+		CurrentFloorRingArenaIds.Num());
 }
 
-void Ahe_grenade_gameGameMode::CacheCurrentFloorRingTiles()
+void Ahe_grenade_gameGameMode::TickAuthorityVerificationScenarios()
 {
-	CurrentFloorRingTiles.Reset();
-	if (!ActiveBreakableGrid)
+	if (!FParse::Param(FCommandLine::Get(), TEXT("GGAuthorityScenarios"))
+		|| !GetWorld()
+		|| AuthorityVerificationStage >= 7)
 	{
 		return;
 	}
 
-	const int32 MaxX = ActiveBreakableGrid->TilesX - 1;
-	const int32 MaxY = ActiveBreakableGrid->TilesY - 1;
-	for (int32 Y = 0; Y <= MaxY; ++Y)
+	const AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!GrenadeGameState
+		|| GrenadeGameState->GetGrenadeMatchPhase() != EGGMatchPhase::InProgress)
 	{
-		for (int32 X = 0; X <= MaxX; ++X)
+		AuthorityVerificationStartWorldTime = -1.0f;
+		return;
+	}
+
+	APlayerController* HostPlayer = nullptr;
+	APlayerController* ClientPlayer = nullptr;
+	for (TActorIterator<APlayerController> It(GetWorld()); It; ++It)
+	{
+		APlayerController* PlayerController = *It;
+		if (!PlayerController
+			|| !PlayerController->GetPawn()
+			|| !IsPlayerGameplayReady(PlayerController))
 		{
-			const int32 RingIndex = FMath::Min(
-				FMath::Min(X, MaxX - X),
-				FMath::Min(Y, MaxY - Y));
-			if (RingIndex == CurrentFloorCollapseRing)
-			{
-				CurrentFloorRingTiles.Add(ActiveBreakableGrid->GetTileAtIndex(X, Y));
-			}
+			continue;
 		}
+
+		if (PlayerController->IsLocalController())
+		{
+			HostPlayer = PlayerController;
+		}
+		else
+		{
+			ClientPlayer = PlayerController;
+		}
+	}
+
+	if (!HostPlayer || !ClientPlayer)
+	{
+		return;
+	}
+
+	if (AuthorityVerificationStartWorldTime < 0.0f)
+	{
+		AuthorityVerificationStartWorldTime = GetWorld()->GetTimeSeconds();
+		UE_LOG(
+			Loghe_grenade_game,
+			Display,
+			TEXT("VERIFY_AUTHORITY_SCENARIOS_BEGIN"));
+	}
+
+	const float ElapsedSeconds =
+		GetWorld()->GetTimeSeconds() - AuthorityVerificationStartWorldTime;
+	bool bScenarioCompleted = false;
+
+	switch (AuthorityVerificationStage)
+	{
+	case 0:
+		bScenarioCompleted =
+			ElapsedSeconds >= 9.5f
+			&& SpawnVerificationGrenadeUnderPlayer(
+				HostPlayer,
+				HostPlayer,
+				TEXT("HostUnderSelf"));
+		break;
+	case 1:
+		bScenarioCompleted =
+			ElapsedSeconds >= 11.2f
+			&& SpawnVerificationGrenadeUnderPlayer(
+				HostPlayer,
+				ClientPlayer,
+				TEXT("HostUnderClient"));
+		break;
+	case 2:
+		bScenarioCompleted =
+			ElapsedSeconds >= 13.0f
+			&& SpawnVerificationGrenadeUnderPlayer(
+				ClientPlayer,
+				ClientPlayer,
+				TEXT("ClientUnderSelf"));
+		break;
+	case 3:
+		bScenarioCompleted =
+			ElapsedSeconds >= 14.8f
+			&& SpawnVerificationGrenadeUnderPlayer(
+				ClientPlayer,
+				HostPlayer,
+				TEXT("ClientUnderHost"));
+		break;
+	case 4:
+		if (ElapsedSeconds >= 16.6f)
+		{
+			const bool bSpawnedHostGrenade =
+				SpawnVerificationGrenadeUnderPlayer(
+					HostPlayer,
+					ClientPlayer,
+					TEXT("SimultaneousHost"));
+			const bool bSpawnedClientGrenade =
+				SpawnVerificationGrenadeUnderPlayer(
+					ClientPlayer,
+					HostPlayer,
+					TEXT("SimultaneousClient"));
+			bScenarioCompleted = bSpawnedHostGrenade && bSpawnedClientGrenade;
+		}
+		break;
+	case 5:
+		bScenarioCompleted =
+			ElapsedSeconds >= 19.0f
+			&& SpawnVerificationBounce(
+				HostPlayer,
+				static_cast<uint8>(EArenaObjectType::BreakableObstacle),
+				TEXT("BounceBreakableObstacle"));
+		break;
+	case 6:
+		bScenarioCompleted =
+			ElapsedSeconds >= 21.0f
+			&& SpawnVerificationBounce(
+				ClientPlayer,
+				static_cast<uint8>(EArenaObjectType::StaticObstacle),
+				TEXT("BounceStaticObstacle"));
+		break;
+	default:
+		break;
+	}
+
+	if (bScenarioCompleted)
+	{
+		++AuthorityVerificationStage;
+		if (AuthorityVerificationStage >= 7)
+		{
+			UE_LOG(
+				Loghe_grenade_game,
+				Display,
+				TEXT("VERIFY_AUTHORITY_SCENARIOS_COMPLETE"));
+		}
+	}
+}
+
+bool Ahe_grenade_gameGameMode::SpawnVerificationGrenadeUnderPlayer(
+	APlayerController* ThrowingPlayer,
+	APlayerController* TargetPlayer,
+	const TCHAR* ScenarioLabel)
+{
+	if (!GetWorld() || !ThrowingPlayer || !TargetPlayer)
+	{
+		return false;
+	}
+
+	APawn* ThrowingPawn = ThrowingPlayer->GetPawn();
+	APawn* TargetPawn = TargetPlayer->GetPawn();
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!ThrowingPawn || !TargetPawn || !GrenadeGameState)
+	{
+		return false;
+	}
+
+	int32 VerificationFloorId = INDEX_NONE;
+	FBox VerificationFloorBounds(ForceInit);
+	if (!GrenadeGameState->FindIntactArenaObjectBounds(
+			EArenaObjectType::FloorTile,
+			VerificationFloorId,
+			VerificationFloorBounds,
+			LastAuthorityVerificationFloorId))
+	{
+		return false;
+	}
+	LastAuthorityVerificationFloorId = VerificationFloorId;
+
+	const ACharacter* TargetCharacter = Cast<ACharacter>(TargetPawn);
+	const float TargetHalfHeight =
+		TargetCharacter && TargetCharacter->GetCapsuleComponent()
+			? TargetCharacter->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()
+			: 100.0f;
+	const FVector VerificationTargetLocation(
+		VerificationFloorBounds.GetCenter().X,
+		VerificationFloorBounds.GetCenter().Y,
+		VerificationFloorBounds.Max.Z + TargetHalfHeight + 2.0f);
+	TargetPawn->SetActorLocation(
+		VerificationTargetLocation,
+		false,
+		nullptr,
+		ETeleportType::TeleportPhysics);
+
+	const FVector TargetLocation = TargetPawn->GetActorLocation();
+	const FVector Forward = TargetPawn->GetActorForwardVector().GetSafeNormal2D();
+	const FVector Right = TargetPawn->GetActorRightVector().GetSafeNormal2D();
+	const FVector CandidateOffsets[] =
+	{
+		Right * 70.0f,
+		Right * -70.0f,
+		Forward * 70.0f,
+		Forward * -70.0f
+	};
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GGVerifyUnderPlayer), false);
+	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
+	{
+		QueryParams.AddIgnoredActor(*It);
+	}
+
+	FHitResult FloorHit;
+	int32 FloorArenaId = INDEX_NONE;
+	for (const FVector& Offset : CandidateOffsets)
+	{
+		const FVector TraceStart = TargetLocation + Offset + FVector(0.0f, 0.0f, 100.0f);
+		const FVector TraceEnd = TraceStart - FVector(0.0f, 0.0f, 1000.0f);
+		FHitResult CandidateHit;
+		if (!GetWorld()->LineTraceSingleByChannel(
+				CandidateHit,
+				TraceStart,
+				TraceEnd,
+				ECC_Visibility,
+				QueryParams))
+		{
+			continue;
+		}
+
+		bool bBreakable = false;
+		bool bBounceBeforeBreaking = false;
+		int32 CandidateArenaId = INDEX_NONE;
+		EArenaObjectType CandidateType = EArenaObjectType::FloorTile;
+		if (GrenadeGameState->ResolveArenaHit(
+				CandidateHit,
+				CandidateArenaId,
+				bBreakable,
+				bBounceBeforeBreaking)
+			&& bBreakable
+			&& !bBounceBeforeBreaking
+			&& !GrenadeGameState->IsArenaObjectDestroyed(CandidateArenaId)
+			&& GrenadeGameState->GetArenaObjectType(CandidateArenaId, CandidateType)
+			&& CandidateType == EArenaObjectType::FloorTile)
+		{
+			FloorHit = CandidateHit;
+			FloorArenaId = CandidateArenaId;
+			break;
+		}
+	}
+
+	if (FloorArenaId == INDEX_NONE)
+	{
+		return false;
+	}
+
+	UGrenadeThrowerComponent* Thrower =
+		ThrowingPawn->FindComponentByClass<UGrenadeThrowerComponent>();
+	UClass* SpawnClass =
+		Thrower && Thrower->GrenadeClass
+			? Thrower->GrenadeClass.Get()
+			: AGrenadeActor::StaticClass();
+	const FGrenadeSimConfig SimulationConfig =
+		Thrower ? Thrower->GetSimulationConfig() : FGrenadeSimConfig();
+	const FVector SpawnLocation = FloorHit.ImpactPoint + FVector(0.0f, 0.0f, 40.0f);
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = ThrowingPawn;
+	SpawnParams.Instigator = ThrowingPawn;
+	SpawnParams.SpawnCollisionHandlingOverride =
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGrenadeActor* Grenade = GetWorld()->SpawnActor<AGrenadeActor>(
+		SpawnClass,
+		SpawnLocation,
+		FRotator::ZeroRotator,
+		SpawnParams);
+	if (!Grenade)
+	{
+		return false;
+	}
+
+	const uint32 ThrowId = NextAuthorityVerificationThrowId++;
+	Grenade->ExplosionRadiusCm = 0.0f;
+	Grenade->SetReplicates(true);
+	Grenade->SetReplicateMovement(true);
+	Grenade->InitializeAuthoritativeGrenade(
+		ThrowId,
+		SpawnLocation,
+		FVector(0.0f, 0.0f, -300.0f),
+		0.8f,
+		SimulationConfig,
+		ThrowingPawn);
+
+	UE_LOG(
+		Loghe_grenade_game,
+		Display,
+		TEXT("VERIFY_GRENADE Scenario=%s ThrowId=%u Owner=%s Target=%s ArenaId=%d"),
+		ScenarioLabel,
+		ThrowId,
+		*GetNameSafe(ThrowingPlayer),
+		*GetNameSafe(TargetPlayer),
+		FloorArenaId);
+	return true;
+}
+
+bool Ahe_grenade_gameGameMode::SpawnVerificationBounce(
+	APlayerController* ThrowingPlayer,
+	const uint8 ArenaObjectTypeValue,
+	const TCHAR* ScenarioLabel)
+{
+	if (!GetWorld() || !ThrowingPlayer || !ThrowingPlayer->GetPawn())
+	{
+		return false;
+	}
+
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!GrenadeGameState)
+	{
+		return false;
+	}
+
+	const EArenaObjectType ObjectType =
+		static_cast<EArenaObjectType>(ArenaObjectTypeValue);
+	int32 ArenaObjectId = INDEX_NONE;
+	FBox WorldBounds(ForceInit);
+	if (!GrenadeGameState->FindIntactArenaObjectBounds(
+			ObjectType,
+			ArenaObjectId,
+			WorldBounds))
+	{
+		return false;
+	}
+
+	APawn* ThrowingPawn = ThrowingPlayer->GetPawn();
+	UGrenadeThrowerComponent* Thrower =
+		ThrowingPawn->FindComponentByClass<UGrenadeThrowerComponent>();
+	UClass* SpawnClass =
+		Thrower && Thrower->GrenadeClass
+			? Thrower->GrenadeClass.Get()
+			: AGrenadeActor::StaticClass();
+	const FGrenadeSimConfig SimulationConfig =
+		Thrower ? Thrower->GetSimulationConfig() : FGrenadeSimConfig();
+	const FVector SpawnLocation =
+		WorldBounds.GetCenter()
+		+ FVector(0.0f, 0.0f, WorldBounds.GetExtent().Z + 60.0f);
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = ThrowingPawn;
+	SpawnParams.Instigator = ThrowingPawn;
+	SpawnParams.SpawnCollisionHandlingOverride =
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AGrenadeActor* Grenade = GetWorld()->SpawnActor<AGrenadeActor>(
+		SpawnClass,
+		SpawnLocation,
+		FRotator::ZeroRotator,
+		SpawnParams);
+	if (!Grenade)
+	{
+		return false;
+	}
+
+	const uint32 ThrowId = NextAuthorityVerificationThrowId++;
+	Grenade->ExplosionRadiusCm = 0.0f;
+	Grenade->SetReplicates(true);
+	Grenade->SetReplicateMovement(true);
+	Grenade->InitializeAuthoritativeGrenade(
+		ThrowId,
+		SpawnLocation,
+		FVector(0.0f, 0.0f, -700.0f),
+		2.0f,
+		SimulationConfig,
+		ThrowingPawn);
+
+	UE_LOG(
+		Loghe_grenade_game,
+		Display,
+		TEXT("VERIFY_GRENADE Scenario=%s ThrowId=%u Owner=%s ArenaId=%d ArenaType=%d"),
+		ScenarioLabel,
+		ThrowId,
+		*GetNameSafe(ThrowingPlayer),
+		ArenaObjectId,
+		static_cast<int32>(ObjectType));
+	return true;
+}
+
+void Ahe_grenade_gameGameMode::CacheCurrentFloorRingTiles()
+{
+	CurrentFloorRingArenaIds.Reset();
+	if (const AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		GrenadeGameState->GetFloorArenaIdsForRing(
+			CurrentFloorCollapseRing,
+			CurrentFloorRingArenaIds);
 	}
 }
 
 void Ahe_grenade_gameGameMode::UpdateFloorRingWarning()
 {
-	const float WarningAlpha = GetFloorCollapseProgress();
-	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : CurrentFloorRingTiles)
-	{
-		if (ABreakableTile* Tile = TilePtr.Get())
-		{
-			Tile->SetDestructionWarningAlpha(WarningAlpha);
-		}
-	}
+	// GameState derives the warning alpha from synchronized server time and applies it
+	// to runtime mirrors on every machine.
 }
 
 void Ahe_grenade_gameGameMode::CollapseCurrentFloorRing()
 {
 	int32 BrokenTileCount = 0;
-	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : CurrentFloorRingTiles)
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
 	{
-		if (ABreakableTile* Tile = TilePtr.Get(); Tile && !Tile->IsBroken())
+		for (const int32 ArenaObjectId : CurrentFloorRingArenaIds)
 		{
-			Tile->SetDestructionWarningAlpha(1.0f);
-			Tile->BreakTile();
-			++BrokenTileCount;
+			if (GrenadeGameState->DestroyArenaObject(
+				ArenaObjectId,
+				EArenaDestructionCause::FloorCollapse))
+			{
+				++BrokenTileCount;
+			}
 		}
 	}
 
@@ -443,6 +974,130 @@ void Ahe_grenade_gameGameMode::CollapseCurrentFloorRing()
 		TEXT("Collapsed floor ring %d. BrokenTiles=%d"),
 		CurrentFloorCollapseRing,
 		BrokenTileCount);
+}
+
+void Ahe_grenade_gameGameMode::EvaluateArenaReadiness()
+{
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!GrenadeGameState
+		|| !GrenadeGameState->HasCompleteArenaState()
+		|| GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::PostMatch
+		|| GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::ReturningToMenu)
+	{
+		return;
+	}
+
+	int32 PlayerCount = 0;
+	int32 ReadyCount = 0;
+	for (TActorIterator<APlayerController> It(GetWorld()); It; ++It)
+	{
+		const APlayerController* PlayerController = *It;
+		const AGrenadePlayerState* PlayerState =
+			PlayerController
+			? PlayerController->GetPlayerState<AGrenadePlayerState>()
+			: nullptr;
+		if (!PlayerState || PlayerState->IsOnlyASpectator())
+		{
+			continue;
+		}
+
+		++PlayerCount;
+		if (PlayerState->IsArenaReady()
+			&& PlayerState->GetReadyLayoutRevision() == GrenadeGameState->GetArenaLayoutRevision()
+			&& PlayerState->GetReadyLayoutChecksum() == GrenadeGameState->GetArenaLayoutChecksum())
+		{
+			++ReadyCount;
+		}
+	}
+
+	if (PlayerCount < 2 || ReadyCount != PlayerCount)
+	{
+		return;
+	}
+
+	if (GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::Reconnecting)
+	{
+		GetWorldTimerManager().ClearTimer(ReconnectGraceTimerHandle);
+		GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::InProgress);
+		if (bFloorCollapseActive)
+		{
+			GrenadeGameState->SetFloorCollapseState(
+				true,
+				CurrentFloorCollapseRing,
+				FloorCollapseTimeRemaining);
+		}
+		return;
+	}
+
+	if (GrenadeGameState->GetGrenadeMatchPhase() != EGGMatchPhase::InProgress
+		&& GrenadeGameState->GetGrenadeMatchPhase() != EGGMatchPhase::Countdown)
+	{
+		const float CountdownSeconds = FMath::Max(0.0f, MatchStartCountdownSeconds);
+		GrenadeGameState->SetGrenadeMatchPhase(
+			EGGMatchPhase::Countdown,
+			CountdownSeconds);
+		GetWorldTimerManager().ClearTimer(MatchStartTimerHandle);
+		if (CountdownSeconds <= KINDA_SMALL_NUMBER)
+		{
+			StartAuthoritativeMatch();
+		}
+		else
+		{
+			GetWorldTimerManager().SetTimer(
+				MatchStartTimerHandle,
+				this,
+				&Ahe_grenade_gameGameMode::StartAuthoritativeMatch,
+				CountdownSeconds,
+				false);
+		}
+	}
+}
+
+void Ahe_grenade_gameGameMode::StartAuthoritativeMatch()
+{
+	AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>();
+	if (!GrenadeGameState || !GrenadeGameState->HasCompleteArenaState())
+	{
+		return;
+	}
+
+	int32 PlayerCount = 0;
+	int32 ReadyCount = 0;
+	for (TActorIterator<APlayerController> It(GetWorld()); It; ++It)
+	{
+		const AGrenadePlayerState* PlayerState =
+			It->GetPlayerState<AGrenadePlayerState>();
+		if (!PlayerState || PlayerState->IsOnlyASpectator())
+		{
+			continue;
+		}
+		++PlayerCount;
+		ReadyCount += PlayerState->IsArenaReady() ? 1 : 0;
+	}
+
+	if (PlayerCount < 2 || ReadyCount != PlayerCount)
+	{
+		GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::ArenaSync);
+		return;
+	}
+
+	GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::InProgress);
+	InitializeFloorRingCollapse();
+}
+
+void Ahe_grenade_gameGameMode::ExpireReconnectGrace()
+{
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		if (GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::Reconnecting)
+		{
+			bFloorCollapseActive = false;
+			FloorCollapseTimeRemaining = 0.0f;
+			CurrentFloorRingArenaIds.Reset();
+			GrenadeGameState->SetFloorCollapseState(false, INDEX_NONE, 0.0f);
+			GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::PostMatch);
+		}
+	}
 }
 
 void Ahe_grenade_gameGameMode::ClearExistingArenaActors() const
@@ -860,13 +1515,11 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 					? FName(TEXT("Ramp_RisesPositive"))
 					: FName(TEXT("Ramp_RisesNegative")));
 		}
-		ShapeActor->bStartBroken = false;
 		ShapeActor->bBreakOnGrenadeImpact = true;
 		ShapeActor->bBounceGrenadeBeforeBreaking = true;
 		ShapeActor->BeginCompositeShape();
 		ShapeActor->SetVisualMaterials(GetShapeMaterial(ShapeType), TrajectoryHighlightMaterial);
 		BuildShapeGeometry(ShapeActor, ShapeType, RampDirection);
-		ShapeActor->ResetTile();
 		return ShapeActor;
 	};
 
@@ -1261,7 +1914,6 @@ int32 Ahe_grenade_gameGameMode::SpawnRandomGlassPanels(
 			bAlongX
 				? FName(TEXT("GlassPanel_AlongX"))
 				: FName(TEXT("GlassPanel_AlongY")));
-		Panel->bStartBroken = false;
 		Panel->bBreakOnGrenadeImpact = true;
 		Panel->bBounceGrenadeBeforeBreaking = true;
 		if (Panel->TileMesh)
@@ -1273,7 +1925,6 @@ int32 Ahe_grenade_gameGameMode::SpawnRandomGlassPanels(
 			FRotator::ZeroRotator,
 			PanelScale);
 		Panel->SetVisualMaterials(PanelMaterial, TrajectoryHighlightMaterial);
-		Panel->ResetTile();
 
 		if (Panel->TileMesh)
 		{
@@ -1521,7 +2172,6 @@ int32 Ahe_grenade_gameGameMode::SpawnMirroredLabyrinthPanels(
 		}
 
 		Panel->Tags.AddUnique(GeneratedArenaTag);
-		Panel->bStartBroken = false;
 		Panel->bBreakOnGrenadeImpact = false;
 		if (Panel->TileMesh)
 		{
@@ -1529,7 +2179,6 @@ int32 Ahe_grenade_gameGameMode::SpawnMirroredLabyrinthPanels(
 		}
 		Panel->SetMeshAndTransformStyle(PanelMesh, FRotator::ZeroRotator, FVector::OneVector);
 		Panel->SetVisualMaterials(LabyrinthPanelMaterial, TrajectoryHighlightMaterial);
-		Panel->ResetTile();
 		if (Panel->TileMesh)
 		{
 			Panel->TileMesh->SetCollisionProfileName(TEXT("BlockAll"));
@@ -1742,12 +2391,29 @@ int32 Ahe_grenade_gameGameMode::GetOrAssignSpawnSide(AController* Controller)
 		return *ExistingSide;
 	}
 
-	const int32 AssignedSide = NextSpawnSide % 2;
-	NextSpawnSide = (NextSpawnSide + 1) % 2;
+	AGrenadePlayerState* GrenadePlayerState =
+		Controller->GetPlayerState<AGrenadePlayerState>();
+	const FString OnlineIdentity = GrenadePlayerState
+		? GrenadePlayerState->GetEOSProductUserId()
+		: FString();
+	const int32* ReconnectedSide = OnlineIdentity.IsEmpty()
+		? nullptr
+		: SpawnSideByOnlineIdentity.Find(OnlineIdentity);
+	const int32 AssignedSide = ReconnectedSide
+		? *ReconnectedSide
+		: NextSpawnSide % 2;
+	if (!ReconnectedSide)
+	{
+		NextSpawnSide = (NextSpawnSide + 1) % 2;
+	}
 	SpawnSideByController.Add(Key, AssignedSide);
 
-	if (AGrenadePlayerState* GrenadePlayerState = Controller->GetPlayerState<AGrenadePlayerState>())
+	if (GrenadePlayerState)
 	{
+		if (!OnlineIdentity.IsEmpty())
+		{
+			SpawnSideByOnlineIdentity.Add(OnlineIdentity, AssignedSide);
+		}
 		GrenadePlayerState->SetAssignedSide(
 			AssignedSide == 0 ? EGGPlayerSide::Left : EGGPlayerSide::Right);
 		GrenadePlayerState->ClearArenaReady();

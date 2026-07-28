@@ -10,6 +10,7 @@
 class AController;
 class ABreakableTile;
 class ABreakableTileGrid;
+class AGrenadeActor;
 class APlayerController;
 class UMaterialInterface;
 
@@ -58,12 +59,28 @@ public:
 	Ahe_grenade_gameGameMode();
 
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual void Logout(AController* Exiting) override;
+
+	/** Validates the client's complete immutable + mutable arena receipt before enabling gameplay. */
+	void HandleArenaStateReady(
+		APlayerController* Player,
+		int32 LayoutRevision,
+		int64 LayoutChecksum,
+		int32 ArenaStateRevision);
+
+	bool IsPlayerGameplayReady(const AController* Controller) const;
 
 	/** Server-only shared death path for void falls and grenade eliminations. */
 	void EliminatePlayer(AController* Controller);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Match", meta = (ClampMin = "0.0", Units = "s"))
 	float RespawnDelaySeconds = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Match", meta = (ClampMin = "0.0", Units = "s"))
+	float MatchStartCountdownSeconds = 3.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Match", meta = (ClampMin = "1.0", Units = "s"))
+	float ReconnectGraceSeconds = 45.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena")
 	bool bSpawnBreakableGridOnBeginPlay = true;
@@ -320,11 +337,24 @@ private:
 	void UpdateFloorRingWarning();
 	void CollapseCurrentFloorRing();
 	void CacheCurrentFloorRingTiles();
+	void EvaluateArenaReadiness();
+	void StartAuthoritativeMatch();
+	void ExpireReconnectGrace();
+	void TickAuthorityVerificationScenarios();
+	bool SpawnVerificationGrenadeUnderPlayer(
+		APlayerController* ThrowingPlayer,
+		APlayerController* TargetPlayer,
+		const TCHAR* ScenarioLabel);
+	bool SpawnVerificationBounce(
+		APlayerController* ThrowingPlayer,
+		uint8 ArenaObjectTypeValue,
+		const TCHAR* ScenarioLabel);
 
 	UPROPERTY(Transient)
 	TObjectPtr<ABreakableTileGrid> ActiveBreakableGrid;
 
 	TMap<TWeakObjectPtr<AController>, int32> SpawnSideByController;
+	TMap<FString, int32> SpawnSideByOnlineIdentity;
 	FTransform GeneratedSpawnTransforms[2];
 	bool bHasGeneratedSpawnTransforms = false;
 	bool bArenaGeneratedThisMatch = false;
@@ -333,6 +363,12 @@ private:
 	int32 CurrentFloorCollapseRing = 0;
 	int32 MaximumFloorCollapseRing = INDEX_NONE;
 	float FloorCollapseTimeRemaining = 0.0f;
-	TArray<TWeakObjectPtr<ABreakableTile>> CurrentFloorRingTiles;
+	TArray<int32> CurrentFloorRingArenaIds;
 	TArray<FArenaObjectFootprint> LearningObjectFootprints;
+	FTimerHandle MatchStartTimerHandle;
+	FTimerHandle ReconnectGraceTimerHandle;
+	int32 AuthorityVerificationStage = 0;
+	float AuthorityVerificationStartWorldTime = -1.0f;
+	uint32 NextAuthorityVerificationThrowId = 900000;
+	int32 LastAuthorityVerificationFloorId = INDEX_NONE;
 };

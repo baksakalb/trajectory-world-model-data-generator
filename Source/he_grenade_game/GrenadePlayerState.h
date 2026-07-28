@@ -38,11 +38,24 @@ public:
 	int64 GetReadyLayoutChecksum() const { return ReadyLayoutChecksum; }
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Player")
+	int32 GetReadyArenaStateRevision() const { return ReadyArenaStateRevision; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Player")
+	bool IsAlive() const { return bAlive; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Player")
+	int32 GetDeathCount() const { return DeathCount; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Player")
+	float GetRespawnServerWorldTimeSeconds() const { return RespawnServerWorldTimeSeconds; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Player")
 	const FString& GetEOSProductUserId() const { return EOSProductUserId; }
 
 	void SetAssignedSide(EGGPlayerSide NewSide);
-	void SetArenaReady(int32 LayoutRevision, int64 LayoutChecksum);
+	void SetArenaReady(int32 LayoutRevision, int64 LayoutChecksum, int32 ArenaStateRevision);
 	void ClearArenaReady();
+	void SetLifeState(bool bNewAlive, float InRespawnServerWorldTimeSeconds = 0.0f);
 	void SetEOSProductUserId(const FString& NewProductUserId);
 
 private:
@@ -57,6 +70,18 @@ private:
 
 	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Player", meta = (AllowPrivateAccess = "true"))
 	int64 ReadyLayoutChecksum = 0;
+
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Player", meta = (AllowPrivateAccess = "true"))
+	int32 ReadyArenaStateRevision = INDEX_NONE;
+
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Player", meta = (AllowPrivateAccess = "true"))
+	bool bAlive = true;
+
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Player", meta = (AllowPrivateAccess = "true"))
+	int32 DeathCount = 0;
+
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Player", meta = (AllowPrivateAccess = "true"))
+	float RespawnServerWorldTimeSeconds = 0.0f;
 
 	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Player", meta = (AllowPrivateAccess = "true"))
 	FString EOSProductUserId;
