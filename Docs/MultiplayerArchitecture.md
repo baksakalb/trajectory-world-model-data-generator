@@ -99,6 +99,11 @@ component path on server and client, instead of basing the two worlds on
 unrelated tile actors. Static mesh/material/component data is reconstructed
 locally because those visuals do not replicate automatically.
 
+`AGameStateBase` derives from `AInfo`, whose UE 5.8 constructor hides the actor
+by default. `AGrenadeGameState` explicitly unhides itself so its runtime arena
+components render while remaining ordinary local mirrors; the snapshot and
+Fast Array are still the replicated source of truth.
+
 ### Mutable state
 
 Every destructible object has one `FFastArraySerializerItem`:

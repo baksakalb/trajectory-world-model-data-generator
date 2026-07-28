@@ -91,12 +91,14 @@ AGrenadeGameState::AGrenadeGameState()
 
 	ArenaRoot = CreateDefaultSubobject<USceneComponent>(TEXT("ArenaRoot"));
 	SetRootComponent(ArenaRoot);
+	SetActorHiddenInGame(false);
 	ArenaMutableState.SetOwner(this);
 }
 
 void AGrenadeGameState::BeginPlay()
 {
 	Super::BeginPlay();
+	SetActorHiddenInGame(false);
 	ArenaMutableState.SetOwner(this);
 }
 
@@ -567,11 +569,11 @@ UStaticMeshComponent* AGrenadeGameState::CreateRuntimeComponent(
 	Component->SetNetAddressable();
 	Component->SetMobility(EComponentMobility::Movable);
 	Component->SetStaticMesh(Mesh);
-	Component->SetWorldTransform(WorldTransform);
 	Component->SetCollisionProfileName(Asset.CollisionProfile.IsNone() ? FName(TEXT("BlockAll")) : Asset.CollisionProfile);
 	Component->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Component->SetGenerateOverlapEvents(false);
 	Component->SetVisibility(bVisible, true);
+	Component->SetHiddenInGame(!bVisible, true);
 	Component->CanCharacterStepUpOn = ECanBeCharacterBase::ECB_Yes;
 
 	UMaterialInterface* Material = Cast<UMaterialInterface>(Asset.MaterialPath.TryLoad());
@@ -581,6 +583,11 @@ UStaticMeshComponent* AGrenadeGameState::CreateRuntimeComponent(
 	}
 
 	Component->RegisterComponent();
+	Component->SetWorldTransform(
+		WorldTransform,
+		false,
+		nullptr,
+		ETeleportType::TeleportPhysics);
 
 	RuntimeComponents.Add(Component);
 	ComponentsByArenaId.FindOrAdd(ArenaId).Add(Component);

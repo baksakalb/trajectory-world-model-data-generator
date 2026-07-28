@@ -46,7 +46,7 @@ leave a child process behind.
 | `Build.bat he_grenade_gameEditor Win64 Development ... -WaitMutex -NoHotReload` | PASS, no compiler warnings |
 | `Build.bat he_grenade_game Win64 Development ... -WaitMutex -NoHotReload` | PASS, no compiler warnings |
 | `RunUAT.bat BuildCookRun ... -clientconfig=Development -build -cook -stage -package -pak -archive` | PASS |
-| Final incremental Development build/cook/package/archive | PASS; `Saved/PackagedVerification/Development-final-20260729` |
+| Final visibility-fix Development build/cook/package/archive | PASS; `Saved/PackagedVerification/Development-visibilityfix2-20260729` |
 
 The unrelated Shooter sample's UE 5.8 `STATETREE_POD_INSTANCEDATA`
 deprecation was updated to Epic's prescribed constructed-trivial macro so the
@@ -60,17 +60,38 @@ last global revision.
 
 | Run | Emulation | Authority IDs | Client IDs | Exact state parity | Result |
 | --- | --- | ---: | ---: | --- | --- |
-| `Zero-20260729-010318` | none, rendered + trace | 253 | 253 | yes | PASS |
+| `Zero-20260729-010318` | none, rendered + trace | 253 | 253 | yes | NETWORK PASS; visual regression found later |
 | `Jitter75-20260729-000150` | 75 ms lag, 25 ms variance | 195 | 195 | yes | PASS |
 | `Lag200-20260729-000427` | 200 ms lag | 285 | 285 | yes | PASS |
 | `Loss1-20260729-000621` | 1% loss | 252 | 252 | yes | PASS |
 | `Loss5-20260729-000737` | 5% loss | 252 | 252 | yes | PASS |
 | `Loss10-20260729-000844` | 10% loss | 252 | 252 | yes | PASS |
 | `Zero-20260729-002947` | disconnect/reconnect | 253 | 253 | yes | PASS |
-| `Zero-20260729-010115` | archived Development executables | 253 | 253 | yes | PASS |
+| `Zero-20260729-010115` | archived Development executables | 253 | 253 | yes | NETWORK PASS; predates visual fix |
+| `Zero-20260729-012807` | none, rendered after visibility fix | 115 | 115 | yes | PASS for startup/throw/destruction scope |
 
 The logs confirm that the requested `PktLag`, `PktLagVariance`, and `PktLoss`
 settings were applied by each corresponding process.
+
+## Runtime visibility regression and fix
+
+The first rendered evidence run proved the network assertions but did not prove
+the pixels: its arena was black. UE 5.8 `AInfo::AInfo` calls `SetHidden(true)`,
+and `AGameStateBase` inherits that setting. Because the redesigned runtime
+meshes are components of `AGrenadeGameState`, they were present, correctly
+transformed, and collidable but inherited a hidden owning actor.
+
+`AGrenadeGameState` now explicitly clears the actor hidden state. A native-RHI
+host capture after the fix shows the arena walls and HUD, and rendered
+two-process run `Zero-20260729-012807` confirms that the client applies the same
+341-object snapshot, both players become ready, the match reaches
+`InProgress`, both throw gateways work, and the host/client stable-ID maps match
+at revision 115. That short regression run intentionally ended before full
+collapse; the full-duration rows above cover the collapse behavior.
+
+The final archived Development executable was also captured through the native
+RHI after `BeginPlay` and shows the generated floor, walls, obstacles, and HUD;
+it is no longer a black frame.
 
 ## Gameplay matrix
 
