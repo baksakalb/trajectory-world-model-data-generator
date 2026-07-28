@@ -31,6 +31,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status")
 	FLinearColor SpeedTextColor = FLinearColor(0.95f, 0.95f, 0.95f, 1.0f);
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status")
+	FLinearColor TileTimerWarningColor = FLinearColor(1.0f, 0.12f, 0.08f, 1.0f);
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Status", meta = (ClampMin = "0.5", ClampMax = "3.0"))
 	float StatusTextScale = 1.1f;
 

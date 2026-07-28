@@ -8,6 +8,7 @@
 #include "he_grenade_gameGameMode.generated.h"
 
 class AController;
+class ABreakableTile;
 class ABreakableTileGrid;
 class UMaterialInterface;
 
@@ -121,6 +122,30 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Learning Shapes", meta = (ClampMin = "0.25", ClampMax = "0.95"))
 	float LearningShapeSizeCells = 0.72f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Learning Shapes", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LearningShapeSpawnChance = 0.08f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Ramps", meta = (ClampMin = "0.5"))
+	float RampLengthCells = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Ramps", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float RampSpawnChance = 0.06f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Ramps", meta = (ClampMin = "0.02", ClampMax = "0.30"))
+	float RampThicknessRatio = 0.10f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Glass Panels")
+	bool bSpawnGlassPanels = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Glass Panels", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GlassPanelSpawnChance = 0.48f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Glass Panels", meta = (ClampMin = "100.0", Units = "cm"))
+	float GlassPanelHeightCm = 220.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Glass Panels", meta = (ClampMin = "0.02", ClampMax = "0.50"))
+	float GlassPanelThicknessRatio = 0.10f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Spawning", meta = (ClampMin = "0"))
 	int32 SpawnPadClearanceX = 2;
 
@@ -139,6 +164,9 @@ public:
 	TObjectPtr<UMaterialInterface> LabyrinthPanelMaterial;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Materials")
+	TObjectPtr<UMaterialInterface> GlassPanelMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Materials")
 	TObjectPtr<UMaterialInterface> TrajectoryHighlightMaterial;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Materials")
@@ -152,6 +180,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Materials")
 	TObjectPtr<UMaterialInterface> HoopShapeMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Materials")
+	TObjectPtr<UMaterialInterface> RampShapeMaterial;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Materials")
 	TObjectPtr<UMaterialInterface> ArenaWallMaterial;
@@ -216,11 +247,33 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Rules", meta = (ClampMin = "200.0", Units = "cm"))
 	float KillZDropCm = 700.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Floor Collapse")
+	bool bEnableFloorRingCollapse = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena|Floor Collapse", meta = (ClampMin = "1.0", Units = "s"))
+	float FloorRingCollapseIntervalSeconds = 30.0f;
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	float GetFloorCollapseTimeRemaining() const { return FloorCollapseTimeRemaining; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	float GetFloorCollapseProgress() const;
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	bool IsFloorCollapseActive() const { return bFloorCollapseActive; }
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 
 private:
+	struct FArenaObjectFootprint
+	{
+		FVector2D Min = FVector2D::ZeroVector;
+		FVector2D Max = FVector2D::ZeroVector;
+	};
+
 	void GenerateProceduralArena();
 	void ClearExistingArenaActors() const;
 	void SpawnArenaWalls(const FVector& ArenaCenter, float HalfExtentX, float HalfExtentY, float TileTopSurfaceZ);
@@ -243,8 +296,21 @@ private:
 		int32 TilesX,
 		int32 TilesY,
 		FRandomStream& RandomStream);
+	int32 SpawnRandomGlassPanels(
+		ABreakableTileGrid* Grid,
+		UClass* TileClass,
+		float CellSizeCm,
+		float CellPitchCm,
+		float TileTopSurfaceZ,
+		int32 TilesX,
+		int32 TilesY,
+		FRandomStream& RandomStream);
 	void CacheSpawnTransforms(const FVector& ArenaCenter, float HalfExtentX, float TileTopSurfaceZ);
 	int32 GetOrAssignSpawnSide(AController* Controller);
+	void InitializeFloorRingCollapse();
+	void UpdateFloorRingWarning();
+	void CollapseCurrentFloorRing();
+	void CacheCurrentFloorRingTiles();
 
 	UPROPERTY(Transient)
 	TObjectPtr<ABreakableTileGrid> ActiveBreakableGrid;
@@ -253,5 +319,11 @@ private:
 	FTransform GeneratedSpawnTransforms[2];
 	bool bHasGeneratedSpawnTransforms = false;
 	bool bArenaGeneratedThisMatch = false;
+	bool bFloorCollapseActive = false;
 	int32 NextSpawnSide = 0;
+	int32 CurrentFloorCollapseRing = 0;
+	int32 MaximumFloorCollapseRing = INDEX_NONE;
+	float FloorCollapseTimeRemaining = 0.0f;
+	TArray<TWeakObjectPtr<ABreakableTile>> CurrentFloorRingTiles;
+	TArray<FArenaObjectFootprint> LearningObjectFootprints;
 };

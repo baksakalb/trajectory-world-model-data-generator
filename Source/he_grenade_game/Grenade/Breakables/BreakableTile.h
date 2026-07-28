@@ -6,6 +6,7 @@
 
 class UStaticMeshComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class UStaticMesh;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBreakableTileBroken, ABreakableTile*, Tile);
@@ -55,6 +56,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tile|Trajectory")
 	bool IsTrajectoryHighlighted() const { return bTrajectoryHighlighted; }
 
+	/** Blends the normal tile appearance toward the trajectory-warning material. */
+	UFUNCTION(BlueprintCallable, Category = "Tile|Warning")
+	void SetDestructionWarningAlpha(float WarningAlpha);
+
+	UFUNCTION(BlueprintPure, Category = "Tile|Warning")
+	float GetDestructionWarningAlpha() const { return DestructionWarningAlpha; }
+
 	UFUNCTION(BlueprintCallable, Category = "Tile|Style")
 	void SetMeshAndTransformStyle(UStaticMesh* InStaticMesh, FRotator InMeshRelativeRotation, FVector InMeshRelativeScale);
 
@@ -76,6 +84,7 @@ protected:
 
 private:
 	void ApplyTrajectoryHighlightState();
+	void UpdateDestructionWarningMaterial();
 	UMaterialInterface* GetActiveVisualMaterial() const;
 
 	UPROPERTY(VisibleAnywhere, Category = "Tile")
@@ -83,6 +92,12 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "Tile|Trajectory")
 	bool bTrajectoryHighlighted = false;
+
+	UPROPERTY(VisibleAnywhere, Category = "Tile|Warning")
+	float DestructionWarningAlpha = 0.0f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> DestructionWarningMaterial;
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UStaticMeshComponent>> CompositeShapeMeshes;

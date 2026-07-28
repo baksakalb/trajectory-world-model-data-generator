@@ -14,6 +14,7 @@
 #include "Grenade/GrenadeHUD.h"
 #include "he_grenade_game.h"
 #include "Materials/MaterialInterface.h"
+#include "UObject/ConstructorHelpers.h"
 
 namespace
 {
@@ -32,14 +33,65 @@ namespace
 
 Ahe_grenade_gameGameMode::Ahe_grenade_gameGameMode()
 {
+	PrimaryActorTick.bCanEverTick = true;
 	HUDClass = AGrenadeHUD::StaticClass();
 	BreakableTileGridClass = ABreakableTileGrid::StaticClass();
+
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> DefaultGlassPanelMaterial(
+		TEXT("/Game/Materials/M_GlassTile.M_GlassTile"));
+	if (DefaultGlassPanelMaterial.Succeeded())
+	{
+		GlassPanelMaterial = DefaultGlassPanelMaterial.Object;
+	}
+
 	// Keep the complete 2000 cm-deep arena pit above world zero. This avoids
 	// below-surface rendering and atmospheric differences at the void bottom.
 	BreakableTileGridTransform = FTransform(
 		FRotator::ZeroRotator,
 		FVector(0.0f, 0.0f, 2606.0f),
 		FVector::OneVector);
+}
+
+void Ahe_grenade_gameGameMode::Tick(const float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (!bFloorCollapseActive || !ActiveBreakableGrid)
+	{
+		return;
+	}
+
+	FloorCollapseTimeRemaining -= FMath::Max(0.0f, DeltaSeconds);
+	if (FloorCollapseTimeRemaining > 0.0f)
+	{
+		UpdateFloorRingWarning();
+		return;
+	}
+
+	CollapseCurrentFloorRing();
+	++CurrentFloorCollapseRing;
+	if (CurrentFloorCollapseRing > MaximumFloorCollapseRing)
+	{
+		bFloorCollapseActive = false;
+		FloorCollapseTimeRemaining = 0.0f;
+		CurrentFloorRingTiles.Reset();
+		return;
+	}
+
+	FloorCollapseTimeRemaining = FMath::Max(1.0f, FloorRingCollapseIntervalSeconds);
+	CacheCurrentFloorRingTiles();
+	UpdateFloorRingWarning();
+}
+
+float Ahe_grenade_gameGameMode::GetFloorCollapseProgress() const
+{
+	if (!bFloorCollapseActive)
+	{
+		return 1.0f;
+	}
+
+	const float SafeInterval = FMath::Max(1.0f, FloorRingCollapseIntervalSeconds);
+	return 1.0f - FMath::Clamp(FloorCollapseTimeRemaining / SafeInterval, 0.0f, 1.0f);
 }
 
 void Ahe_grenade_gameGameMode::BeginPlay()
@@ -94,6 +146,12 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 	NextSpawnSide = 0;
 	bHasGeneratedSpawnTransforms = false;
 	bArenaGeneratedThisMatch = false;
+	bFloorCollapseActive = false;
+	CurrentFloorRingTiles.Reset();
+	LearningObjectFootprints.Reset();
+	CurrentFloorCollapseRing = 0;
+	MaximumFloorCollapseRing = INDEX_NONE;
+	FloorCollapseTimeRemaining = 0.0f;
 
 	const int32 EffectiveMinTilesX = FMath::Max(MinArenaTiles, FMath::Min(MinTilesX, MaxTilesX));
 	const int32 EffectiveMaxTilesX = FMath::Max(MinArenaTiles, FMath::Max(MinTilesX, MaxTilesX));
@@ -188,6 +246,18 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 			RandomStream)
 		: 0;
 
+	const int32 SpawnedGlassPanelCount = bSpawnGlassPanels
+		? SpawnRandomGlassPanels(
+			SpawnedGrid,
+			ShapeTileClass,
+			TileSizeCm,
+			TilePitchCm,
+			TileTopSurfaceZ,
+			TilesX,
+			TilesY,
+			RandomStream)
+		: 0;
+
 	CacheSpawnTransforms(ArenaCenter, HalfExtentX, TileTopSurfaceZ);
 
 	if (AWorldSettings* WS = World->GetWorldSettings())
@@ -196,16 +266,109 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 	}
 
 	bArenaGeneratedThisMatch = true;
+	InitializeFloorRingCollapse();
 
 	UE_LOG(
 		Loghe_grenade_game,
 		Log,
-		TEXT("Generated learning arena. Seed=%d Tiles=(%d x %d) TileSize=%.1f LearningShapes=%d"),
+		TEXT("Generated learning arena. Seed=%d Tiles=(%d x %d) TileSize=%.1f LearningShapes=%d GlassPanels=%d"),
 		LastGeneratedArenaSeed,
 		TilesX,
 		TilesY,
 		TileSizeCm,
-		SpawnedShapeActorCount);
+		SpawnedShapeActorCount,
+		SpawnedGlassPanelCount);
+}
+
+void Ahe_grenade_gameGameMode::InitializeFloorRingCollapse()
+{
+	bFloorCollapseActive = false;
+	CurrentFloorRingTiles.Reset();
+	CurrentFloorCollapseRing = 0;
+	FloorCollapseTimeRemaining = 0.0f;
+
+	if (!bEnableFloorRingCollapse || !ActiveBreakableGrid)
+	{
+		return;
+	}
+
+	MaximumFloorCollapseRing =
+		(FMath::Min(ActiveBreakableGrid->TilesX, ActiveBreakableGrid->TilesY) - 1) / 2;
+	if (MaximumFloorCollapseRing < 0)
+	{
+		return;
+	}
+
+	FloorCollapseTimeRemaining = FMath::Max(1.0f, FloorRingCollapseIntervalSeconds);
+	bFloorCollapseActive = true;
+	CacheCurrentFloorRingTiles();
+	UpdateFloorRingWarning();
+
+	UE_LOG(
+		Loghe_grenade_game,
+		Log,
+		TEXT("Floor ring collapse armed. Rings=%d Interval=%.1fs FirstRingTiles=%d"),
+		MaximumFloorCollapseRing + 1,
+		FloorCollapseTimeRemaining,
+		CurrentFloorRingTiles.Num());
+}
+
+void Ahe_grenade_gameGameMode::CacheCurrentFloorRingTiles()
+{
+	CurrentFloorRingTiles.Reset();
+	if (!ActiveBreakableGrid)
+	{
+		return;
+	}
+
+	const int32 MaxX = ActiveBreakableGrid->TilesX - 1;
+	const int32 MaxY = ActiveBreakableGrid->TilesY - 1;
+	for (int32 Y = 0; Y <= MaxY; ++Y)
+	{
+		for (int32 X = 0; X <= MaxX; ++X)
+		{
+			const int32 RingIndex = FMath::Min(
+				FMath::Min(X, MaxX - X),
+				FMath::Min(Y, MaxY - Y));
+			if (RingIndex == CurrentFloorCollapseRing)
+			{
+				CurrentFloorRingTiles.Add(ActiveBreakableGrid->GetTileAtIndex(X, Y));
+			}
+		}
+	}
+}
+
+void Ahe_grenade_gameGameMode::UpdateFloorRingWarning()
+{
+	const float WarningAlpha = GetFloorCollapseProgress();
+	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : CurrentFloorRingTiles)
+	{
+		if (ABreakableTile* Tile = TilePtr.Get())
+		{
+			Tile->SetDestructionWarningAlpha(WarningAlpha);
+		}
+	}
+}
+
+void Ahe_grenade_gameGameMode::CollapseCurrentFloorRing()
+{
+	int32 BrokenTileCount = 0;
+	for (const TWeakObjectPtr<ABreakableTile>& TilePtr : CurrentFloorRingTiles)
+	{
+		if (ABreakableTile* Tile = TilePtr.Get(); Tile && !Tile->IsBroken())
+		{
+			Tile->SetDestructionWarningAlpha(1.0f);
+			Tile->BreakTile();
+			++BrokenTileCount;
+		}
+	}
+
+	UE_LOG(
+		Loghe_grenade_game,
+		Log,
+		TEXT("Collapsed floor ring %d. BrokenTiles=%d"),
+		CurrentFloorCollapseRing,
+		BrokenTileCount);
 }
 
 void Ahe_grenade_gameGameMode::ClearExistingArenaActors() const
@@ -384,9 +547,12 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 
 	UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	if (!CubeMesh || !SphereMesh)
+	UStaticMesh* HoopMesh = LoadObject<UStaticMesh>(
+		nullptr,
+		TEXT("/Game/Meshes/SM_BreakableHoop.SM_BreakableHoop"));
+	if (!CubeMesh || !SphereMesh || !HoopMesh)
 	{
-		UE_LOG(Loghe_grenade_game, Warning, TEXT("Learning shape generation skipped: basic shape meshes are unavailable."));
+		UE_LOG(Loghe_grenade_game, Warning, TEXT("Learning shape generation skipped: required shape meshes are unavailable."));
 		return 0;
 	}
 
@@ -395,7 +561,8 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 		Rectangle,
 		Triangle,
 		Sphere,
-		Hoop
+		Hoop,
+		Ramp
 	};
 
 	const FVector GridStart = Grid->GetActorLocation()
@@ -405,11 +572,6 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 	const float SafeCellSizeCm = FMath::Max(100.0f, CellSizeCm);
 	const float SafeCellPitchCm = FMath::Max(SafeCellSizeCm, CellPitchCm);
 	const float ShapeOuterSizeCm = SafeCellSizeCm * FMath::Clamp(LearningShapeSizeCells, 0.25f, 0.95f);
-	const int32 LeftX = FMath::Clamp(
-		FMath::Max(SpawnPadClearanceX + 2, TilesX / 4),
-		2,
-		FMath::Max(2, (TilesX / 2) - 2));
-	const int32 RightX = (TilesX - 1) - LeftX;
 
 	auto GetShapeMaterial = [&](const ELearningShape ShapeType) -> UMaterialInterface*
 	{
@@ -421,8 +583,12 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 			return TriangleShapeMaterial;
 		case ELearningShape::Sphere:
 			return SphereShapeMaterial;
-		default:
+		case ELearningShape::Hoop:
 			return HoopShapeMaterial;
+		default:
+			return RampShapeMaterial
+				? RampShapeMaterial.Get()
+				: (RectangleShapeMaterial ? RectangleShapeMaterial.Get() : FloorTileMaterial.Get());
 		}
 	};
 
@@ -436,8 +602,10 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 			return FName(TEXT("LearningShape_Triangle"));
 		case ELearningShape::Sphere:
 			return FName(TEXT("LearningShape_Sphere"));
-		default:
+		case ELearningShape::Hoop:
 			return FName(TEXT("LearningShape_Hoop"));
+		default:
+			return FName(TEXT("LearningShape_Ramp"));
 		}
 	};
 
@@ -453,7 +621,8 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 				DimensionsCm.Z / CubeSizeCm));
 	};
 
-	auto BuildShapeGeometry = [&](ABreakableTile* ShapeActor, const ELearningShape ShapeType)
+	auto BuildShapeGeometry =
+		[&](ABreakableTile* ShapeActor, const ELearningShape ShapeType, const FIntPoint& RampDirection)
 	{
 		if (!ShapeActor)
 		{
@@ -513,38 +682,80 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 
 		case ELearningShape::Hoop:
 		{
-			constexpr int32 HoopSegmentCount = 12;
-			const float HoopRadiusCm = ShapeOuterSizeCm * 0.34f;
-			const float SegmentLengthCm =
-				(2.0f * HoopRadiusCm * FMath::Sin(PI / static_cast<float>(HoopSegmentCount))) * 1.18f;
+			// The imported torus is 82 cm across and centered at the origin.
+			// Its static-mesh asset owns decomposed convex collision, preserving
+			// the open center while rendering as one continuous surface.
+			ShapeActor->AddCompositeShapePiece(
+				HoopMesh,
+				FVector::ZeroVector,
+				FRotator::ZeroRotator,
+				FVector(ShapeOuterSizeCm / 100.0f));
+			break;
+		}
 
-			for (int32 SegmentIndex = 0; SegmentIndex < HoopSegmentCount; ++SegmentIndex)
+		case ELearningShape::Ramp:
+		{
+			const float RampRunCm = SafeCellSizeCm * FMath::Max(0.5f, RampLengthCells);
+			const float RampHeightCm = FMath::Max(100.0f, GlassPanelHeightCm);
+			const float RampThicknessCm =
+				SafeCellSizeCm * FMath::Clamp(RampThicknessRatio, 0.02f, 0.30f);
+
+			// Solve for a rotated slab whose world-aligned bounds are exactly the
+			// requested run and height, including the slab's own thickness.
+			float RampAngleRadians = FMath::Atan2(RampHeightCm, RampRunCm);
+			float CenterlineRunCm = RampRunCm;
+			float CenterlineRiseCm = RampHeightCm;
+			for (int32 Iteration = 0; Iteration < 4; ++Iteration)
 			{
-				const float AngleRadians =
-					(2.0f * PI * static_cast<float>(SegmentIndex)) / static_cast<float>(HoopSegmentCount);
-				const float AngleDegrees = FMath::RadiansToDegrees(AngleRadians);
-				const FVector SegmentCenter(
-					0.0f,
-					HoopRadiusCm * FMath::Cos(AngleRadians),
-					HoopRadiusCm * FMath::Sin(AngleRadians));
-
-				AddCubePiece(
-					ShapeActor,
-					SegmentCenter,
-					FRotator(0.0f, 0.0f, AngleDegrees + 90.0f),
-					FVector(DepthCm * 0.82f, SegmentLengthCm, BarThicknessCm));
+				CenterlineRunCm = FMath::Max(
+					1.0f,
+					RampRunCm - (RampThicknessCm * FMath::Sin(RampAngleRadians)));
+				CenterlineRiseCm = FMath::Max(
+					1.0f,
+					RampHeightCm - (RampThicknessCm * FMath::Cos(RampAngleRadians)));
+				RampAngleRadians = FMath::Atan2(CenterlineRiseCm, CenterlineRunCm);
 			}
+
+			const float RampSlabLengthCm =
+				FMath::Sqrt(FMath::Square(CenterlineRunCm) + FMath::Square(CenterlineRiseCm));
+			const float RampAngleDegrees = FMath::RadiansToDegrees(RampAngleRadians);
+			const bool bAlongX = RampDirection.X != 0;
+			const float DirectionSign = bAlongX
+				? static_cast<float>(RampDirection.X)
+				: static_cast<float>(RampDirection.Y);
+			const FRotator RampRotation = bAlongX
+				? FRotator(RampAngleDegrees * DirectionSign, 0.0f, 0.0f)
+				: FRotator(0.0f, 0.0f, RampAngleDegrees * DirectionSign);
+			const FVector RampDimensions = bAlongX
+				? FVector(RampSlabLengthCm, SafeCellSizeCm, RampThicknessCm)
+				: FVector(SafeCellSizeCm, RampSlabLengthCm, RampThicknessCm);
+
+			AddCubePiece(
+				ShapeActor,
+				FVector::ZeroVector,
+				RampRotation,
+				RampDimensions);
 			break;
 		}
 		}
 	};
 
-	auto SpawnShapeAtCell = [&](const ELearningShape ShapeType, const int32 X, const int32 Y) -> ABreakableTile*
+	auto SpawnShapeAtCell = [&](
+		const ELearningShape ShapeType,
+		const int32 X,
+		const int32 Y,
+		const FIntPoint& RampDirection) -> ABreakableTile*
 	{
 		const FVector FloorCenter = GridStart
 			+ (XAxis * (SafeCellPitchCm * static_cast<float>(X)))
 			+ (YAxis * (SafeCellPitchCm * static_cast<float>(Y)));
-		const FVector ShapeCenter(FloorCenter.X, FloorCenter.Y, TileTopSurfaceZ + (ShapeOuterSizeCm * 0.5f) + 3.0f);
+		const float ShapeCenterHeightCm = ShapeType == ELearningShape::Ramp
+			? (FMath::Max(100.0f, GlassPanelHeightCm) * 0.5f)
+			: ((ShapeOuterSizeCm * 0.5f) + 3.0f);
+		const FVector ShapeCenter(
+			FloorCenter.X,
+			FloorCenter.Y,
+			TileTopSurfaceZ + ShapeCenterHeightCm);
 
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.Owner = this;
@@ -564,17 +775,28 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 		ShapeActor->Tags.AddUnique(GeneratedArenaTag);
 		ShapeActor->Tags.AddUnique(TEXT("LearningShape"));
 		ShapeActor->Tags.AddUnique(GetShapeTag(ShapeType));
+		if (ShapeType == ELearningShape::Ramp)
+		{
+			ShapeActor->Tags.AddUnique(
+				RampDirection.X != 0
+					? FName(TEXT("Ramp_AlongX"))
+					: FName(TEXT("Ramp_AlongY")));
+			ShapeActor->Tags.AddUnique(
+				(RampDirection.X + RampDirection.Y) > 0
+					? FName(TEXT("Ramp_RisesPositive"))
+					: FName(TEXT("Ramp_RisesNegative")));
+		}
 		ShapeActor->bStartBroken = false;
 		ShapeActor->bBreakOnGrenadeImpact = true;
 		ShapeActor->bBounceGrenadeBeforeBreaking = true;
 		ShapeActor->BeginCompositeShape();
 		ShapeActor->SetVisualMaterials(GetShapeMaterial(ShapeType), TrajectoryHighlightMaterial);
-		BuildShapeGeometry(ShapeActor, ShapeType);
+		BuildShapeGeometry(ShapeActor, ShapeType, RampDirection);
 		ShapeActor->ResetTile();
 		return ShapeActor;
 	};
 
-	const ELearningShape ShapeTypes[] =
+	const ELearningShape NonRampShapeTypes[] =
 	{
 		ELearningShape::Rectangle,
 		ELearningShape::Triangle,
@@ -582,30 +804,464 @@ int32 Ahe_grenade_gameGameMode::SpawnSymmetricLearningShapes(
 		ELearningShape::Hoop
 	};
 
-	int32 SpawnedActorCount = 0;
-	for (int32 ShapeIndex = 0; ShapeIndex < UE_ARRAY_COUNT(ShapeTypes); ++ShapeIndex)
+	const int32 SpawnCenterY = TilesY / 2;
+	const int32 LeftSpawnX = FMath::Clamp(1, 0, TilesX - 1);
+	const int32 RightSpawnX = FMath::Clamp(TilesX - 2, 0, TilesX - 1);
+	auto IsSpawnClearanceCell = [&](const int32 X, const int32 Y)
 	{
-		const int32 RowIndex = FMath::Clamp(
-			FMath::RoundToInt((static_cast<float>(ShapeIndex + 1) * static_cast<float>(TilesY - 1)) / 5.0f),
-			1,
-			TilesY - 2);
+		const bool bWithinY = FMath::Abs(Y - SpawnCenterY) <= SpawnPadClearanceY;
+		const bool bWithinLeftX = FMath::Abs(X - LeftSpawnX) <= SpawnPadClearanceX;
+		const bool bWithinRightX = FMath::Abs(X - RightSpawnX) <= SpawnPadClearanceX;
+		return bWithinY && (bWithinLeftX || bWithinRightX);
+	};
 
-		// A seed only decides which end of the row receives the first spawn call; layout stays mirrored and stable.
-		const bool bSpawnRightFirst = RandomStream.RandRange(0, 1) == 1;
-		const int32 FirstX = bSpawnRightFirst ? RightX : LeftX;
-		const int32 SecondX = bSpawnRightFirst ? LeftX : RightX;
+	auto BuildSymmetricOrbit = [&](const int32 X, const int32 Y)
+	{
+		const int32 MirroredX = (TilesX - 1) - X;
+		const int32 MirroredY = (TilesY - 1) - Y;
+		TArray<FIntPoint> Orbit;
+		Orbit.Reserve(4);
+		Orbit.AddUnique(FIntPoint(X, Y));
+		Orbit.AddUnique(FIntPoint(MirroredX, Y));
+		Orbit.AddUnique(FIntPoint(X, MirroredY));
+		Orbit.AddUnique(FIntPoint(MirroredX, MirroredY));
+		return Orbit;
+	};
 
-		if (SpawnShapeAtCell(ShapeTypes[ShapeIndex], FirstX, RowIndex))
+	const float CellHalfExtentGridUnits = (SafeCellSizeCm / SafeCellPitchCm) * 0.5f;
+	const float StandardShapeHalfExtentGridUnits = (ShapeOuterSizeCm / SafeCellPitchCm) * 0.5f;
+	const float RampReachGridUnits =
+		(FMath::Max(0.5f, RampLengthCells) * SafeCellSizeCm) / SafeCellPitchCm;
+
+	auto MakeShapeFootprint = [&](const ELearningShape ShapeType, const FIntPoint& Cell, const FIntPoint& RampDirection)
+	{
+		FArenaObjectFootprint Footprint;
+		const FVector2D CellCenter(static_cast<float>(Cell.X), static_cast<float>(Cell.Y));
+		if (ShapeType != ELearningShape::Ramp)
 		{
-			++SpawnedActorCount;
+			const FVector2D Extent(StandardShapeHalfExtentGridUnits);
+			Footprint.Min = CellCenter - Extent;
+			Footprint.Max = CellCenter + Extent;
+			return Footprint;
 		}
-		if (SpawnShapeAtCell(ShapeTypes[ShapeIndex], SecondX, RowIndex))
+
+		if (RampDirection.X != 0)
 		{
-			++SpawnedActorCount;
+			Footprint.Min = FVector2D(
+				CellCenter.X - (RampReachGridUnits * 0.5f),
+				CellCenter.Y - CellHalfExtentGridUnits);
+			Footprint.Max = FVector2D(
+				CellCenter.X + (RampReachGridUnits * 0.5f),
+				CellCenter.Y + CellHalfExtentGridUnits);
+		}
+		else
+		{
+			Footprint.Min = FVector2D(
+				CellCenter.X - CellHalfExtentGridUnits,
+				CellCenter.Y - (RampReachGridUnits * 0.5f));
+			Footprint.Max = FVector2D(
+				CellCenter.X + CellHalfExtentGridUnits,
+				CellCenter.Y + (RampReachGridUnits * 0.5f));
+		}
+		return Footprint;
+	};
+
+	auto FootprintsOverlap = [](const FArenaObjectFootprint& A, const FArenaObjectFootprint& B)
+	{
+		constexpr float ContactTolerance = 0.005f;
+		return A.Max.X > (B.Min.X + ContactTolerance)
+			&& B.Max.X > (A.Min.X + ContactTolerance)
+			&& A.Max.Y > (B.Min.Y + ContactTolerance)
+			&& B.Max.Y > (A.Min.Y + ContactTolerance);
+	};
+
+	auto FootprintFitsArena = [&](const FArenaObjectFootprint& Footprint)
+	{
+		return Footprint.Min.X >= -CellHalfExtentGridUnits
+			&& Footprint.Min.Y >= -CellHalfExtentGridUnits
+			&& Footprint.Max.X <= static_cast<float>(TilesX - 1) + CellHalfExtentGridUnits
+			&& Footprint.Max.Y <= static_cast<float>(TilesY - 1) + CellHalfExtentGridUnits;
+	};
+
+	TArray<FIntPoint> CandidateCells;
+	const int32 LastSourceColumn = (TilesX - 1) / 2;
+	const int32 LastSourceRow = (TilesY - 1) / 2;
+	for (int32 Y = 1; Y <= LastSourceRow; ++Y)
+	{
+		for (int32 X = 1; X <= LastSourceColumn; ++X)
+		{
+			const TArray<FIntPoint> Orbit = BuildSymmetricOrbit(X, Y);
+			if (Orbit.Num() == 1)
+			{
+				// A directional ramp cannot occupy the exact arena center while
+				// remaining symmetric across both axes.
+				continue;
+			}
+
+			bool bOrbitIsClear = true;
+			for (const FIntPoint& Cell : Orbit)
+			{
+				if (IsSpawnClearanceCell(Cell.X, Cell.Y))
+				{
+					bOrbitIsClear = false;
+					break;
+				}
+			}
+			if (bOrbitIsClear)
+			{
+				CandidateCells.Add(FIntPoint(X, Y));
+			}
 		}
 	}
 
+	for (int32 Index = CandidateCells.Num() - 1; Index > 0; --Index)
+	{
+		const int32 SwapIndex = RandomStream.RandRange(0, Index);
+		CandidateCells.Swap(Index, SwapIndex);
+	}
+
+	int32 SpawnedActorCount = 0;
+	auto SpawnShapeOrbit = [&](const ELearningShape ShapeType, const FIntPoint& SourceCell) -> bool
+	{
+		const bool bOnXCenterline = SourceCell.X == ((TilesX - 1) - SourceCell.X);
+		const bool bOnYCenterline = SourceCell.Y == ((TilesY - 1) - SourceCell.Y);
+		const bool bRampAlongX = bOnYCenterline
+			? true
+			: (bOnXCenterline ? false : (RandomStream.RandRange(0, 1) == 0));
+		const int32 RampDirectionSign = RandomStream.RandRange(0, 1) == 0 ? -1 : 1;
+		const FIntPoint SourceRampDirection = bRampAlongX
+			? FIntPoint(RampDirectionSign, 0)
+			: FIntPoint(0, RampDirectionSign);
+
+		const TArray<FIntPoint> Orbit = BuildSymmetricOrbit(SourceCell.X, SourceCell.Y);
+		TArray<FIntPoint> RampDirections;
+		TArray<FArenaObjectFootprint> ProposedFootprints;
+		RampDirections.Reserve(Orbit.Num());
+		ProposedFootprints.Reserve(Orbit.Num());
+
+		for (const FIntPoint& Cell : Orbit)
+		{
+			FIntPoint MirroredRampDirection = SourceRampDirection;
+			if (Cell.X != SourceCell.X)
+			{
+				MirroredRampDirection.X *= -1;
+			}
+			if (Cell.Y != SourceCell.Y)
+			{
+				MirroredRampDirection.Y *= -1;
+			}
+
+			const FArenaObjectFootprint Footprint =
+				MakeShapeFootprint(ShapeType, Cell, MirroredRampDirection);
+			if (!FootprintFitsArena(Footprint))
+			{
+				return false;
+			}
+			for (const FArenaObjectFootprint& ExistingFootprint : LearningObjectFootprints)
+			{
+				if (FootprintsOverlap(Footprint, ExistingFootprint))
+				{
+					return false;
+				}
+			}
+			for (const FArenaObjectFootprint& ProposedFootprint : ProposedFootprints)
+			{
+				if (FootprintsOverlap(Footprint, ProposedFootprint))
+				{
+					return false;
+				}
+			}
+
+			RampDirections.Add(MirroredRampDirection);
+			ProposedFootprints.Add(Footprint);
+		}
+
+		bool bSpawnedAny = false;
+		for (int32 OrbitIndex = 0; OrbitIndex < Orbit.Num(); ++OrbitIndex)
+		{
+			const FIntPoint& Cell = Orbit[OrbitIndex];
+			const FIntPoint& RampDirection = RampDirections[OrbitIndex];
+			if (SpawnShapeAtCell(ShapeType, Cell.X, Cell.Y, RampDirection))
+			{
+				++SpawnedActorCount;
+				bSpawnedAny = true;
+				LearningObjectFootprints.Add(ProposedFootprints[OrbitIndex]);
+			}
+		}
+		return bSpawnedAny;
+	};
+
+	TSet<int32> UsedCandidateIndices;
+	int32 GuaranteedTypeCount = 0;
+	auto TrySpawnGuaranteedType = [&](const ELearningShape ShapeType)
+	{
+		for (int32 CandidateIndex = 0; CandidateIndex < CandidateCells.Num(); ++CandidateIndex)
+		{
+			if (UsedCandidateIndices.Contains(CandidateIndex))
+			{
+				continue;
+			}
+			if (SpawnShapeOrbit(ShapeType, CandidateCells[CandidateIndex]))
+			{
+				UsedCandidateIndices.Add(CandidateIndex);
+				++GuaranteedTypeCount;
+				return true;
+			}
+		}
+		return false;
+	};
+
+	// Large directional footprints are hardest to place. Reserve their valid space
+	// first, then let smaller objects fill around them.
+	TrySpawnGuaranteedType(ELearningShape::Ramp);
+	const float AdditionalRampChance = FMath::Clamp(RampSpawnChance, 0.0f, 1.0f);
+	for (int32 CandidateIndex = 0; CandidateIndex < CandidateCells.Num(); ++CandidateIndex)
+	{
+		if (!UsedCandidateIndices.Contains(CandidateIndex)
+			&& RandomStream.FRand() <= AdditionalRampChance
+			&& SpawnShapeOrbit(ELearningShape::Ramp, CandidateCells[CandidateIndex]))
+		{
+			UsedCandidateIndices.Add(CandidateIndex);
+		}
+	}
+
+	for (const ELearningShape ShapeType : NonRampShapeTypes)
+	{
+		TrySpawnGuaranteedType(ShapeType);
+	}
+
+	const float AdditionalShapeChance = FMath::Clamp(LearningShapeSpawnChance, 0.0f, 1.0f);
+	for (int32 CandidateIndex = 0; CandidateIndex < CandidateCells.Num(); ++CandidateIndex)
+	{
+		if (!UsedCandidateIndices.Contains(CandidateIndex)
+			&& RandomStream.FRand() <= AdditionalShapeChance)
+		{
+			const ELearningShape ShapeType =
+				NonRampShapeTypes[RandomStream.RandRange(0, UE_ARRAY_COUNT(NonRampShapeTypes) - 1)];
+			if (SpawnShapeOrbit(ShapeType, CandidateCells[CandidateIndex]))
+			{
+				UsedCandidateIndices.Add(CandidateIndex);
+			}
+		}
+	}
+
+	constexpr int32 RequiredShapeTypeCount = UE_ARRAY_COUNT(NonRampShapeTypes) + 1;
+	if (GuaranteedTypeCount < RequiredShapeTypeCount)
+	{
+		UE_LOG(
+			Loghe_grenade_game,
+			Warning,
+			TEXT("Only %d learning-shape types could be guaranteed because the arena has too few clear symmetric cells."),
+			GuaranteedTypeCount);
+	}
+
 	return SpawnedActorCount;
+}
+
+int32 Ahe_grenade_gameGameMode::SpawnRandomGlassPanels(
+	ABreakableTileGrid* Grid,
+	UClass* TileClass,
+	const float CellSizeCm,
+	const float CellPitchCm,
+	const float TileTopSurfaceZ,
+	const int32 TilesX,
+	const int32 TilesY,
+	FRandomStream& RandomStream)
+{
+	UWorld* World = GetWorld();
+	if (!World || !Grid || !TileClass || TilesX < 1 || TilesY < 1)
+	{
+		return 0;
+	}
+
+	UStaticMesh* PanelMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	UMaterialInterface* PanelMaterial = GlassPanelMaterial
+		? GlassPanelMaterial.Get()
+		: LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_GlassTile.M_GlassTile"));
+	if (!PanelMesh || !PanelMaterial)
+	{
+		UE_LOG(
+			Loghe_grenade_game,
+			Warning,
+			TEXT("Glass panel generation skipped: required cube mesh or glass material is unavailable."));
+		return 0;
+	}
+
+	const float SafeCellSizeCm = FMath::Max(100.0f, CellSizeCm);
+	const float SafeCellPitchCm = FMath::Max(SafeCellSizeCm, CellPitchCm);
+	const float PanelLengthCm = SafeCellSizeCm;
+	const float PanelThicknessCm =
+		SafeCellSizeCm * FMath::Clamp(GlassPanelThicknessRatio, 0.02f, 0.50f);
+	const float PanelHeight = FMath::Max(100.0f, GlassPanelHeightCm);
+	const float SpawnChance = FMath::Clamp(GlassPanelSpawnChance, 0.0f, 1.0f);
+
+	const FVector GridStart = Grid->GetActorLocation()
+		+ Grid->GetActorTransform().TransformVectorNoScale(Grid->GridLocalOriginOffset);
+	const FVector XAxis = Grid->GetActorForwardVector();
+	const FVector YAxis = Grid->GetActorRightVector();
+	const FVector ZAxis = Grid->GetActorUpVector();
+
+	const int32 SpawnCenterY = TilesY / 2;
+	const int32 LeftSpawnX = FMath::Clamp(1, 0, TilesX - 1);
+	const int32 RightSpawnX = FMath::Clamp(TilesX - 2, 0, TilesX - 1);
+
+	auto IsSpawnClearanceCell = [&](const int32 X, const int32 Y)
+	{
+		const bool bWithinY = FMath::Abs(Y - SpawnCenterY) <= SpawnPadClearanceY;
+		const bool bWithinLeftX = FMath::Abs(X - LeftSpawnX) <= SpawnPadClearanceX;
+		const bool bWithinRightX = FMath::Abs(X - RightSpawnX) <= SpawnPadClearanceX;
+		return bWithinY && (bWithinLeftX || bWithinRightX);
+	};
+
+	const float PanelHalfLengthGridUnits = (PanelLengthCm / SafeCellPitchCm) * 0.5f;
+	const float PanelHalfThicknessGridUnits = (PanelThicknessCm / SafeCellPitchCm) * 0.5f;
+	auto MakePanelFootprint = [&](const int32 X, const int32 Y, const bool bAlongX)
+	{
+		const FVector2D Center(static_cast<float>(X), static_cast<float>(Y));
+		const FVector2D Extent = bAlongX
+			? FVector2D(PanelHalfLengthGridUnits, PanelHalfThicknessGridUnits)
+			: FVector2D(PanelHalfThicknessGridUnits, PanelHalfLengthGridUnits);
+		FArenaObjectFootprint Footprint;
+		Footprint.Min = Center - Extent;
+		Footprint.Max = Center + Extent;
+		return Footprint;
+	};
+
+	auto OverlapsLearningObject = [&](const FArenaObjectFootprint& PanelFootprint)
+	{
+		constexpr float ContactTolerance = 0.005f;
+		for (const FArenaObjectFootprint& ObjectFootprint : LearningObjectFootprints)
+		{
+			if (PanelFootprint.Max.X > (ObjectFootprint.Min.X + ContactTolerance)
+				&& ObjectFootprint.Max.X > (PanelFootprint.Min.X + ContactTolerance)
+				&& PanelFootprint.Max.Y > (ObjectFootprint.Min.Y + ContactTolerance)
+				&& ObjectFootprint.Max.Y > (PanelFootprint.Min.Y + ContactTolerance))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.ObjectFlags = RF_Transactional;
+
+	int32 SpawnedPanelCount = 0;
+	auto SpawnPanelAtCell = [&](const int32 X, const int32 Y, const bool bAlongX) -> bool
+	{
+		const FVector FloorCenter = GridStart
+			+ (XAxis * (SafeCellPitchCm * static_cast<float>(X)))
+			+ (YAxis * (SafeCellPitchCm * static_cast<float>(Y)));
+		const FVector PanelCenter(
+			FloorCenter.X,
+			FloorCenter.Y,
+			TileTopSurfaceZ + (PanelHeight * 0.5f));
+		const FVector PanelScale = bAlongX
+			? FVector(
+				PanelLengthCm / CubeSizeCm,
+				PanelThicknessCm / CubeSizeCm,
+				PanelHeight / CubeSizeCm)
+			: FVector(
+				PanelThicknessCm / CubeSizeCm,
+				PanelLengthCm / CubeSizeCm,
+				PanelHeight / CubeSizeCm);
+
+		const FTransform PanelTransform(
+			Grid->GetActorRotation(),
+			PanelCenter,
+			FVector::OneVector);
+		ABreakableTile* Panel = World->SpawnActor<ABreakableTile>(
+			TileClass,
+			PanelTransform,
+			SpawnParams);
+		if (!Panel)
+		{
+			return false;
+		}
+
+		Panel->Tags.AddUnique(GeneratedArenaTag);
+		Panel->Tags.AddUnique(TEXT("GlassPanel"));
+		Panel->Tags.AddUnique(
+			bAlongX
+				? FName(TEXT("GlassPanel_AlongX"))
+				: FName(TEXT("GlassPanel_AlongY")));
+		Panel->bStartBroken = false;
+		Panel->bBreakOnGrenadeImpact = true;
+		Panel->bBounceGrenadeBeforeBreaking = true;
+		if (Panel->TileMesh)
+		{
+			Panel->TileMesh->SetMobility(EComponentMobility::Movable);
+		}
+		Panel->SetMeshAndTransformStyle(
+			PanelMesh,
+			FRotator::ZeroRotator,
+			PanelScale);
+		Panel->SetVisualMaterials(PanelMaterial, TrajectoryHighlightMaterial);
+		Panel->ResetTile();
+
+		if (Panel->TileMesh)
+		{
+			Panel->TileMesh->SetCollisionProfileName(TEXT("BlockAll"));
+			Panel->TileMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			Panel->TileMesh->SetCollisionResponseToAllChannels(ECR_Block);
+			Panel->TileMesh->SetGenerateOverlapEvents(false);
+			Panel->TileMesh->SetCastShadow(false);
+			Panel->TileMesh->CanCharacterStepUpOn = ECanBeCharacterBase::ECB_No;
+		}
+		Panel->SetActorEnableCollision(true);
+		return true;
+	};
+
+	// Generate one quadrant, then reflect each accepted placement across both arena
+	// centerlines. The same chance and orientation therefore produce four-way fairness.
+	TSet<FIntPoint> OccupiedPanelCells;
+	const int32 LastSourceColumn = (TilesX - 1) / 2;
+	const int32 LastSourceRow = (TilesY - 1) / 2;
+	for (int32 Y = 0; Y <= LastSourceRow; ++Y)
+	{
+		for (int32 X = 0; X <= LastSourceColumn; ++X)
+		{
+			const int32 MirroredX = (TilesX - 1) - X;
+			const int32 MirroredY = (TilesY - 1) - Y;
+			TArray<FIntPoint> Orbit;
+			Orbit.Reserve(4);
+			Orbit.AddUnique(FIntPoint(X, Y));
+			Orbit.AddUnique(FIntPoint(MirroredX, Y));
+			Orbit.AddUnique(FIntPoint(X, MirroredY));
+			Orbit.AddUnique(FIntPoint(MirroredX, MirroredY));
+
+			const bool bAlongX = RandomStream.RandRange(0, 1) == 0;
+			bool bOrbitIsClear = true;
+			for (const FIntPoint& Cell : Orbit)
+			{
+				if (IsSpawnClearanceCell(Cell.X, Cell.Y)
+					|| OccupiedPanelCells.Contains(Cell)
+					|| OverlapsLearningObject(MakePanelFootprint(Cell.X, Cell.Y, bAlongX)))
+				{
+					bOrbitIsClear = false;
+					break;
+				}
+			}
+
+			if (!bOrbitIsClear || RandomStream.FRand() > SpawnChance)
+			{
+				continue;
+			}
+
+			for (const FIntPoint& Cell : Orbit)
+			{
+				if (SpawnPanelAtCell(Cell.X, Cell.Y, bAlongX))
+				{
+					++SpawnedPanelCount;
+					OccupiedPanelCells.Add(Cell);
+				}
+			}
+		}
+	}
+
+	return SpawnedPanelCount;
 }
 
 int32 Ahe_grenade_gameGameMode::SpawnMirroredLabyrinthPanels(
