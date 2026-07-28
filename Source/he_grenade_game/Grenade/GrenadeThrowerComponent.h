@@ -137,6 +137,9 @@ protected:
 private:
 	void BeginThrowHold();
 	void TryThrowGrenade(const FGrenadeLaunchParams* LaunchParamsOverride = nullptr);
+	void SpawnGrenadeAuthoritative(const FGrenadeLaunchParams& LaunchParams);
+	bool SanitizeClientLaunchParams(const FGrenadeLaunchParams& ClientLaunchParams, FGrenadeLaunchParams& OutLaunchParams) const;
+	void DetonateInHandAuthoritative(const FVector& ExplosionOrigin);
 	void EnterCooldown();
 	void ExitCooldown();
 	void SetThrowState(EGrenadeThrowState NewState);
@@ -149,7 +152,16 @@ private:
 	bool BuildCurrentLaunchParams(FGrenadeLaunchParams& OutLaunchParams) const;
 	bool ComputeLaunchTransform(FVector& OutSpawnLocation, FVector& OutInitialVelocity, float ThrowSpeedCmPerSec) const;
 
+	UFUNCTION(Server, Reliable)
+	void ServerThrowGrenade(FGrenadeLaunchParams LaunchParams);
+
+	UFUNCTION(Server, Reliable)
+	void ServerDetonateInHand(FVector_NetQuantize ExplosionOrigin);
+
+	void RunNetworkSelfTestThrow();
+
 	FTimerHandle CooldownTimerHandle;
+	FTimerHandle NetworkSelfTestTimerHandle;
 
 	EGrenadeThrowState ThrowState = EGrenadeThrowState::Ready;
 	bool bThrowInputHeld = false;

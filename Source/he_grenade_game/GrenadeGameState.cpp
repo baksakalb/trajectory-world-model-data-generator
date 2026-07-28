@@ -463,6 +463,24 @@ void AGrenadeGameState::RefreshAuthoritativeBreakStates()
 	}
 	if (bChanged)
 	{
+		int32 BrokenFloorCount = 0;
+		for (const uint8 State : ReplicatedFloorBrokenStates)
+		{
+			BrokenFloorCount += State != 0 ? 1 : 0;
+		}
+		int32 BrokenActorCount = 0;
+		for (const uint8 State : ReplicatedActorBrokenStates)
+		{
+			BrokenActorCount += State != 0 ? 1 : 0;
+		}
+		UE_LOG(
+			Loghe_grenade_game,
+			Log,
+			TEXT("Replicating authoritative break state: floor %d/%d, objects %d/%d."),
+			BrokenFloorCount,
+			ReplicatedFloorBrokenStates.Num(),
+			BrokenActorCount,
+			ReplicatedActorBrokenStates.Num());
 		ForceNetUpdate();
 	}
 }
@@ -479,6 +497,7 @@ void AGrenadeGameState::ApplyReplicatedArenaState()
 		return;
 	}
 
+	int32 NewlyAppliedBreaks = 0;
 	const float WarningAlpha = GetFloorCollapseProgress();
 	const int32 MaxX = ArenaGridLayout.TilesX - 1;
 	const int32 MaxY = ArenaGridLayout.TilesY - 1;
@@ -495,6 +514,7 @@ void AGrenadeGameState::ApplyReplicatedArenaState()
 			if (!Tile->IsBroken())
 			{
 				Tile->BreakTile();
+				++NewlyAppliedBreaks;
 			}
 			continue;
 		}
@@ -511,7 +531,17 @@ void AGrenadeGameState::ApplyReplicatedArenaState()
 		if (Tile && ReplicatedActorBrokenStates.IsValidIndex(Index) && ReplicatedActorBrokenStates[Index] != 0 && !Tile->IsBroken())
 		{
 			Tile->BreakTile();
+			++NewlyAppliedBreaks;
 		}
+	}
+
+	if (NewlyAppliedBreaks > 0)
+	{
+		UE_LOG(
+			Loghe_grenade_game,
+			Log,
+			TEXT("Client applied %d newly replicated arena break(s)."),
+			NewlyAppliedBreaks);
 	}
 }
 

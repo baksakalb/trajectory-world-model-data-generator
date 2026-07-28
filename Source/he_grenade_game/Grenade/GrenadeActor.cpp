@@ -31,6 +31,10 @@ namespace
 AGrenadeActor::AGrenadeActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	bReplicates = true;
+	SetReplicateMovement(true);
+	SetNetUpdateFrequency(30.0f);
+	SetMinNetUpdateFrequency(15.0f);
 
 	CollisionComponent = CreateDefaultSubobject<USphereComponent>(TEXT("CollisionComponent"));
 	SetRootComponent(CollisionComponent);
@@ -62,6 +66,11 @@ void AGrenadeActor::BeginPlay()
 	Super::BeginPlay();
 	ApplyVisualMaterial();
 
+	if (!HasAuthority())
+	{
+		return;
+	}
+
 	if (!bInitialized)
 	{
 		FGrenadeSim::InitializeState(SimState, GetActorLocation(), GetActorForwardVector() * 1400.0f, 2.5f);
@@ -81,7 +90,10 @@ void AGrenadeActor::ApplyVisualMaterial()
 				SelectedMaterial = GameMode->GrenadeMaterial;
 			}
 		}
-		VisualMesh->SetMaterial(0, SelectedMaterial);
+		if (SelectedMaterial)
+		{
+			VisualMesh->SetMaterial(0, SelectedMaterial);
+		}
 	}
 }
 
@@ -89,7 +101,7 @@ void AGrenadeActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!bInitialized || bExploded)
+	if (!HasAuthority() || !bInitialized || bExploded)
 	{
 		return;
 	}
@@ -253,7 +265,7 @@ void AGrenadeActor::SimulateFixedStep(float StepSeconds)
 
 void AGrenadeActor::ExplodeNow()
 {
-	if (bExploded)
+	if (!HasAuthority() || bExploded)
 	{
 		return;
 	}
@@ -268,5 +280,11 @@ void AGrenadeActor::HandleBrokenTile(ABreakableTile* Tile)
 	if (Tile)
 	{
 		Tile->BreakTile();
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("Authoritative grenade broke tile %s for %s."),
+			*GetNameSafe(Tile),
+			*GetNameSafe(OwningActor.Get()));
 	}
 }

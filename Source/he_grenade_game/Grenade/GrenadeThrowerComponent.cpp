@@ -26,6 +26,12 @@ namespace
 		0,
 		TEXT("Logs release-snapshot launch params and actual spawned launch params. 0=off, 1=on"),
 		ECVF_Default);
+
+	static TAutoConsoleVariable<int32> CVarGGGrenadeNetworkSelfTest(
+		TEXT("gg.Grenade.NetworkSelfTest"),
+		0,
+		TEXT("Development test: each locally controlled pawn performs one normal authoritative throw. 0=off, 1=on"),
+		ECVF_Cheat);
 }
 
 UGrenadeThrowerComponent::UGrenadeThrowerComponent()
@@ -33,6 +39,7 @@ UGrenadeThrowerComponent::UGrenadeThrowerComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
+	SetIsReplicatedByDefault(true);
 }
 
 void UGrenadeThrowerComponent::BeginPlay()
@@ -64,6 +71,20 @@ void UGrenadeThrowerComponent::BeginPlay()
 
 	SetThrowState(EGrenadeThrowState::Ready);
 
+	if (CVarGGGrenadeNetworkSelfTest.GetValueOnGameThread() != 0)
+	{
+		if (const APawn* OwnerPawn = Cast<APawn>(GetOwner()); OwnerPawn && OwnerPawn->IsLocallyControlled())
+		{
+			const float DelaySeconds = GetOwner() && GetOwner()->HasAuthority() ? 2.0f : 2.5f;
+			GetWorld()->GetTimerManager().SetTimer(
+				NetworkSelfTestTimerHandle,
+				this,
+				&UGrenadeThrowerComponent::RunNetworkSelfTestThrow,
+				DelaySeconds,
+				false);
+		}
+	}
+
 	UE_LOG(
 		LogTemp,
 		Log,
@@ -83,6 +104,7 @@ void UGrenadeThrowerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(CooldownTimerHandle);
+		World->GetTimerManager().ClearTimer(NetworkSelfTestTimerHandle);
 	}
 
 	bThrowInputHeld = false;
@@ -375,23 +397,126 @@ void UGrenadeThrowerComponent::TryThrowGrenade(const FGrenadeLaunchParams* Launc
 			VelocityDelta);
 	}
 
+	if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		SpawnGrenadeAuthoritative(LaunchParams);
+	}
+	else
+	{
+		ServerThrowGrenade(LaunchParams);
+	}
+
+	EnterCooldown();
+}
+
+void UGrenadeThrowerComponent::ServerThrowGrenade_Implementation(FGrenadeLaunchParams LaunchParams)
+{
+	if (ThrowState != EGrenadeThrowState::Ready || !GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	FGrenadeLaunchParams SafeLaunchParams;
+	if (!SanitizeClientLaunchParams(LaunchParams, SafeLaunchParams))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Rejected invalid grenade launch request from %s."), *GetNameSafe(GetOwner()));
+		return;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("Server accepted client grenade request from %s."), *GetNameSafe(GetOwner()));
+	SpawnGrenadeAuthoritative(SafeLaunchParams);
+	EnterCooldown();
+}
+
+void UGrenadeThrowerComponent::RunNetworkSelfTestThrow()
+{
+	FGrenadeLaunchParams LaunchParams;
+	if (ThrowState == EGrenadeThrowState::Ready && BuildCurrentLaunchParams(LaunchParams))
+	{
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("Network self-test throw initiated by %s (authority=%d)."),
+			*GetNameSafe(GetOwner()),
+			GetOwner() && GetOwner()->HasAuthority() ? 1 : 0);
+		TryThrowGrenade(&LaunchParams);
+	}
+}
+
+void UGrenadeThrowerComponent::SpawnGrenadeAuthoritative(const FGrenadeLaunchParams& LaunchParams)
+{
+	if (!GetWorld() || !GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = GetOwner();
 	SpawnParams.Instigator = Cast<APawn>(GetOwner());
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	UClass* SpawnClass = GrenadeClass ? GrenadeClass.Get() : AGrenadeActor::StaticClass();
-	if (AGrenadeActor* Grenade = GetWorld()->SpawnActor<AGrenadeActor>(SpawnClass, LaunchParams.SpawnLocation, FRotator::ZeroRotator, SpawnParams))
+	if (AGrenadeActor* Grenade = GetWorld()->SpawnActor<AGrenadeActor>(
+		SpawnClass,
+		LaunchParams.SpawnLocation,
+		FRotator::ZeroRotator,
+		SpawnParams))
 	{
+		// Blueprint defaults may predate multiplayer support, so enforce the
+		// authoritative actor's replication settings at runtime as well.
+		Grenade->SetReplicates(true);
+		Grenade->SetReplicateMovement(true);
 		Grenade->InitializeGrenade(
 			LaunchParams.SpawnLocation,
 			LaunchParams.InitialVelocity,
 			LaunchParams.FuseSeconds,
 			SimulationConfig,
 			GetOwner());
+
+		UE_LOG(
+			LogTemp,
+			Log,
+			TEXT("Authoritative grenade spawned for %s at (%.1f, %.1f, %.1f)."),
+			*GetNameSafe(GetOwner()),
+			LaunchParams.SpawnLocation.X,
+			LaunchParams.SpawnLocation.Y,
+			LaunchParams.SpawnLocation.Z);
+	}
+}
+
+bool UGrenadeThrowerComponent::SanitizeClientLaunchParams(
+	const FGrenadeLaunchParams& ClientLaunchParams,
+	FGrenadeLaunchParams& OutLaunchParams) const
+{
+	const AActor* OwnerActor = GetOwner();
+	if (!OwnerActor
+		|| ClientLaunchParams.SpawnLocation.ContainsNaN()
+		|| ClientLaunchParams.InitialVelocity.ContainsNaN()
+		|| !FMath::IsFinite(ClientLaunchParams.FuseSeconds))
+	{
+		return false;
 	}
 
-	EnterCooldown();
+	constexpr float MaxAllowedSpawnDistanceCm = 250.0f;
+	if (FVector::DistSquared(ClientLaunchParams.SpawnLocation, OwnerActor->GetActorLocation())
+		> FMath::Square(MaxAllowedSpawnDistanceCm))
+	{
+		return false;
+	}
+
+	const float OwnerSpeedContribution = OwnerActor->GetVelocity().Size() * FMath::Max(0.0f, ThrowInheritVelocityFactor);
+	const float MaxAllowedSpeed = FMath::Max(MinThrowSpeedCmPerSec, MaxThrowSpeedCmPerSec)
+		+ OwnerSpeedContribution
+		+ 100.0f;
+	if (ClientLaunchParams.InitialVelocity.SizeSquared() > FMath::Square(MaxAllowedSpeed))
+	{
+		return false;
+	}
+
+	OutLaunchParams = ClientLaunchParams;
+	OutLaunchParams.FuseSeconds = FMath::Clamp(ClientLaunchParams.FuseSeconds, 0.05f, FMath::Max(0.1f, FuseSeconds));
+	OutLaunchParams.bCanThrowNow = true;
+	return true;
 }
 
 void UGrenadeThrowerComponent::EnterCooldown()
@@ -465,17 +590,14 @@ void UGrenadeThrowerComponent::DetonateInHand()
 		}
 	}
 
-	float ExplosionRadius = 300.0f;
-	UClass* SpawnClass = GrenadeClass ? GrenadeClass.Get() : AGrenadeActor::StaticClass();
-	if (SpawnClass)
+	if (GetOwner() && GetOwner()->HasAuthority())
 	{
-		if (const AGrenadeActor* GrenadeDefaults = Cast<AGrenadeActor>(SpawnClass->GetDefaultObject()))
-		{
-			ExplosionRadius = FMath::Max(0.0f, GrenadeDefaults->ExplosionRadiusCm);
-		}
+		DetonateInHandAuthoritative(ExplosionOrigin);
 	}
-
-	AGrenadeActor::ApplyInstantKillBlast(World, ExplosionOrigin, ExplosionRadius, nullptr, GetOwner());
+	else
+	{
+		ServerDetonateInHand(ExplosionOrigin);
+	}
 
 	bDetonatedInHandThisHold = true;
 	bThrowInputHeld = false;
@@ -487,6 +609,44 @@ void UGrenadeThrowerComponent::DetonateInHand()
 	LastHeldDurationSeconds = 0.0f;
 	SetComponentTickEnabled(false);
 	EnterCooldown();
+}
+
+void UGrenadeThrowerComponent::ServerDetonateInHand_Implementation(FVector_NetQuantize ExplosionOrigin)
+{
+	if (ThrowState != EGrenadeThrowState::Ready || !GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	constexpr float MaxAllowedExplosionOffsetCm = 250.0f;
+	const FVector OwnerLocation = GetOwner()->GetActorLocation();
+	if (FVector::DistSquared(ExplosionOrigin, OwnerLocation) > FMath::Square(MaxAllowedExplosionOffsetCm))
+	{
+		ExplosionOrigin = OwnerLocation;
+	}
+
+	DetonateInHandAuthoritative(ExplosionOrigin);
+	EnterCooldown();
+}
+
+void UGrenadeThrowerComponent::DetonateInHandAuthoritative(const FVector& ExplosionOrigin)
+{
+	if (!GetWorld() || !GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	float ExplosionRadius = 300.0f;
+	UClass* SpawnClass = GrenadeClass ? GrenadeClass.Get() : AGrenadeActor::StaticClass();
+	if (SpawnClass)
+	{
+		if (const AGrenadeActor* GrenadeDefaults = Cast<AGrenadeActor>(SpawnClass->GetDefaultObject()))
+		{
+			ExplosionRadius = FMath::Max(0.0f, GrenadeDefaults->ExplosionRadiusCm);
+		}
+	}
+
+	AGrenadeActor::ApplyInstantKillBlast(GetWorld(), ExplosionOrigin, ExplosionRadius, nullptr, GetOwner());
 }
 
 float UGrenadeThrowerComponent::GetHeldDurationSeconds() const
