@@ -62,6 +62,36 @@ void Ahe_grenade_gameGameMode::PostLogin(APlayerController* NewPlayer)
 	GetOrAssignSpawnSide(NewPlayer);
 }
 
+void Ahe_grenade_gameGameMode::EliminatePlayer(AController* Controller)
+{
+	if (!HasAuthority() || !Controller || !GetWorld())
+	{
+		return;
+	}
+
+	if (APawn* Pawn = Controller->GetPawn())
+	{
+		Controller->UnPossess();
+		Pawn->Destroy();
+	}
+
+	const TWeakObjectPtr<AController> WeakController(Controller);
+	FTimerHandle RespawnTimer;
+	GetWorldTimerManager().SetTimer(
+		RespawnTimer,
+		FTimerDelegate::CreateWeakLambda(
+			this,
+			[this, WeakController]()
+			{
+				if (AController* ValidController = WeakController.Get())
+				{
+					RestartPlayer(ValidController);
+				}
+			}),
+		FMath::Max(0.05f, RespawnDelaySeconds),
+		false);
+}
+
 void Ahe_grenade_gameGameMode::Tick(const float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);

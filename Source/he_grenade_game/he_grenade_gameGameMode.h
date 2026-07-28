@@ -59,6 +59,12 @@ public:
 
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 
+	/** Server-only shared death path for void falls and grenade eliminations. */
+	void EliminatePlayer(AController* Controller);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Match", meta = (ClampMin = "0.0", Units = "s"))
+	float RespawnDelaySeconds = 1.5f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena")
 	bool bSpawnBreakableGridOnBeginPlay = true;
 

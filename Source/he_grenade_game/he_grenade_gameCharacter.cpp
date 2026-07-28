@@ -17,6 +17,7 @@
 #include "Grenade/GrenadeThrowerComponent.h"
 #include "Grenade/GrenadeTrajectoryComponent.h"
 #include "he_grenade_game.h"
+#include "he_grenade_gameGameMode.h"
 
 Ahe_grenade_gameCharacter::Ahe_grenade_gameCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UGGMovementComponent>(ACharacter::CharacterMovementComponentName))
@@ -286,16 +287,19 @@ void Ahe_grenade_gameCharacter::DoCrouchEnd()
 
 void Ahe_grenade_gameCharacter::FellOutOfWorld(const UDamageType& DmgType)
 {
-	AController* PawnController = GetController();
-	Destroy();
-
-	if (PawnController)
+	if (!HasAuthority())
 	{
-		if (AGameModeBase* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode() : nullptr)
-		{
-			GameMode->RestartPlayer(PawnController);
-		}
+		return;
 	}
+
+	if (Ahe_grenade_gameGameMode* GameMode =
+		GetWorld() ? Cast<Ahe_grenade_gameGameMode>(GetWorld()->GetAuthGameMode()) : nullptr)
+	{
+		GameMode->EliminatePlayer(GetController());
+		return;
+	}
+
+	Super::FellOutOfWorld(DmgType);
 }
 
 void Ahe_grenade_gameCharacter::RefreshCrouchFromInput()

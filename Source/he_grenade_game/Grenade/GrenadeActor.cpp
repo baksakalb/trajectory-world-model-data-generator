@@ -7,6 +7,7 @@
 #include "Engine/OverlapResult.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/GameModeBase.h"
+#include "he_grenade_gameGameMode.h"
 #include "GameFramework/Pawn.h"
 #include "Grenade/Breakables/BreakableTile.h"
 #include "he_grenade_gameGameMode.h"
@@ -188,14 +189,14 @@ void AGrenadeActor::ApplyInstantKillBlast(UWorld* World, const FVector& Origin, 
 		}
 
 		AController* Controller = Pawn->GetController();
-		Pawn->Destroy();
-
-		if (Controller)
+		if (Ahe_grenade_gameGameMode* GameMode =
+			Cast<Ahe_grenade_gameGameMode>(World->GetAuthGameMode()))
 		{
-			if (AGameModeBase* GameMode = World->GetAuthGameMode())
-			{
-				GameMode->RestartPlayer(Controller);
-			}
+			GameMode->EliminatePlayer(Controller);
+		}
+		else
+		{
+			Pawn->Destroy();
 		}
 	}
 }
