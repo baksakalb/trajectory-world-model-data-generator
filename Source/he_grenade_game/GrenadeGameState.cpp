@@ -15,8 +15,8 @@
 
 namespace
 {
-	const FName GeneratedArenaTag(TEXT("GeneratedArena"));
-	const FName ClientArenaReplicaTag(TEXT("ClientArenaReplica"));
+	const FName ReplicatedArenaGeneratedTag(TEXT("GeneratedArena"));
+	const FName ReplicatedArenaClientReplicaTag(TEXT("ClientArenaReplica"));
 
 	uint32 HashFloat(const float Value)
 	{
@@ -127,7 +127,7 @@ void AGrenadeGameState::PublishGeneratedArena(
 		if (!IsValid(Actor)
 			|| Actor == Grid
 			|| FloorTiles.Contains(Actor)
-			|| !Actor->ActorHasTag(GeneratedArenaTag))
+			|| !Actor->ActorHasTag(ReplicatedArenaGeneratedTag))
 		{
 			continue;
 		}
@@ -235,7 +235,7 @@ void AGrenadeGameState::ClearClientArenaReplica()
 		TArray<AActor*> TaggedActors;
 		for (TActorIterator<AActor> It(GetWorld()); It; ++It)
 		{
-			if (It->ActorHasTag(ClientArenaReplicaTag))
+			if (It->ActorHasTag(ReplicatedArenaClientReplicaTag))
 			{
 				TaggedActors.Add(*It);
 			}
@@ -282,7 +282,7 @@ void AGrenadeGameState::BuildClientArenaReplica()
 		return;
 	}
 
-	Grid->Tags.Add(ClientArenaReplicaTag);
+	Grid->Tags.Add(ReplicatedArenaClientReplicaTag);
 	Grid->bSpawnOnBeginPlay = false;
 	Grid->TilesX = ArenaGridLayout.TilesX;
 	Grid->TilesY = ArenaGridLayout.TilesY;
@@ -300,7 +300,7 @@ void AGrenadeGameState::BuildClientArenaReplica()
 	{
 		if (FloorTile)
 		{
-			FloorTile->Tags.Add(ClientArenaReplicaTag);
+			FloorTile->Tags.Add(ReplicatedArenaClientReplicaTag);
 			FloorTile->SetVisualMaterials(FloorMaterial, TrajectoryMaterial);
 			FloorTile->ResetTile();
 			ClientFloorTiles.Add(FloorTile);
@@ -323,7 +323,7 @@ void AGrenadeGameState::BuildClientArenaReplica()
 			continue;
 		}
 
-		SpawnedActor->Tags.Add(ClientArenaReplicaTag);
+		SpawnedActor->Tags.Add(ReplicatedArenaClientReplicaTag);
 		SpawnedActor->SetNetAddressable();
 		ClientArenaActors.Add(SpawnedActor);
 

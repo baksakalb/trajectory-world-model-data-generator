@@ -2,6 +2,9 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "EngineUtils.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
@@ -46,6 +49,27 @@ void ABreakableTile::BreakTile()
 
 	SetDestructionWarningAlpha(0.0f);
 	SetTrajectoryHighlighted(false);
+
+	// CharacterMovement caches the component it is standing on. In network play,
+	// an autonomous proxy can otherwise remain based on this now-non-colliding
+	// tile until a later server correction, which looks like levitation.
+	if (UWorld* World = GetWorld())
+	{
+		for (TActorIterator<ACharacter> It(World); It; ++It)
+		{
+			ACharacter* Character = *It;
+			UObject* MovementBaseObject = Character ? Character->GetMovementBaseObject() : nullptr;
+			UPrimitiveComponent* MovementBase = Cast<UPrimitiveComponent>(MovementBaseObject);
+			if (MovementBase && MovementBase->GetOwner() == this)
+			{
+				Character->SetBase(static_cast<FMovementBaseInterfaceData*>(nullptr));
+				if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+				{
+					Movement->SetMovementMode(MOVE_Falling);
+				}
+			}
+		}
+	}
 
 	bBroken = true;
 	SetActorHiddenInGame(true);
