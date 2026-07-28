@@ -5,11 +5,10 @@
 #include "Components/ActorComponent.h"
 #include "GrenadeTrajectoryComponent.generated.h"
 
-class AGrenadeGameState;
+class ABreakableTile;
 class APlayerController;
 class UCanvas;
 class UGrenadeThrowerComponent;
-struct FGrenadeArenaHit;
 
 UCLASS(ClassGroup = (Grenade), BlueprintType, Blueprintable, meta = (BlueprintSpawnableComponent))
 class HE_GRENADE_GAME_API UGrenadeTrajectoryComponent : public UActorComponent
@@ -88,17 +87,15 @@ protected:
 private:
 	void ClearHighlightedTiles();
 	void ClearTrajectoryVisual();
-	void SyncHighlightedTiles(const TSet<int32>& DesiredArenaObjectIds);
-	FGrenadeArenaHit ResolveArenaHit(const FHitResult& Hit) const;
-	void AppendIgnoredArenaObject(int32 ArenaObjectId, FCollisionQueryParams& QueryParams) const;
-	AGrenadeGameState* GetArenaGameState() const;
+	void SyncHighlightedTiles(const TSet<TWeakObjectPtr<ABreakableTile>>& DesiredTiles);
+	ABreakableTile* ResolveBreakableTile(const FHitResult& Hit) const;
 	void DrawPredictedPath();
 	bool ResolveViewLocation(FVector& OutViewLocation) const;
 	bool ResolveFloorZ(float& OutFloorZ);
 	bool IsPointVisibleFromView(const FVector& ViewLocation, const FVector& Point, AActor* OwnerActor, UWorld* World) const;
 
 	TWeakObjectPtr<UGrenadeThrowerComponent> ThrowerComponent;
-	TSet<int32> HighlightedArenaObjectIds;
+	TSet<TWeakObjectPtr<ABreakableTile>> HighlightedTiles;
 	TArray<TArray<FVector>> CachedTrajectoryRuns;
 	FLinearColor CachedTrajectoryColor = FLinearColor::White;
 	bool bHasCachedExplosionTip = false;

@@ -59,19 +59,12 @@ void ABreakableTileGrid::BuildGrid()
 
 			FActorSpawnParameters SpawnParams;
 			SpawnParams.Owner = this;
-			SpawnParams.Name = FName(*FString::Printf(TEXT("ArenaFloor_%d_%d"), X, Y));
-			SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
 			SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 			SpawnParams.ObjectFlags = RF_Transactional;
 
 			ABreakableTile* SpawnedTile = GetWorld()->SpawnActor<ABreakableTile>(SpawnClass, SpawnTransform, SpawnParams);
 			if (SpawnedTile)
 			{
-				SpawnedTile->SetNetAddressable();
-				if (SpawnedTile->TileMesh)
-				{
-					SpawnedTile->TileMesh->SetNetAddressable();
-				}
 				SpawnedTiles.Add(SpawnedTile);
 			}
 		}

@@ -16,16 +16,11 @@
 #include "Grenade/GGMovementComponent.h"
 #include "Grenade/GrenadeThrowerComponent.h"
 #include "Grenade/GrenadeTrajectoryComponent.h"
-#include "GrenadeGameState.h"
-#include "GrenadePlayerState.h"
 #include "he_grenade_game.h"
-#include "he_grenade_gameGameMode.h"
 
 Ahe_grenade_gameCharacter::Ahe_grenade_gameCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UGGMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
-	bReplicates = true;
-
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
@@ -155,11 +150,6 @@ void Ahe_grenade_gameCharacter::DoAim(float Yaw, float Pitch)
 
 void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
 {
-	if (!IsGameplayInputAllowed())
-	{
-		return;
-	}
-
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
 	{
 		if (MovementComponent->IsCrouchHopChainActive())
@@ -182,11 +172,6 @@ void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
 
 void Ahe_grenade_gameCharacter::DoJumpStart()
 {
-	if (!IsGameplayInputAllowed())
-	{
-		return;
-	}
-
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		Movement->bWantsToCrouch = false;
@@ -212,7 +197,7 @@ void Ahe_grenade_gameCharacter::DoJumpEnd()
 
 void Ahe_grenade_gameCharacter::DoThrowPressed()
 {
-	if (GrenadeThrowerComponent && IsGameplayInputAllowed())
+	if (GrenadeThrowerComponent)
 	{
 		GrenadeThrowerComponent->OnThrowPressed();
 	}
@@ -226,33 +211,8 @@ void Ahe_grenade_gameCharacter::DoThrowReleased()
 	}
 }
 
-void Ahe_grenade_gameCharacter::OnMovementModeChanged(
-	const EMovementMode PreviousMovementMode,
-	const uint8 PreviousCustomMode)
-{
-	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
-
-	const UCharacterMovementComponent* Movement = GetCharacterMovement();
-	const AGrenadeGameState* GrenadeGameState =
-		GetWorld() ? GetWorld()->GetGameState<AGrenadeGameState>() : nullptr;
-	UE_LOG(
-		Loghe_grenade_game,
-		Log,
-		TEXT("CHARACTER_MOVEMENT_MODE role=%d character=%s previous=%d current=%d arena_revision=%d"),
-		static_cast<int32>(GetLocalRole()),
-		*GetNameSafe(this),
-		static_cast<int32>(PreviousMovementMode),
-		Movement ? static_cast<int32>(Movement->MovementMode) : INDEX_NONE,
-		GrenadeGameState ? GrenadeGameState->GetArenaStateRevision() : INDEX_NONE);
-}
-
 void Ahe_grenade_gameCharacter::DoTrajectoryHeightStart()
 {
-	if (!IsGameplayInputAllowed())
-	{
-		return;
-	}
-
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
 	{
 		MovementComponent->CancelCrouchHopChain();
@@ -274,11 +234,6 @@ void Ahe_grenade_gameCharacter::DoTrajectoryHeightEnd()
 
 void Ahe_grenade_gameCharacter::DoAimStart()
 {
-	if (!IsGameplayInputAllowed())
-	{
-		return;
-	}
-
 	bAimModeActive = true;
 
 	if (GrenadeThrowerComponent)
@@ -307,11 +262,6 @@ void Ahe_grenade_gameCharacter::DoAimEnd()
 
 void Ahe_grenade_gameCharacter::DoCrouchStart()
 {
-	if (!IsGameplayInputAllowed())
-	{
-		return;
-	}
-
 	bCrouchInputHeld = true;
 
 	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
@@ -336,29 +286,26 @@ void Ahe_grenade_gameCharacter::DoCrouchEnd()
 
 void Ahe_grenade_gameCharacter::FellOutOfWorld(const UDamageType& DmgType)
 {
-	if (!HasAuthority())
-	{
-		return;
-	}
+	AController* PawnController = GetController();
+	Destroy();
 
-	if (Ahe_grenade_gameGameMode* GameMode =
-		GetWorld() ? Cast<Ahe_grenade_gameGameMode>(GetWorld()->GetAuthGameMode()) : nullptr)
+	if (PawnController)
 	{
-		GameMode->EliminatePlayer(GetController());
-		return;
+		if (AGameModeBase* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode() : nullptr)
+		{
+			GameMode->RestartPlayer(PawnController);
+		}
 	}
-
-	Super::FellOutOfWorld(DmgType);
 }
 
 void Ahe_grenade_gameCharacter::RefreshCrouchFromInput()
 {
-	bool bWantsCrouchInput = IsGameplayInputAllowed() && bCrouchInputHeld;
+	bool bWantsCrouchInput = bCrouchInputHeld;
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
-		bWantsCrouchInput = IsGameplayInputAllowed() && (bWantsCrouchInput
-			|| PC->IsInputKeyDown(EKeys::LeftShift));
+		bWantsCrouchInput = bWantsCrouchInput
+			|| PC->IsInputKeyDown(EKeys::LeftShift);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -403,20 +350,6 @@ void Ahe_grenade_gameCharacter::UpdateCrouchCamera(float DeltaSeconds)
 UGGMovementComponent* Ahe_grenade_gameCharacter::GetGGMovementComponent() const
 {
 	return Cast<UGGMovementComponent>(GetCharacterMovement());
-}
-
-bool Ahe_grenade_gameCharacter::IsGameplayInputAllowed() const
-{
-	const UWorld* World = GetWorld();
-	const AGrenadeGameState* GrenadeGameState =
-		World ? World->GetGameState<AGrenadeGameState>() : nullptr;
-	const AGrenadePlayerState* GrenadePlayerState =
-		GetPlayerState<AGrenadePlayerState>();
-	return GrenadeGameState
-		&& GrenadeGameState->GetGrenadeMatchPhase() == EGGMatchPhase::InProgress
-		&& GrenadePlayerState
-		&& GrenadePlayerState->IsArenaReady()
-		&& GrenadePlayerState->IsAlive();
 }
 
 bool Ahe_grenade_gameCharacter::IsGrenadeStateGreen() const

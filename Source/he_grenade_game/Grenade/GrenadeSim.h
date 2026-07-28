@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "GrenadeSim.generated.h"
 
+class ABreakableTile;
+
 /**
  * Deterministic grenade sim tuning shared by runtime grenade and trajectory prediction.
  */
@@ -86,19 +88,7 @@ struct FGrenadeSimState
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grenade|Simulation", meta = (Units = "cm"))
 	float TraveledDistanceCm = 0.0f;
 
-	TSet<int32> VirtualBrokenArenaObjectIds;
-};
-
-struct FGrenadeArenaHit
-{
-	int32 ArenaObjectId = INDEX_NONE;
-	bool bBreakable = false;
-	bool bBounceBeforeBreaking = false;
-
-	bool IsValidBreakable() const
-	{
-		return ArenaObjectId != INDEX_NONE && bBreakable;
-	}
+	TSet<TWeakObjectPtr<ABreakableTile>> VirtualBrokenTiles;
 };
 
 USTRUCT(BlueprintType)
@@ -127,8 +117,7 @@ struct FGrenadeSimStepResult
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grenade|Simulation")
 	FHitResult Hit;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grenade|Simulation")
-	int32 BrokenArenaObjectId = INDEX_NONE;
+	TWeakObjectPtr<ABreakableTile> BrokenTile;
 };
 
 /**
@@ -137,8 +126,7 @@ struct FGrenadeSimStepResult
 class FGrenadeSim
 {
 public:
-	using FResolveArenaHit = TFunction<FGrenadeArenaHit(const FHitResult&)>;
-	using FAppendIgnoredArenaObject = TFunction<void(int32, FCollisionQueryParams&)>;
+	using FResolveBreakableTile = TFunction<ABreakableTile*(const FHitResult&)>;
 
 	static void InitializeState(FGrenadeSimState& OutState, const FVector& StartPosition, const FVector& StartVelocity, float FuseSeconds);
 
@@ -148,6 +136,5 @@ public:
 		FGrenadeSimState& InOutState,
 		float StepDt,
 		AActor* PrimaryIgnoredActor,
-		const FResolveArenaHit& ResolveArenaHit,
-		const FAppendIgnoredArenaObject& AppendIgnoredArenaObject);
+		const FResolveBreakableTile& ResolveBreakableTile);
 };

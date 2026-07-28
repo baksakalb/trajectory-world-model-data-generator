@@ -1,5 +1,6 @@
 #include "Grenade/GrenadeSim.h"
 
+#include "Grenade/Breakables/BreakableTile.h"
 #include "Engine/World.h"
 
 namespace
@@ -8,8 +9,7 @@ namespace
 		UWorld* World,
 		const FGrenadeSimConfig& Config,
 		const FGrenadeSimState& State,
-		AActor* PrimaryIgnoredActor,
-		const FGrenadeSim::FAppendIgnoredArenaObject& AppendIgnoredArenaObject)
+		AActor* PrimaryIgnoredActor)
 	{
 		if (!World)
 		{
@@ -28,11 +28,11 @@ namespace
 			QueryParams.AddIgnoredActor(PrimaryIgnoredActor);
 		}
 
-		for (const int32 ArenaObjectId : State.VirtualBrokenArenaObjectIds)
+		for (const TWeakObjectPtr<ABreakableTile>& TilePtr : State.VirtualBrokenTiles)
 		{
-			if (AppendIgnoredArenaObject)
+			if (ABreakableTile* Tile = TilePtr.Get())
 			{
-				AppendIgnoredArenaObject(ArenaObjectId, QueryParams);
+				QueryParams.AddIgnoredActor(Tile);
 			}
 		}
 
@@ -77,7 +77,7 @@ void FGrenadeSim::InitializeState(FGrenadeSimState& OutState, const FVector& Sta
 	OutState.ConsecutiveSupportedSteps = 0;
 	OutState.bExploded = false;
 	OutState.TraveledDistanceCm = 0.0f;
-	OutState.VirtualBrokenArenaObjectIds.Reset();
+	OutState.VirtualBrokenTiles.Reset();
 }
 
 FGrenadeSimStepResult FGrenadeSim::Step(
@@ -86,8 +86,7 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 	FGrenadeSimState& InOutState,
 	float StepDt,
 	AActor* PrimaryIgnoredActor,
-	const FResolveArenaHit& ResolveArenaHit,
-	const FAppendIgnoredArenaObject& AppendIgnoredArenaObject)
+	const FResolveBreakableTile& ResolveBreakableTile)
 {
 	FGrenadeSimStepResult Result;
 
@@ -115,12 +114,7 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 				return false;
 			}
 
-			if (!HasStableSupport(
-				World,
-				Config,
-				InOutState,
-				PrimaryIgnoredActor,
-				AppendIgnoredArenaObject))
+			if (!HasStableSupport(World, Config, InOutState, PrimaryIgnoredActor))
 			{
 				InOutState.ConsecutiveSupportedSteps = 0;
 				return false;
@@ -196,11 +190,11 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 			QueryParams.AddIgnoredActor(PrimaryIgnoredActor);
 		}
 
-		for (const int32 ArenaObjectId : InOutState.VirtualBrokenArenaObjectIds)
+		for (const TWeakObjectPtr<ABreakableTile>& TilePtr : InOutState.VirtualBrokenTiles)
 		{
-			if (AppendIgnoredArenaObject)
+			if (ABreakableTile* Tile = TilePtr.Get())
 			{
-				AppendIgnoredArenaObject(ArenaObjectId, QueryParams);
+				QueryParams.AddIgnoredActor(Tile);
 			}
 		}
 
@@ -245,14 +239,12 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 		InOutState.Position = ImpactCenter;
 		InOutState.TraveledDistanceCm += MoveToImpact.Size();
 
-		const FGrenadeArenaHit ResolvedArenaHit =
-			ResolveArenaHit ? ResolveArenaHit(Hit) : FGrenadeArenaHit();
-		if (ResolvedArenaHit.IsValidBreakable()
-			&& !InOutState.VirtualBrokenArenaObjectIds.Contains(ResolvedArenaHit.ArenaObjectId))
+		ABreakableTile* ResolvedTile = ResolveBreakableTile ? ResolveBreakableTile(Hit) : nullptr;
+		if (ResolvedTile && !InOutState.VirtualBrokenTiles.Contains(ResolvedTile))
 		{
-			InOutState.VirtualBrokenArenaObjectIds.Add(ResolvedArenaHit.ArenaObjectId);
+			InOutState.VirtualBrokenTiles.Add(ResolvedTile);
 			Result.bBrokeTile = true;
-			Result.BrokenArenaObjectId = ResolvedArenaHit.ArenaObjectId;
+			Result.BrokenTile = ResolvedTile;
 
 			FVector HitNormal = Hit.ImpactNormal.IsNearlyZero() ? Hit.Normal.GetSafeNormal() : Hit.ImpactNormal.GetSafeNormal();
 			if (HitNormal.IsNearlyZero())
@@ -264,7 +256,7 @@ FGrenadeSimStepResult FGrenadeSim::Step(
 				}
 			}
 
-			const bool bBounceBeforeBreak = ResolvedArenaHit.bBounceBeforeBreaking;
+			const bool bBounceBeforeBreak = ResolvedTile->ShouldBounceGrenadeBeforeBreaking();
 			if (bBounceBeforeBreak)
 			{
 				const float NormalComponent = FVector::DotProduct(VelocityAtImpact, HitNormal);

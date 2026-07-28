@@ -2,6 +2,7 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -25,6 +26,82 @@ ABreakableTile::ABreakableTile()
 	Tags.AddUnique(TEXT("BreakableTile"));
 }
 
+void ABreakableTile::BeginPlay()
+{
+	Super::BeginPlay();
+	ApplyTrajectoryHighlightState();
+
+	if (bStartBroken)
+	{
+		BreakTile();
+	}
+}
+
+void ABreakableTile::BreakTile()
+{
+	if (bBroken)
+	{
+		return;
+	}
+
+	SetDestructionWarningAlpha(0.0f);
+	SetTrajectoryHighlighted(false);
+
+	bBroken = true;
+	SetActorHiddenInGame(true);
+	SetActorEnableCollision(false);
+
+	if (TileMesh)
+	{
+		TileMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		TileMesh->SetVisibility(false, true);
+	}
+
+	OnTileBroken.Broadcast(this);
+}
+
+void ABreakableTile::ResetTile()
+{
+	bBroken = false;
+	bTrajectoryHighlighted = false;
+	DestructionWarningAlpha = 0.0f;
+	SetActorHiddenInGame(false);
+	SetActorEnableCollision(true);
+
+	if (TileMesh)
+	{
+		TileMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		TileMesh->SetVisibility(true, true);
+	}
+
+	ApplyTrajectoryHighlightState();
+}
+
+void ABreakableTile::SetDestructionWarningAlpha(const float WarningAlpha)
+{
+	const float SafeAlpha = bBroken ? 0.0f : FMath::Clamp(WarningAlpha, 0.0f, 1.0f);
+	if (FMath::IsNearlyEqual(DestructionWarningAlpha, SafeAlpha, 0.001f))
+	{
+		return;
+	}
+
+	DestructionWarningAlpha = SafeAlpha;
+	UpdateDestructionWarningMaterial();
+	ApplyTrajectoryHighlightState();
+}
+
+void ABreakableTile::SetTrajectoryHighlighted(bool bHighlighted)
+{
+	const bool bShouldHighlight = bHighlighted && !bBroken;
+	if (bTrajectoryHighlighted == bShouldHighlight)
+	{
+		return;
+	}
+
+	bTrajectoryHighlighted = bShouldHighlight;
+	ApplyTrajectoryHighlightState();
+}
+
 void ABreakableTile::SetMeshAndTransformStyle(UStaticMesh* InStaticMesh, FRotator InMeshRelativeRotation, FVector InMeshRelativeScale)
 {
 	if (!TileMesh)
@@ -39,7 +116,7 @@ void ABreakableTile::SetMeshAndTransformStyle(UStaticMesh* InStaticMesh, FRotato
 
 	if (BaseTileMaterial)
 	{
-		ApplyBaseMaterial();
+		ApplyTrajectoryHighlightState();
 	}
 
 	const FVector SafeRelativeScale(
@@ -50,15 +127,18 @@ void ABreakableTile::SetMeshAndTransformStyle(UStaticMesh* InStaticMesh, FRotato
 	TileMesh->SetRelativeRotation(InMeshRelativeRotation);
 	TileMesh->SetRelativeScale3D(SafeRelativeScale);
 
-	ApplyBaseMaterial();
+	ApplyTrajectoryHighlightState();
 }
 
 void ABreakableTile::SetVisualMaterials(
 	UMaterialInterface* InNormalMaterial,
-	UMaterialInterface* /*InTrajectoryHighlightMaterial*/)
+	UMaterialInterface* InTrajectoryHighlightMaterial)
 {
 	BaseTileMaterial = InNormalMaterial;
-	ApplyBaseMaterial();
+	TrajectoryHighlightMaterial = InTrajectoryHighlightMaterial;
+	DestructionWarningMaterial = nullptr;
+	DestructionWarningAlpha = 0.0f;
+	ApplyTrajectoryHighlightState();
 }
 
 void ABreakableTile::BeginCompositeShape()
@@ -116,22 +196,98 @@ UStaticMeshComponent* ABreakableTile::AddCompositeShapePiece(
 	ShapeMesh->RegisterComponent();
 
 	CompositeShapeMeshes.Add(ShapeMesh);
-	ShapeMesh->SetMaterial(0, BaseTileMaterial);
+	ShapeMesh->SetMaterial(0, GetActiveVisualMaterial());
 	return ShapeMesh;
 }
 
-void ABreakableTile::ApplyBaseMaterial()
+UMaterialInterface* ABreakableTile::GetActiveVisualMaterial() const
 {
+	if (bTrajectoryHighlighted && TrajectoryHighlightMaterial)
+	{
+		return TrajectoryHighlightMaterial.Get();
+	}
+
+	if (DestructionWarningAlpha > KINDA_SMALL_NUMBER && DestructionWarningMaterial)
+	{
+		return DestructionWarningMaterial.Get();
+	}
+
+	return BaseTileMaterial.Get();
+}
+
+void ABreakableTile::UpdateDestructionWarningMaterial()
+{
+	if (DestructionWarningAlpha <= KINDA_SMALL_NUMBER
+		|| !BaseTileMaterial
+		|| !TrajectoryHighlightMaterial)
+	{
+		return;
+	}
+
+	if (!DestructionWarningMaterial)
+	{
+		DestructionWarningMaterial = UMaterialInstanceDynamic::Create(BaseTileMaterial, this);
+	}
+	if (!DestructionWarningMaterial)
+	{
+		return;
+	}
+
+	static const FName VectorParameterNames[] =
+	{
+		TEXT("BaseColor"),
+		TEXT("EmissiveColor")
+	};
+	for (const FName ParameterName : VectorParameterNames)
+	{
+		FLinearColor BaseValue;
+		FLinearColor WarningValue;
+		const FMaterialParameterInfo ParameterInfo(ParameterName);
+		if (BaseTileMaterial->GetVectorParameterValue(ParameterInfo, BaseValue)
+			&& TrajectoryHighlightMaterial->GetVectorParameterValue(ParameterInfo, WarningValue))
+		{
+			DestructionWarningMaterial->SetVectorParameterValue(
+				ParameterName,
+				FMath::Lerp(BaseValue, WarningValue, DestructionWarningAlpha));
+		}
+	}
+
+	static const FName ScalarParameterNames[] =
+	{
+		TEXT("Metallic"),
+		TEXT("Roughness"),
+		TEXT("Opacity"),
+		TEXT("EmissiveStrength")
+	};
+	for (const FName ParameterName : ScalarParameterNames)
+	{
+		float BaseValue = 0.0f;
+		float WarningValue = 0.0f;
+		const FMaterialParameterInfo ParameterInfo(ParameterName);
+		if (BaseTileMaterial->GetScalarParameterValue(ParameterInfo, BaseValue)
+			&& TrajectoryHighlightMaterial->GetScalarParameterValue(ParameterInfo, WarningValue))
+		{
+			DestructionWarningMaterial->SetScalarParameterValue(
+				ParameterName,
+				FMath::Lerp(BaseValue, WarningValue, DestructionWarningAlpha));
+		}
+	}
+}
+
+void ABreakableTile::ApplyTrajectoryHighlightState()
+{
+	UMaterialInterface* ActiveMaterial = GetActiveVisualMaterial();
+
 	if (TileMesh && TileMesh->GetStaticMesh())
 	{
-		TileMesh->SetMaterial(0, BaseTileMaterial);
+		TileMesh->SetMaterial(0, ActiveMaterial);
 	}
 
 	for (UStaticMeshComponent* ShapeMesh : CompositeShapeMeshes)
 	{
 		if (IsValid(ShapeMesh))
 		{
-			ShapeMesh->SetMaterial(0, BaseTileMaterial);
+			ShapeMesh->SetMaterial(0, ActiveMaterial);
 		}
 	}
 }

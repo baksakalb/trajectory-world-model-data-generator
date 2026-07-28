@@ -7,8 +7,6 @@
 #include "InputMappingContext.h"
 #include "he_grenade_gameCameraManager.h"
 #include "Grenade/GrenadeHUD.h"
-#include "GrenadePlayerState.h"
-#include "he_grenade_gameGameMode.h"
 #include "Blueprint/UserWidget.h"
 #include "he_grenade_game.h"
 #include "Widgets/Input/SVirtualJoystick.h"
@@ -17,33 +15,6 @@ Ahe_grenade_gamePlayerController::Ahe_grenade_gamePlayerController()
 {
 	// set the player camera manager class
 	PlayerCameraManagerClass = Ahe_grenade_gameCameraManager::StaticClass();
-}
-
-void Ahe_grenade_gamePlayerController::ConfirmArenaState(
-	const int32 LayoutRevision,
-	const int64 LayoutChecksum,
-	const int32 ArenaStateRevision)
-{
-	if (IsLocalController())
-	{
-		ServerConfirmArenaState(LayoutRevision, LayoutChecksum, ArenaStateRevision);
-	}
-}
-
-void Ahe_grenade_gamePlayerController::ServerConfirmArenaState_Implementation(
-	const int32 LayoutRevision,
-	const int64 LayoutChecksum,
-	const int32 ArenaStateRevision)
-{
-	if (Ahe_grenade_gameGameMode* GameMode =
-		GetWorld() ? GetWorld()->GetAuthGameMode<Ahe_grenade_gameGameMode>() : nullptr)
-	{
-		GameMode->HandleArenaStateReady(
-			this,
-			LayoutRevision,
-			LayoutChecksum,
-			ArenaStateRevision);
-	}
 }
 
 void Ahe_grenade_gamePlayerController::BeginPlay()

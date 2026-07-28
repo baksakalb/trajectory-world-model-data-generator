@@ -74,9 +74,6 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
-	virtual void OnMovementModeChanged(
-		EMovementMode PreviousMovementMode,
-		uint8 PreviousCustomMode = 0) override;
 
 	/** Called from Input Actions for movement input */
 	void MoveInput(const FInputActionValue& Value);
@@ -131,7 +128,6 @@ protected:
 	void RefreshCrouchFromInput();
 	void UpdateCrouchCamera(float DeltaSeconds);
 	UGGMovementComponent* GetGGMovementComponent() const;
-	bool IsGameplayInputAllowed() const;
 
 	FVector StandingMeshRelativeLocation = FVector::ZeroVector;
 	float CurrentCrouchCameraOffsetCm = 0.0f;
