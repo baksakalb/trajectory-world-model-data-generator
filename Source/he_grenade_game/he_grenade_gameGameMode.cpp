@@ -108,9 +108,12 @@ void Ahe_grenade_gameGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	if (!bArenaGeneratedThisMatch)
 	{
-		GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::Lobby);
+		if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+		{
+			GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::Lobby);
+		}
 	}
 
 	if (!bSpawnBreakableGridOnBeginPlay || !GetWorld())
@@ -282,6 +285,14 @@ void Ahe_grenade_gameGameMode::GenerateProceduralArena()
 
 	bArenaGeneratedThisMatch = true;
 	InitializeFloorRingCollapse();
+
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		GrenadeGameState->PublishGeneratedArena(
+			SpawnedGrid,
+			FloorTileMaterial,
+			TrajectoryHighlightMaterial);
+	}
 
 	UE_LOG(
 		Loghe_grenade_game,
