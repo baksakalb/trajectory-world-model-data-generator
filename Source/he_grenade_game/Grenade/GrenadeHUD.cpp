@@ -9,6 +9,7 @@
 #include "Grenade/GrenadeTrajectoryComponent.h"
 #include "he_grenade_gameCharacter.h"
 #include "he_grenade_gameGameMode.h"
+#include "GrenadeGameState.h"
 
 void AGrenadeHUD::DrawHUD()
 {
@@ -78,22 +79,20 @@ void AGrenadeHUD::DrawHUD()
 	SpeedTextItem.EnableShadow(FLinearColor::Black);
 	Canvas->DrawItem(SpeedTextItem);
 
-	const Ahe_grenade_gameGameMode* GameMode = GetWorld()
-		? Cast<Ahe_grenade_gameGameMode>(GetWorld()->GetAuthGameMode())
-		: nullptr;
-	if (GameMode && GameMode->IsFloorCollapseActive())
+	const AGrenadeGameState* GrenadeGameState = GetWorld() ? GetWorld()->GetGameState<AGrenadeGameState>() : nullptr;
+	if (GrenadeGameState && GrenadeGameState->IsFloorCollapseActive())
 	{
 		float SpeedTextWidth = 0.0f;
 		float SpeedTextHeight = 0.0f;
 		Canvas->StrLen(HudFont, SpeedText, SpeedTextWidth, SpeedTextHeight);
 
 		const int32 SecondsRemaining =
-			FMath::Max(0, FMath::CeilToInt(GameMode->GetFloorCollapseTimeRemaining()));
+			FMath::Max(0, FMath::CeilToInt(GrenadeGameState->GetFloorCollapseTimeRemaining()));
 		const FString TileTimerText = FString::Printf(TEXT("Tiles %d"), SecondsRemaining);
 		const FLinearColor TimerColor = FLinearColor::LerpUsingHSV(
 			SpeedTextColor,
 			TileTimerWarningColor,
-			GameMode->GetFloorCollapseProgress());
+			GrenadeGameState->GetFloorCollapseProgress());
 		FCanvasTextItem TileTimerTextItem(
 			FVector2D(
 				StatusOrigin.X + 120.0f + (SpeedTextWidth * StatusTextScale) + 28.0f,

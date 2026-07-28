@@ -8,6 +8,7 @@
 #include "GrenadeGameState.generated.h"
 
 class AActor;
+class ABreakableTile;
 class ABreakableTileGrid;
 
 UENUM(BlueprintType)
@@ -120,6 +121,7 @@ public:
 	AGrenadeGameState();
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void Tick(float DeltaSeconds) override;
 
 	UFUNCTION(BlueprintPure, Category = "Grenade|Match")
 	EGGMatchPhase GetGrenadeMatchPhase() const { return GrenadeMatchPhase; }
@@ -151,6 +153,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Grenade|Arena")
 	bool HasAppliedArenaLayout() const { return AppliedArenaLayoutRevision == ArenaLayoutRevision && ArenaLayoutRevision > 0; }
 
+	void SetFloorCollapseState(bool bActive, int32 RingIndex, float DurationSeconds);
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	bool IsFloorCollapseActive() const { return bReplicatedFloorCollapseActive; }
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	float GetFloorCollapseTimeRemaining() const;
+
+	UFUNCTION(BlueprintPure, Category = "Grenade|Arena|Floor Collapse")
+	float GetFloorCollapseProgress() const;
+
 private:
 	UFUNCTION()
 	void OnRep_ArenaLayout();
@@ -158,6 +171,11 @@ private:
 	void BuildClientArenaReplica();
 	void ClearClientArenaReplica();
 	int64 CalculateArenaLayoutChecksum() const;
+	void RefreshAuthoritativeBreakStates();
+	void ApplyReplicatedArenaState();
+
+	UFUNCTION()
+	void OnRep_ArenaState();
 
 	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Grenade|Match", meta = (AllowPrivateAccess = "true"))
 	EGGMatchPhase GrenadeMatchPhase = EGGMatchPhase::Lobby;
@@ -187,5 +205,33 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<AActor>> ClientArenaActors;
 
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<ABreakableTile>> ClientFloorTiles;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<ABreakableTile>> ClientLayoutBreakables;
+
+	TArray<TWeakObjectPtr<ABreakableTile>> ServerFloorTiles;
+	TArray<TWeakObjectPtr<ABreakableTile>> ServerLayoutBreakables;
+
+	UPROPERTY(ReplicatedUsing = OnRep_ArenaState)
+	TArray<uint8> ReplicatedFloorBrokenStates;
+
+	UPROPERTY(ReplicatedUsing = OnRep_ArenaState)
+	TArray<uint8> ReplicatedActorBrokenStates;
+
+	UPROPERTY(Replicated)
+	bool bReplicatedFloorCollapseActive = false;
+
+	UPROPERTY(Replicated)
+	int32 ReplicatedFloorCollapseRing = INDEX_NONE;
+
+	UPROPERTY(Replicated)
+	float FloorCollapseEndServerTime = 0.0f;
+
+	UPROPERTY(Replicated)
+	float FloorCollapseDuration = 0.0f;
+
 	int32 AppliedArenaLayoutRevision = INDEX_NONE;
+	float BreakStateRefreshAccumulator = 0.0f;
 };

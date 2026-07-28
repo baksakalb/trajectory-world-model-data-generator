@@ -85,10 +85,21 @@ void Ahe_grenade_gameGameMode::Tick(const float DeltaSeconds)
 		bFloorCollapseActive = false;
 		FloorCollapseTimeRemaining = 0.0f;
 		CurrentFloorRingTiles.Reset();
+		if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+		{
+			GrenadeGameState->SetFloorCollapseState(false, INDEX_NONE, 0.0f);
+		}
 		return;
 	}
 
 	FloorCollapseTimeRemaining = FMath::Max(1.0f, FloorRingCollapseIntervalSeconds);
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		GrenadeGameState->SetFloorCollapseState(
+			true,
+			CurrentFloorCollapseRing,
+			FloorCollapseTimeRemaining);
+	}
 	CacheCurrentFloorRingTiles();
 	UpdateFloorRingWarning();
 }
@@ -329,6 +340,13 @@ void Ahe_grenade_gameGameMode::InitializeFloorRingCollapse()
 	bFloorCollapseActive = true;
 	CacheCurrentFloorRingTiles();
 	UpdateFloorRingWarning();
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		GrenadeGameState->SetFloorCollapseState(
+			true,
+			CurrentFloorCollapseRing,
+			FloorCollapseTimeRemaining);
+	}
 
 	UE_LOG(
 		Loghe_grenade_game,

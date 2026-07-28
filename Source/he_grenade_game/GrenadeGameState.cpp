@@ -46,6 +46,7 @@ namespace
 AGrenadeGameState::AGrenadeGameState()
 {
 	bReplicates = true;
+	PrimaryActorTick.bCanEverTick = true;
 }
 
 void AGrenadeGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -60,6 +61,31 @@ void AGrenadeGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AGrenadeGameState, ArenaMeshes);
 	DOREPLIFETIME(AGrenadeGameState, ArenaLayoutRevision);
 	DOREPLIFETIME(AGrenadeGameState, ArenaLayoutChecksum);
+	DOREPLIFETIME(AGrenadeGameState, ReplicatedFloorBrokenStates);
+	DOREPLIFETIME(AGrenadeGameState, ReplicatedActorBrokenStates);
+	DOREPLIFETIME(AGrenadeGameState, bReplicatedFloorCollapseActive);
+	DOREPLIFETIME(AGrenadeGameState, ReplicatedFloorCollapseRing);
+	DOREPLIFETIME(AGrenadeGameState, FloorCollapseEndServerTime);
+	DOREPLIFETIME(AGrenadeGameState, FloorCollapseDuration);
+}
+
+void AGrenadeGameState::Tick(const float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (HasAuthority())
+	{
+		BreakStateRefreshAccumulator += DeltaSeconds;
+		if (BreakStateRefreshAccumulator >= 0.1f)
+		{
+			BreakStateRefreshAccumulator = 0.0f;
+			RefreshAuthoritativeBreakStates();
+		}
+	}
+	else
+	{
+		ApplyReplicatedArenaState();
+	}
 }
 
 void AGrenadeGameState::PublishGeneratedArena(
@@ -83,14 +109,18 @@ void AGrenadeGameState::PublishGeneratedArena(
 	ArenaGridLayout.TrajectoryMaterialPath = TrajectoryMaterial ? FSoftObjectPath(TrajectoryMaterial) : FSoftObjectPath();
 
 	TSet<const AActor*> FloorTiles;
+	ServerFloorTiles.Reset();
 	for (const ABreakableTile* Tile : Grid->GetSpawnedTiles())
 	{
 		FloorTiles.Add(Tile);
+		ServerFloorTiles.Add(const_cast<ABreakableTile*>(Tile));
 	}
 
 	ArenaActors.Reset();
 	ArenaMeshes.Reset();
+	ServerLayoutBreakables.Reset();
 
+	int32 StableActorIndex = 0;
 	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
 	{
 		AActor* Actor = *It;
@@ -109,6 +139,23 @@ void AGrenadeGameState::PublishGeneratedArena(
 			continue;
 		}
 
+		Actor->Rename(
+			*FString::Printf(TEXT("ArenaObject_%d"), StableActorIndex),
+			nullptr,
+			REN_DontCreateRedirectors);
+		Actor->SetNetAddressable();
+		for (int32 ComponentIndex = 0; ComponentIndex < MeshComponents.Num(); ++ComponentIndex)
+		{
+			if (UStaticMeshComponent* Component = MeshComponents[ComponentIndex])
+			{
+				Component->Rename(
+					*FString::Printf(TEXT("ArenaMesh_%d"), ComponentIndex),
+					Actor,
+					REN_DontCreateRedirectors);
+				Component->SetNetAddressable();
+			}
+		}
+
 		FReplicatedArenaActorLayout& ActorLayout = ArenaActors.AddDefaulted_GetRef();
 		ActorLayout.Transform = Actor->GetActorTransform();
 		ActorLayout.FirstComponentIndex = ArenaMeshes.Num();
@@ -119,6 +166,11 @@ void AGrenadeGameState::PublishGeneratedArena(
 			ActorLayout.bBreakableTile = true;
 			ActorLayout.bBreakOnGrenadeImpact = Breakable->CanBreakOnGrenadeImpact();
 			ActorLayout.bBounceBeforeBreaking = Breakable->ShouldBounceGrenadeBeforeBreaking();
+			ServerLayoutBreakables.Add(const_cast<ABreakableTile*>(Breakable));
+		}
+		else
+		{
+			ServerLayoutBreakables.Add(nullptr);
 		}
 
 		for (const UStaticMeshComponent* Component : MeshComponents)
@@ -139,9 +191,12 @@ void AGrenadeGameState::PublishGeneratedArena(
 				MeshLayout.bVisible = Component->IsVisible();
 			}
 		}
+		++StableActorIndex;
 	}
 
 	++ArenaLayoutRevision;
+	ReplicatedFloorBrokenStates.Init(0, ServerFloorTiles.Num());
+	ReplicatedActorBrokenStates.Init(0, ServerLayoutBreakables.Num());
 	ArenaLayoutChecksum = CalculateArenaLayoutChecksum();
 	SetGrenadeMatchPhase(EGGMatchPhase::ArenaSync);
 	ForceNetUpdate();
@@ -202,6 +257,8 @@ void AGrenadeGameState::ClearClientArenaReplica()
 		}
 	}
 	ClientArenaActors.Reset();
+	ClientFloorTiles.Reset();
+	ClientLayoutBreakables.Reset();
 }
 
 void AGrenadeGameState::BuildClientArenaReplica()
@@ -217,16 +274,15 @@ void AGrenadeGameState::BuildClientArenaReplica()
 
 	ClearClientArenaReplica();
 
-	ABreakableTileGrid* Grid = GetWorld()->SpawnActor<ABreakableTileGrid>(
+	ABreakableTileGrid* Grid = GetWorld()->SpawnActorDeferred<ABreakableTileGrid>(
 		ABreakableTileGrid::StaticClass(),
-		FTransform::Identity);
+		ArenaGridLayout.Transform);
 	if (!Grid)
 	{
 		return;
 	}
 
 	Grid->Tags.Add(ClientArenaReplicaTag);
-	Grid->SetActorTransform(ArenaGridLayout.Transform);
 	Grid->bSpawnOnBeginPlay = false;
 	Grid->TilesX = ArenaGridLayout.TilesX;
 	Grid->TilesY = ArenaGridLayout.TilesY;
@@ -234,6 +290,7 @@ void AGrenadeGameState::BuildClientArenaReplica()
 	Grid->TileSpacingCm = ArenaGridLayout.TileSpacingCm;
 	Grid->TileThicknessScale = ArenaGridLayout.TileThicknessScale;
 	Grid->GridLocalOriginOffset = ArenaGridLayout.GridLocalOriginOffset;
+	Grid->FinishSpawning(ArenaGridLayout.Transform);
 	Grid->BuildGrid();
 	ClientArenaActors.Add(Grid);
 
@@ -246,23 +303,32 @@ void AGrenadeGameState::BuildClientArenaReplica()
 			FloorTile->Tags.Add(ClientArenaReplicaTag);
 			FloorTile->SetVisualMaterials(FloorMaterial, TrajectoryMaterial);
 			FloorTile->ResetTile();
+			ClientFloorTiles.Add(FloorTile);
 		}
 	}
 
-	for (const FReplicatedArenaActorLayout& ActorLayout : ArenaActors)
+	ClientLayoutBreakables.Reserve(ArenaActors.Num());
+	for (int32 ActorIndex = 0; ActorIndex < ArenaActors.Num(); ++ActorIndex)
 	{
+		const FReplicatedArenaActorLayout& ActorLayout = ArenaActors[ActorIndex];
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Name = FName(*FString::Printf(TEXT("ArenaObject_%d"), ActorIndex));
+		SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		AActor* SpawnedActor = ActorLayout.bBreakableTile
-			? static_cast<AActor*>(GetWorld()->SpawnActor<ABreakableTile>(ABreakableTile::StaticClass(), FTransform::Identity))
-			: static_cast<AActor*>(GetWorld()->SpawnActor<AArenaObstacle>(AArenaObstacle::StaticClass(), FTransform::Identity));
+			? static_cast<AActor*>(GetWorld()->SpawnActor<ABreakableTile>(ABreakableTile::StaticClass(), FTransform::Identity, SpawnParams))
+			: static_cast<AActor*>(GetWorld()->SpawnActor<AArenaObstacle>(AArenaObstacle::StaticClass(), FTransform::Identity, SpawnParams));
 		if (!SpawnedActor)
 		{
 			continue;
 		}
 
 		SpawnedActor->Tags.Add(ClientArenaReplicaTag);
+		SpawnedActor->SetNetAddressable();
 		ClientArenaActors.Add(SpawnedActor);
 
 		ABreakableTile* Breakable = Cast<ABreakableTile>(SpawnedActor);
+		ClientLayoutBreakables.Add(Breakable);
 		AArenaObstacle* Obstacle = Cast<AArenaObstacle>(SpawnedActor);
 		UStaticMeshComponent* RootMesh = Breakable ? Breakable->TileMesh.Get() : (Obstacle ? Obstacle->ObstacleMesh.Get() : nullptr);
 		if (RootMesh)
@@ -307,6 +373,11 @@ void AGrenadeGameState::BuildClientArenaReplica()
 				continue;
 			}
 
+			Component->Rename(
+				*FString::Printf(TEXT("ArenaMesh_%d"), LocalIndex),
+				SpawnedActor,
+				REN_DontCreateRedirectors);
+			Component->SetNetAddressable();
 			Component->SetStaticMesh(Mesh);
 			Component->SetRelativeLocation(MeshLayout.RelativeLocation);
 			Component->SetRelativeRotation(MeshLayout.RelativeRotation);
@@ -317,6 +388,20 @@ void AGrenadeGameState::BuildClientArenaReplica()
 			{
 				Component->SetMaterial(0, Material);
 			}
+		}
+
+		if (Breakable && ActorLayout.ComponentCount > 0)
+		{
+			UMaterialInterface* NormalMaterial = nullptr;
+			for (int32 LocalIndex = 0; LocalIndex < ActorLayout.ComponentCount && !NormalMaterial; ++LocalIndex)
+			{
+				const int32 MeshIndex = ActorLayout.FirstComponentIndex + LocalIndex;
+				if (ArenaMeshes.IsValidIndex(MeshIndex) && ArenaMeshes[MeshIndex].MaterialPath.IsValid())
+				{
+					NormalMaterial = Cast<UMaterialInterface>(ArenaMeshes[MeshIndex].MaterialPath.TryLoad());
+				}
+			}
+			Breakable->SetVisualMaterials(NormalMaterial, TrajectoryMaterial);
 		}
 
 		if (RootMesh)
@@ -339,6 +424,7 @@ void AGrenadeGameState::BuildClientArenaReplica()
 	}
 
 	AppliedArenaLayoutRevision = ArenaLayoutRevision;
+	ApplyReplicatedArenaState();
 	UE_LOG(
 		Loghe_grenade_game,
 		Log,
@@ -352,6 +438,115 @@ void AGrenadeGameState::BuildClientArenaReplica()
 	{
 		LocalController->ConfirmArenaLayout(ArenaLayoutRevision, LocalChecksum);
 	}
+}
+
+void AGrenadeGameState::RefreshAuthoritativeBreakStates()
+{
+	bool bChanged = false;
+	for (int32 Index = 0; Index < ServerFloorTiles.Num(); ++Index)
+	{
+		const uint8 NewState = ServerFloorTiles[Index].IsValid() && ServerFloorTiles[Index]->IsBroken() ? 1 : 0;
+		if (ReplicatedFloorBrokenStates.IsValidIndex(Index) && ReplicatedFloorBrokenStates[Index] != NewState)
+		{
+			ReplicatedFloorBrokenStates[Index] = NewState;
+			bChanged = true;
+		}
+	}
+	for (int32 Index = 0; Index < ServerLayoutBreakables.Num(); ++Index)
+	{
+		const uint8 NewState = ServerLayoutBreakables[Index].IsValid() && ServerLayoutBreakables[Index]->IsBroken() ? 1 : 0;
+		if (ReplicatedActorBrokenStates.IsValidIndex(Index) && ReplicatedActorBrokenStates[Index] != NewState)
+		{
+			ReplicatedActorBrokenStates[Index] = NewState;
+			bChanged = true;
+		}
+	}
+	if (bChanged)
+	{
+		ForceNetUpdate();
+	}
+}
+
+void AGrenadeGameState::OnRep_ArenaState()
+{
+	ApplyReplicatedArenaState();
+}
+
+void AGrenadeGameState::ApplyReplicatedArenaState()
+{
+	if (HasAuthority() || AppliedArenaLayoutRevision != ArenaLayoutRevision)
+	{
+		return;
+	}
+
+	const float WarningAlpha = GetFloorCollapseProgress();
+	const int32 MaxX = ArenaGridLayout.TilesX - 1;
+	const int32 MaxY = ArenaGridLayout.TilesY - 1;
+	for (int32 Index = 0; Index < ClientFloorTiles.Num(); ++Index)
+	{
+		ABreakableTile* Tile = ClientFloorTiles[Index];
+		if (!Tile)
+		{
+			continue;
+		}
+		const bool bBroken = ReplicatedFloorBrokenStates.IsValidIndex(Index) && ReplicatedFloorBrokenStates[Index] != 0;
+		if (bBroken)
+		{
+			if (!Tile->IsBroken())
+			{
+				Tile->BreakTile();
+			}
+			continue;
+		}
+		const int32 X = ArenaGridLayout.TilesX > 0 ? Index % ArenaGridLayout.TilesX : 0;
+		const int32 Y = ArenaGridLayout.TilesX > 0 ? Index / ArenaGridLayout.TilesX : 0;
+		const int32 Ring = FMath::Min(FMath::Min(X, MaxX - X), FMath::Min(Y, MaxY - Y));
+		Tile->SetDestructionWarningAlpha(
+			bReplicatedFloorCollapseActive && Ring == ReplicatedFloorCollapseRing ? WarningAlpha : 0.0f);
+	}
+
+	for (int32 Index = 0; Index < ClientLayoutBreakables.Num(); ++Index)
+	{
+		ABreakableTile* Tile = ClientLayoutBreakables[Index];
+		if (Tile && ReplicatedActorBrokenStates.IsValidIndex(Index) && ReplicatedActorBrokenStates[Index] != 0 && !Tile->IsBroken())
+		{
+			Tile->BreakTile();
+		}
+	}
+}
+
+void AGrenadeGameState::SetFloorCollapseState(const bool bActive, const int32 RingIndex, const float DurationSeconds)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	bReplicatedFloorCollapseActive = bActive;
+	ReplicatedFloorCollapseRing = bActive ? RingIndex : INDEX_NONE;
+	FloorCollapseEndServerTime = bActive && DurationSeconds > 0.0f
+		? GetServerWorldTimeSeconds() + DurationSeconds
+		: 0.0f;
+	FloorCollapseDuration = bActive ? FMath::Max(0.0f, DurationSeconds) : 0.0f;
+	ForceNetUpdate();
+}
+
+float AGrenadeGameState::GetFloorCollapseTimeRemaining() const
+{
+	return FloorCollapseEndServerTime > 0.0f
+		? FMath::Max(0.0f, FloorCollapseEndServerTime - GetServerWorldTimeSeconds())
+		: 0.0f;
+}
+
+float AGrenadeGameState::GetFloorCollapseProgress() const
+{
+	if (!bReplicatedFloorCollapseActive || FloorCollapseEndServerTime <= 0.0f)
+	{
+		return 1.0f;
+	}
+	return FMath::Clamp(
+		1.0f - (GetFloorCollapseTimeRemaining() / FMath::Max(0.01f, FloorCollapseDuration)),
+		0.0f,
+		1.0f);
 }
 
 int64 AGrenadeGameState::CalculateArenaLayoutChecksum() const
