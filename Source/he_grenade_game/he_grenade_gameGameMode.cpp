@@ -12,6 +12,8 @@
 #include "Grenade/Breakables/BreakableTile.h"
 #include "Grenade/Breakables/BreakableTileGrid.h"
 #include "Grenade/GrenadeHUD.h"
+#include "GrenadeGameState.h"
+#include "GrenadePlayerState.h"
 #include "he_grenade_game.h"
 #include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
@@ -35,6 +37,8 @@ Ahe_grenade_gameGameMode::Ahe_grenade_gameGameMode()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	HUDClass = AGrenadeHUD::StaticClass();
+	GameStateClass = AGrenadeGameState::StaticClass();
+	PlayerStateClass = AGrenadePlayerState::StaticClass();
 	BreakableTileGridClass = ABreakableTileGrid::StaticClass();
 
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> DefaultGlassPanelMaterial(
@@ -50,6 +54,12 @@ Ahe_grenade_gameGameMode::Ahe_grenade_gameGameMode()
 		FRotator::ZeroRotator,
 		FVector(0.0f, 0.0f, 2606.0f),
 		FVector::OneVector);
+}
+
+void Ahe_grenade_gameGameMode::PostLogin(APlayerController* NewPlayer)
+{
+	Super::PostLogin(NewPlayer);
+	GetOrAssignSpawnSide(NewPlayer);
 }
 
 void Ahe_grenade_gameGameMode::Tick(const float DeltaSeconds)
@@ -97,6 +107,11 @@ float Ahe_grenade_gameGameMode::GetFloorCollapseProgress() const
 void Ahe_grenade_gameGameMode::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (AGrenadeGameState* GrenadeGameState = GetGameState<AGrenadeGameState>())
+	{
+		GrenadeGameState->SetGrenadeMatchPhase(EGGMatchPhase::Lobby);
+	}
 
 	if (!bSpawnBreakableGridOnBeginPlay || !GetWorld())
 	{
@@ -1671,5 +1686,13 @@ int32 Ahe_grenade_gameGameMode::GetOrAssignSpawnSide(AController* Controller)
 	const int32 AssignedSide = NextSpawnSide % 2;
 	NextSpawnSide = (NextSpawnSide + 1) % 2;
 	SpawnSideByController.Add(Key, AssignedSide);
+
+	if (AGrenadePlayerState* GrenadePlayerState = Controller->GetPlayerState<AGrenadePlayerState>())
+	{
+		GrenadePlayerState->SetAssignedSide(
+			AssignedSide == 0 ? EGGPlayerSide::Left : EGGPlayerSide::Right);
+		GrenadePlayerState->ClearArenaReady();
+	}
+
 	return AssignedSide;
 }

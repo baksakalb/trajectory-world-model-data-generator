@@ -10,6 +10,7 @@
 class AController;
 class ABreakableTile;
 class ABreakableTileGrid;
+class APlayerController;
 class UMaterialInterface;
 
 USTRUCT(BlueprintType)
@@ -55,6 +56,8 @@ class Ahe_grenade_gameGameMode : public AGameModeBase
 
 public:
 	Ahe_grenade_gameGameMode();
+
+	virtual void PostLogin(APlayerController* NewPlayer) override;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Arena")
 	bool bSpawnBreakableGridOnBeginPlay = true;
