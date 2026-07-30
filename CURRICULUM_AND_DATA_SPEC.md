@@ -1,396 +1,560 @@
-# World-Model Curriculum and Dataset Specification
+# Trajectory World Model Data Generator
 
 ## Purpose
 
-This project is a curriculum-oriented, action-conditioned visual simulation for
-training world models. The model receives observations and an externally supplied
-action vector. It is not responsible for choosing actions. Its job is to predict
-the observation consequences of the supplied actions over one or more future
-steps.
-
-The intended transition model is:
+This Unreal Engine project is a curriculum-based, action-conditioned visual
+simulation for training world models. The model does not choose actions. It
+receives observations and externally supplied actions and learns their visual and
+physical consequences:
 
 ```text
 p(observation[t+1:t+k] | observation[<=t], action[t:t+k-1])
 ```
 
-This document is the source of truth for the curriculum, controls, map contract,
-dataset schema, and data-generation plan.
+The initial model input is planned to contain only RGB history and the canonical
+ten action bits. Privileged state is recorded for dataset balancing, validation,
+debugging, and evaluation, but is not automatically exposed to the model.
 
-## Project lineage and recovery
+This document is the source of truth for the current environment, curriculum,
+controls, build workflow, data contract, collection policy, and remaining work.
 
-- Complete source game folder:
-  `C:\Users\baris\Documents\Unreal Projects\he_grenade_game`
-- Curriculum project folder:
-  `C:\Users\baris\Documents\Unreal Projects\he_grenade_game_curriculum`
-- Complete-game baseline commit: `73525ac`
-- Complete-game baseline tag in this repository:
-  `curriculum-complete-game-baseline`
-- Active first-iteration branch:
-  `codex/curriculum-movement-v1`
+## Repository and project lineage
+
+- GitHub repository:
+  `https://github.com/baksakalb/trajectory-world-model-data-generator`
+- GitHub default branch: `main`
+- Initial curriculum commit: `340d6c5`
 - Unreal Engine version: 5.8
+- Original complete game:
+  `C:\Users\baris\Documents\Unreal Projects\he_grenade_game`
+- Complete-game baseline commit: `73525ac`
+- Complete-game baseline tag:
+  `curriculum-complete-game-baseline`
+- Current curriculum project folder after the planned move:
+  `C:\Users\baris\Desktop\he_grenade_game_curriculum`
 
-The source game is not modified by curriculum work. The baseline tag and Git
-history retain the complete grenade, trajectory, breakable, and procedural-arena
-logic so later curriculum iterations can selectively restore already-defined
-systems.
+The original game is not modified by curriculum work. Its full grenade,
+trajectory, breakable, and procedural-arena systems remain available through Git
+history and the baseline tag for later curriculum stages.
 
-Generated `Binaries`, `Intermediate`, `Saved`, and derived-data caches are not part
-of the authored-project copy. Unreal regenerates them for this project.
+Generated `Binaries`, `Intermediate`, `Saved`, and derived-data caches are not
+authored source. Unreal regenerates them locally.
 
-## Invariants across all curriculum versions
+## Current status
 
-### Observation and control
+Curriculum V1 is implemented as a human-inspectable game and has passed:
 
-- First-person RGB observation.
-- One centered crosshair.
-- No mouse input.
-- No jump or crouch actions.
-- No gamepad or touch controls in the curriculum interface.
-- Camera yaw and pitch are controlled only with arrow keys.
-- Movement is controlled only with W, A, S, and D.
-- Any action bits may be held and combined.
-- Opposing inputs cancel deterministically:
-  - W + S
-  - A + D
-  - Left Arrow + Right Arrow
-  - Up Arrow + Down Arrow
-- Camera pitch is clamped; yaw wraps normally.
-- Action effects are rates per simulated second, not amounts per rendered frame.
+- Unreal Editor Development target compilation
+- non-Editor Win64 Development target compilation
+- unattended runtime startup validation
+- fixed arena construction validation
+- deterministic lighting construction validation
+- curriculum material import validation
+- pyramid mesh import validation
 
-### Canonical ten-bit action vector
+Not yet implemented:
 
-The schema remains constant from the first curriculum version:
+- autonomous collection agent
+- fixed-step frame recorder
+- GPU RGB readback
+- Parquet metadata writer
+- WebDataset-style shard writer
+- packaged data-generator executable
+- parallel worker launcher
+- dataset validation/reporting suite
+
+The next engineering milestone is the real packaged data-generation pipeline, not
+a throwaway screen-recording prototype.
+
+## Canonical action interface
+
+The action schema remains stable across every curriculum stage:
 
 ```text
 [W, A, S, D, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Q, E]
 ```
 
-Unavailable actions are forced to zero in earlier curriculum versions. They must
-not be sampled as no-op actions before they are introduced, because doing so would
-create conflicting transition examples across curriculum stages.
+Rules:
 
-### Environment
+- Every action is represented by one Boolean bit.
+- Multiple bits may be active simultaneously.
+- Actions may be held for any number of observation steps.
+- W/A/S/D control movement.
+- Arrow keys control camera pitch and yaw.
+- No mouse, gamepad, touch, jump, or crouch input is part of the curriculum.
+- Opposing pairs cancel deterministically:
+  - W + S
+  - A + D
+  - ArrowLeft + ArrowRight
+  - ArrowUp + ArrowDown
+- Camera pitch is clamped.
+- Camera yaw wraps normally.
+- Q and E remain present but are forced to zero before their curriculum stage.
+- Action effects are rates per simulated second, not per rendered frame.
 
-- One fixed square map during Curriculum V1-V3.
-- Fixed arena dimensions, object transforms, lighting, exposure, camera FOV, and
-  rendering settings.
-- Flat, indestructible floor.
-- Indestructible perimeter walls.
-- No glass or breakable tiles.
-- No floor collapse.
-- No procedural geometry changes.
-- One representative of each learning-object type:
-  - rectangle
-  - triangle
-  - sphere
-  - hoop
-  - ramp
-- Objects are placed in a geometrically balanced layout while their distinct types
-  provide orientation landmarks.
-- Episode resets may randomize the valid player spawn transform during data
-  generation, but do not change map geometry.
+## Fixed Curriculum V1 environment
+
+### Arena
+
+- One deterministic square arena.
+- Side length: 3,200 cm.
+- One continuous indestructible floor.
+- Four indestructible perimeter walls.
+- No procedural map changes.
+- No glass, breakable tiles, collapse, damage, or explosions.
+- Map geometry does not change within or between V1 episodes.
+
+### Learning objects
+
+The arena contains exactly one of each:
+
+- blue rectangular prism
+- orange solid square-based pyramid
+- green sphere
+- purple hoop
+- red ramp
+
+The objects form a geometrically balanced layout while their different shapes and
+colors provide orientation landmarks.
+
+The pyramid is one genuine closed static mesh with:
+
+- one square base
+- four triangular faces
+- explicit per-face normals
+- smoothing disabled across hard edges
+- authored UV coordinates
+- complex-as-simple solid collision
+
+It is not constructed from boxes or other composite pieces.
+
+The ramp is 500 × 260 × 36 cm and pitched by -18 degrees. Its center height is
+calculated from its rotated support geometry:
+
+```text
+supportHeight =
+    abs(sin(pitch)) * length / 2
+  + abs(cos(pitch)) * thickness / 2
+```
+
+This places its lowest edge exactly at ground Z = 0 instead of using an
+approximate transform that leaves a gap.
+
+### Materials
+
+Every arena surface uses a dedicated opaque matte material:
+
+- blend mode: Opaque
+- roughness: 1.0
+- specular: 0.0
+- no opacity input
+- no emissive input
+- no grid texture
+- no glossy reflection
+- no legacy white object material
+
+Floor and walls also use fixed non-white matte colors.
+
+### Lighting and rendering environment
+
+Lighting is constructed deterministically at runtime. Level-authored directional
+lights, skylights, and post-process volumes are replaced.
+
+Current lighting contract:
+
+- one fixed diagonal directional key light
+- key rotation: -42 degrees pitch, -35 degrees yaw
+- warm key color
+- key intensity: 6.0
+- directional source angle: 3.0 degrees for readable soft shadows
+- contact shadows enabled
+- one low-strength neutral/cool skylight fill
+- skylight intensity: 0.65
+- ambient occlusion intensity: 0.65
+- ambient occlusion radius: 140 cm
+- unbound post-process volume
+- manual exposure
+- exposure bias: 0.5
+- physical-camera exposure disabled
+- automatic exposure adaptation disabled
+- volumetric clouds removed
+- exponential height fog removed
+- stable clear sky gradient retained for ambient illumination
+
+Lighting remains identical across V1 episodes. Lighting randomization, if ever
+used, belongs to a later generalization curriculum.
+
+### Player and camera
+
+- First-person player mesh is invisible.
+- Third-person player mesh is invisible.
+- Player mesh shadows are disabled.
+- Collision capsule and movement collision remain active.
+- One centered neutral white crosshair is rendered.
+- Fixed first-person camera FOV.
+
+### Movement behavior
+
+The character uses the existing sharp Quake-like movement component:
+
+- walk speed: 1,100 cm/s
+- ground acceleration: 30,000 cm/s²
+- ground braking deceleration: 2,600 cm/s²
+- ground friction: 7.0
+
+The nominal time to reach walking speed is approximately:
+
+```text
+1100 / 30000 = 0.0367 seconds
+```
+
+At a planned 20 Hz observation rate, acceleration is effectively completed within
+one observation interval. Collection should therefore emphasize action
+transitions, direction changes, collision, sliding, camera-relative movement, and
+visual parallax rather than assuming a long acceleration curve.
 
 ## Curriculum
 
-### Curriculum V1: Movement
+### V1: movement
 
-Status: current playable iteration.
+Enabled:
 
-Enabled actions:
-
-- W
-- A
-- S
-- D
-- Arrow Up
-- Arrow Down
-- Arrow Left
-- Arrow Right
+- W, A, S, D
+- ArrowUp, ArrowDown, ArrowLeft, ArrowRight
 
 Forced to zero:
 
 - Q
 - E
 
-Visual and gameplay contract:
+No trajectory, grenade, cooldown, inventory, damage, break, jump, crouch, or
+additional HUD mechanics exist in V1.
 
-- One neutral white crosshair.
-- Each learning object uses a distinct opaque, non-emissive, high-roughness matte
-  color with no transparency or surface-grid texture.
-- No trajectory visualization.
-- No grenade actors.
-- No grenade state, cooldown, explosion, damage, or break mechanics.
-- No HUD speed, hop, timer, inventory, or status text.
-- The fixed square curriculum arena is the only gameplay layout.
+### V2: held trajectory preview
 
-Training coverage should include:
+V1 behavior remains unchanged and Q is introduced as a level-triggered action:
 
-- idle periods
-- camera-only input
-- movement-only input
-- combined movement and camera input
-- diagonal movement
-- diagonal camera input
-- short taps and long holds
-- opposing input cancellation
-- walking into obstacles
-- sliding along walls and obstacle boundaries
-- turning while moving
-
-### Curriculum V2: Trajectory preview
-
-Begins only after V1 is accepted and learned.
-
-V1 behavior remains unchanged. Q is introduced as a level-triggered action:
-
-- Q = 1: display exactly one green trajectory.
-- Q = 0: display no trajectory.
-- The trajectory is recomputed every observation step from the current player and
-  camera state.
-- Q may be held while any movement and camera actions are active.
+- Q = 1 shows exactly one green trajectory.
+- Q = 0 hides the trajectory.
+- Q may be combined with every movement and camera action.
+- The trajectory is recomputed from the current state every observation step.
+- The predicted path continues until the simulated grenade reaches rest.
 - E remains forced to zero.
 - No physical grenade is spawned.
-- The trajectory runs until the simulated grenade reaches rest.
-- There is no red trajectory, explosion marker, fuse, charge, or damage state.
+- No red line, explosion marker, fuse, charge, or damage state is shown.
 
-The trajectory should be sufficiently thick and high-contrast at training
-resolution. Dataset sampling should keep Q visible for roughly 40-50 percent of
-V2 frames so the line is not a sparse target under whole-frame loss.
+Q should be visible in approximately 40–50% of V2 training frames so it is not a
+sparse whole-frame prediction target.
 
-### Curriculum V3: Persistent harmless grenades
+### V3: persistent harmless grenades
 
-V1 and V2 behavior remains unchanged. E is introduced:
+V1 and V2 remain unchanged and E is introduced:
 
 - E is edge-triggered.
-- A transition from E = 0 to E = 1 requests one throw.
+- E = 0 to E = 1 requests one throw.
 - Holding E does not repeatedly throw.
-- E must be released before another throw can be requested.
-- An E press during cooldown is ignored and is not buffered.
-- An accepted throw uses exactly the same launch position and velocity as the Q
-  trajectory for that state.
-- If Q and E are active together, preview and launch use the same state snapshot.
+- E must be released before another request.
+- Requests during cooldown are ignored and not buffered.
+- An accepted throw uses the same launch state and trajectory as Q.
 
 Cooldown:
 
-- The centered crosshair is green when a throw is available.
-- An accepted throw changes the crosshair to red.
-- Cooldown lasts exactly 2.0 seconds of simulated time.
-- At the canonical 20 Hz observation rate, cooldown lasts exactly 40 transitions.
-- The crosshair returns to green on the deterministic final cooldown transition.
-- Q remains available during cooldown and its line remains green.
+- green crosshair: throw available
+- red crosshair: cooldown active
+- cooldown duration: exactly 2.0 simulated seconds
+- at 20 Hz: exactly 40 transitions
+- Q remains available and green during cooldown
 
-Grenade behavior:
+Grenades:
 
-- No inventory and no arbitrary grenade limit.
-- The two-second cooldown naturally limits creation rate.
-- Grenades never explode, damage, or break anything.
-- Grenades bounce and roll until resting.
-- A resting grenade remains visible at its final transform until episode reset.
-- Resting grenades do not collide with the player or later grenades in V3.
-- Existing grenades do not change the Q preview.
-- Simulation ticking stops once a grenade is resting.
-- All persistent grenades are removed at episode reset.
+- no inventory
+- no arbitrary grenade count
+- creation is limited only by cooldown
+- never explode, damage, or break anything
+- bounce and roll until resting
+- remain visible at rest until episode reset
+- stop ticking once resting
+- do not collide with the player or later grenades in V3
+- do not affect Q preview
+- are all removed at episode reset
 
-### Curriculum V4: Map generalization
+### V4: map generalization
 
-Begins only after movement, trajectory preview, and persistent projectile execution
-are learned on the fixed map.
-
-Variation is introduced one factor at a time:
+Begins only after V1–V3 are learned on the fixed map:
 
 1. Rearrange known objects inside the same square arena.
-2. Generate many layouts from recorded deterministic seeds.
-3. Vary square-arena dimensions.
-4. Vary quantities and combinations of known object types.
-5. Introduce new object types, materials, or lighting only later.
+2. Generate layouts from deterministic recorded seeds.
+3. Vary arena dimensions.
+4. Vary quantities and combinations of known objects.
+5. Introduce new shapes, materials, or lighting only later.
 
-One generated map remains fixed for an entire episode. Training and evaluation use
-disjoint seed sets. Earlier curriculum data remains in the training mixture to
-reduce catastrophic forgetting.
+One layout remains fixed for an entire episode. Training and evaluation use
+disjoint seed sets. Earlier curriculum data remains in the mixture.
 
-Possible later stages, not part of V1-V4:
+## Simulation timing
 
-- grenade-to-grenade collision
-- player-to-resting-grenade collision
-- break mechanics
-- variable observation timestep
-- new physics parameters
+Initial target:
 
-## Simulation and observation timing
-
-Three rates are intentionally distinct:
-
-| Layer | Initial specification | Meaning |
+| Layer | Rate | Meaning |
 | --- | ---: | --- |
-| Grenade physics | 120 Hz fixed step | Six projectile substeps per observation |
-| Actions and RGB observations | 20 Hz fixed step | One dataset transition every 50 ms |
-| Wall-clock generation | Uncapped | Run as fast as the worker permits |
+| Grenade physics in V2/V3 | 120 Hz | Six substeps per observation |
+| Actions and RGB | 20 Hz | One transition every 50 ms |
+| Wall-clock generation | Uncapped | Run as fast as rendering/output allow |
 
-Fast generation must not use world time dilation. A worker advances fixed simulated
-time without waiting for real time. If writing or encoding cannot keep up, the
-simulation waits rather than dropping observations.
+Generation must not use time dilation. Simulation advances by fixed time without
+waiting for real time. If readback or output cannot keep up, the worker blocks
+instead of dropping frames.
 
-The initial rendering specification is:
+The final resolution will be locked after visual inspection. The current
+recommended starting point is 256 × 256 RGB at 20 Hz. Crosshair and future
+trajectory lines must remain clearly resolvable at the chosen training
+resolution.
 
-- 160 x 96 RGB
-- fixed FOV
-- no audio
-- no VSync
-- no motion blur
-- no depth of field
-- no film grain
-- no automatic exposure
-- no temporal camera effects
-- no ray tracing
-- simplified deterministic lighting
+Disable:
 
-A visual pilot must confirm that the crosshair and trajectory remain at least two
-training pixels thick. Resolution may be increased before large-scale collection
-if that condition is not met.
+- audio
+- VSync
+- motion blur
+- depth of field
+- film grain
+- automatic exposure
+- temporal camera effects not required by the task
+- ray tracing
 
-## Episode contract
+## Episode and transition contract
 
-- Initial duration: 60 simulated seconds.
-- At 20 Hz: 1,200 transitions and 1,201 observations.
-- Reset removes all persistent episode actors and restores the fixed map state.
-- Reset is an explicit episode boundary.
-- Loss is never computed across an episode boundary.
-- Data-generation resets may choose a deterministic valid spawn position and
-  orientation from the episode seed.
+Recommended first packaged-build pilot:
+
+- 32 episodes
+- 30 simulated seconds per episode
+- 600 transitions per episode at 20 Hz
+- 601 observations per complete episode
+- 19,200 total pilot transitions
+- deterministic replay pairs included
 
 Exact alignment:
 
 ```text
 observation[0] = initial observation
-action[0]      = action transforming observation[0] into observation[1]
-observation[1] = resulting observation
+action[0]      = action applied to observation[0]
+observation[1] = result after one fixed step
 ...
-action[N-1]    = action transforming observation[N-1] into observation[N]
+action[N-1]    = action applied to observation[N-1]
+observation[N] = final result
 ```
 
-## Random-agent policy
+Each logical record represents:
 
-Random inputs must be temporally persistent. Sampling every bit independently with
-probability 0.5 every frame would overproduce jitter and cancellation.
+```text
+(observation[t], state[t], action[t], observation[t+1], state[t+1])
+```
 
-Initial duration mixture:
+Resets occur only between episodes. Training sequences never cross an episode
+boundary. No teleport, camera reset, or hidden discontinuity occurs inside an
+episode.
 
-- short taps: 1-3 observation steps
-- normal holds: 4-20 observation steps
-- long holds: 21-60 observation steps
+Episode initialization may deterministically randomize:
 
-Sampling should balance:
+- valid non-overlapping player position
+- yaw across 0–360 degrees
+- pitch within an approved range
+- zero initial velocity
 
-- movement only
-- camera only
-- movement plus camera
-- idle
-- valid diagonals
-- deliberate opposing-input cases in approximately 5-10 percent of segments
+Approximately 10% of episodes should retain the canonical fixed spawn and camera
+orientation for reference and replay testing.
 
-V2 additions:
+## Meaningful collection-agent design
 
-- varied Q hold durations
-- Q during walking
-- Q during camera rotation
-- Q while walking and rotating
-- Q active for roughly 40-50 percent of frames
+The agent must not sample every bit independently every frame. That would
+overproduce jitter, cancellation, wall-sticking, and visually redundant data.
 
-V3 additions:
+Use a seeded semi-Markov behavior policy:
 
-- accepted E presses while green
-- ignored E presses while red
-- complete red-to-green cooldown sequences
-- throws with Q held
-- throws without Q held
-- high- and low-density persistent-grenade episodes
+1. Select a behavior mode.
+2. Select an action combination.
+3. Hold it for a sampled number of observation steps.
+4. Select a meaningful transition or new mode.
+
+Recommended frame-level coverage targets:
+
+| Behavior | Target |
+| --- | ---: |
+| stationary | 8% |
+| movement only | 30% |
+| camera only | 18% |
+| movement plus camera | 34% |
+| opposing/canceling actions | 5% |
+| deliberate collision behavior | 5% |
+
+Recommended hold-duration mixture:
+
+- 25% short: 1–3 steps
+- 40% medium: 4–12 steps
+- 25% long: 13–40 steps
+- 10% very long: 41–100 steps
+
+Important transitions:
+
+```text
+idle -> W -> idle
+W -> S
+A -> D
+W -> W+A -> A
+camera-left -> idle-camera
+camera-left -> camera-right
+movement-only -> movement+camera
+movement+camera -> camera-only
+```
+
+Movement coverage must include:
+
+- every cardinal direction
+- all meaningful diagonals
+- one- and two-frame taps
+- sustained movement
+- direction reversal
+- movement while yawing
+- movement while pitching
+- direct collisions
+- glancing/sliding collisions
+- recovery from collision
+- paths near every object
+- paths through every arena region
+
+Camera coverage must include:
+
+- slow and fast yaw sweeps
+- short corrections
+- sustained rotation
+- direction reversal
+- pitch movement
+- pitch-limit behavior
+- full yaw coverage
+- camera-only and camera-plus-movement states
+
+Collision behavior:
+
+1. Deliberately approach a wall or object.
+2. Continue pressing into it for 3–15 steps.
+3. Recover by reversing, turning, or strafing.
+
+Target approximately 8–15% near-contact/contact frames, distributed across every
+object and perimeter walls. Intended action bits are always recorded even when
+movement is blocked.
+
+The collector may use privileged position, contact, visibility, and visitation
+statistics to balance the dataset. This does not make those fields model inputs.
+A 16 × 16 arena visitation grid can upweight underrepresented regions.
 
 ## Dataset schema
 
-The build records privileged state for verification even when the model receives
-only RGB observations and action bits.
+### Per episode
 
-Per-episode fields:
-
-- dataset schema version
+- schema version
 - curriculum version
 - episode ID
 - worker ID
-- random seed
-- build revision / Git commit
+- deterministic seed
+- Git commit/build revision
 - Unreal Engine version
-- map identifier and map/configuration hash
-- observation rate
-- internal physics rate
-- image width and height
+- map/configuration hash
+- observation and physics rates
+- RGB dimensions
 - camera FOV
 - initial player transform
-- requested episode length
-- actual episode length
-- termination/reset reason
-- data checksum information
+- requested and actual episode length
+- termination reason
+- shard and checksum information
 
-Per-observation fields:
+### Per observation
 
 - episode ID
 - frame index
-- integer simulated timestamp or simulation-step count
-- RGB observation
+- integer simulation step/timestamp
+- RGB observation key
 - player position XYZ
 - player velocity XYZ
-- camera yaw, pitch, and roll
+- camera yaw, pitch, roll
 - grounded state
-- collision/contact diagnostics
-- crosshair state:
-  - Neutral
-  - Ready
-  - Cooldown
-- cooldown remaining in observation steps
+- contact/collision diagnostics
+- crosshair state: Neutral, Ready, or Cooldown
+- cooldown remaining in steps
 - Q visibility
-- all grenade states, with stable per-episode IDs:
+- stable per-episode grenade records:
   - grenade ID
   - position XYZ
   - velocity XYZ
   - resting flag
 
-Per-transition fields:
+### Per transition
 
 - episode ID
 - source frame index
-- ten-bit requested action mask
-- ten individual action-bit columns
-- effective/cancelled movement and camera axes
+- packed ten-bit requested action mask
+- ten individual Boolean action columns
+- effective/cancelled movement axes
+- effective/cancelled camera axes
 - E request edge
-- E accepted-throw event
+- E accepted event
 - resulting cooldown state
 - observation-valid flag
 
-Curriculum V1 retains the complete schema:
+V1 retains the complete schema with deterministic defaults:
 
-- Q and E bits are zero.
-- Q visibility is false.
-- grenade collection is empty.
-- crosshair state is Neutral.
-- cooldown remaining is zero.
+- Q = 0
+- E = 0
+- Q visibility = false
+- grenade collection = empty
+- crosshair state = Neutral
+- cooldown remaining = 0
 
-## Packaged data-generation build
+## Final storage design
 
-The Unreal Editor is used to author, inspect, build, cook, and package the project.
-Bulk workers run the packaged executable without the editor.
+Implement the real sharded format immediately. Do not first create a
+millions-of-files PNG/JSON dataset that must later be replaced.
 
-Each worker will eventually:
+Recommended structure:
 
-1. Reset an episode using a deterministic seed.
-2. Obtain a deterministic random action.
-3. Apply action bits directly rather than synthesizing operating-system keystrokes.
-4. Advance one fixed 50 ms observation interval.
-5. Render the final observation, including the crosshair and later trajectory.
-6. Associate asynchronous GPU readback with the exact frame index.
-7. Write the RGB observation and privileged metadata.
-8. Block instead of dropping frames when output queues are full.
+```text
+movement_v1/
+  dataset.json
+  shard-000000.tar
+  shard-000001.tar
+  ...
+```
 
-Recommended worker parameters:
+Each approximately 500 MB–1 GB tar shard contains:
+
+- lossless WebP RGB frames
+- `frames.parquet`
+- `episodes.parquet`
+- shard manifest and checksum
+
+WebDataset-style tar shards avoid millions of filesystem entries while retaining
+exact frame access. Ordinary MP4 files may be produced separately for human
+review, but are not the authoritative training source because temporal codecs
+complicate exact frame access and introduce inter-frame artifacts.
+
+## Packaged build-first workflow
+
+The Unreal Editor is used for authoring and visual inspection. Dataset correctness
+is judged using the packaged executable.
+
+Implementation sequence:
+
+1. Freeze and visually accept Curriculum V1.
+2. Implement the in-game seeded action policy.
+3. Implement fixed-step action/state/RGB synchronization.
+4. Implement asynchronous GPU readback with exact frame IDs.
+5. Implement lossless WebP, Parquet, and tar-shard output.
+6. Package a Win64 Development data-generator build.
+7. Generate the 32-episode pilot using the packaged executable.
+8. Validate alignment, determinism, coverage, and shard integrity.
+9. Add the external multi-worker launcher.
+10. Benchmark safe processes per GPU.
+11. Scale only after the pilot passes.
+
+The packaged build must accept:
 
 - curriculum version
 - worker ID
@@ -399,68 +563,84 @@ Recommended worker parameters:
 - output directory
 - observation rate
 - render resolution
+- shard-size target
 
-The build is packaged once and launched in parallel with disjoint worker and seed
-ranges. Each process writes independent shards. The optimal number of processes
-per GPU is established by benchmarking rather than assumed.
+Each worker writes independent shards using disjoint worker IDs and seed ranges.
 
-Proposed artifact structure:
+## Validation requirements
 
-```text
-episode_manifest.json
-observations.mkv
-steps.parquet
-```
+Generation fails if:
 
-- `observations.mkv`: constant-rate lossless or visually lossless RGB observations.
-- `steps.parquet`: indexed action and privileged-state records.
-- `episode_manifest.json`: build, seed, configuration, length, and checksum data.
+- RGB and metadata counts differ
+- frame indices are discontinuous
+- timestamps are non-monotonic
+- an action record is missing
+- an observation is dropped
+- a shard is incomplete
+- a checksum fails
+- deterministic replay materially disagrees in authoritative state
 
-Ordinary MP4 files may be generated for human review but are not the sole source
-of training data.
+Automatic reports must include:
 
-## Data-volume rollout
+- action and action-combination frequencies
+- hold-duration distribution
+- position visitation heatmap
+- yaw and pitch histograms
+- linear and angular velocity histograms
+- contact frequency by object
+- distance-to-object distributions
+- stationary-frame percentage
+- duplicate/near-duplicate RGB percentage
+- missing-frame count
+- episode-length consistency
+- shard sizes and checksums
+- replay-test results
 
-Collection scales only after correctness checks:
+Data-volume rollout:
 
-1. 10,000-frame pipeline and alignment test.
-2. 100,000-frame visual and action-distribution pilot.
+1. 19,200-transition packaged pilot.
+2. 100,000-frame distribution and visual pilot.
 3. 1,000,000-frame first training run.
-4. Scale toward 10,000,000 frames only after validation rollouts justify it.
+4. Scale toward 10,000,000 frames only after rollout evaluation.
 
-At 20 observations per second, one million frames represent approximately
-13.9 simulated hours.
+At 20 Hz, one million frames represent approximately 13.9 simulated hours.
 
-## Evaluation gates
+## Curriculum evaluation gates
 
 V1:
 
-- multi-step player position error
-- yaw and pitch error
+- multi-step player-position error
+- camera yaw/pitch error
 - velocity error
 - collision/contact accuracy
-- long-rollout visual drift
+- visual rollout drift
 
 V2:
 
 - trajectory-mask overlap
 - endpoint error
-- geometric distance between predicted and reference curves
-- correct appearance/disappearance timing for Q
+- curve-distance error
+- correct Q appearance/disappearance timing
 
 V3:
 
 - accepted versus ignored E behavior
 - exact red-to-green cooldown transition
-- projectile position and velocity error
-- agreement between Q preview and thrown path
+- projectile position/velocity error
+- Q preview versus thrown-path agreement
 - resting-location error
-- persistence of resting grenades
+- resting-grenade persistence
 
-Progression requires multi-step rollout quality, not only low one-frame pixel loss.
+Progression is based on multi-step rollout quality, not only one-frame pixel loss.
 
-## Current implementation boundary
+## Immediate next milestone
 
-The current working version is Curriculum V1 only. The packaged data recorder,
-random-agent worker, and high-throughput dataset writer are intentionally deferred
-until the human-played Unreal Editor version has been inspected and accepted.
+After final human visual acceptance of the fixed V1 arena, implement the real
+packaged data generator:
+
+- deterministic semi-Markov collector
+- fixed 20 Hz transition loop
+- synchronized RGB and privileged state
+- lossless WebP + Parquet tar shards
+- packaged Win64 Development executable
+- 32-episode validation pilot

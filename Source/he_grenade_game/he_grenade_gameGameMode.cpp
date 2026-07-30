@@ -3,8 +3,16 @@
 #include "he_grenade_gameGameMode.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "Components/DirectionalLightComponent.h"
+#include "Components/SkyLightComponent.h"
+#include "Components/VolumetricCloudComponent.h"
+#include "Engine/DirectionalLight.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Engine/PostProcessVolume.h"
+#include "Engine/SkyLight.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/WorldSettings.h"
 #include "Grenade/ArenaObstacle.h"
 #include "Grenade/GrenadeHUD.h"
@@ -74,8 +82,117 @@ Ahe_grenade_gameGameMode::Ahe_grenade_gameGameMode()
 
 void Ahe_grenade_gameGameMode::BeginPlay()
 {
+	BuildFixedCurriculumLighting();
 	BuildFixedCurriculumArena();
 	Super::BeginPlay();
+}
+
+void Ahe_grenade_gameGameMode::BuildFixedCurriculumLighting()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Remove level-authored lighting and exposure so every generated episode uses
+	// the exact same visual conditions, regardless of map or editor state.
+	for (TActorIterator<ADirectionalLight> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+	for (TActorIterator<ASkyLight> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+	for (TActorIterator<APostProcessVolume> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+	for (TActorIterator<AVolumetricCloud> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+	for (TActorIterator<AExponentialHeightFog> It(World); It; ++It)
+	{
+		It->Destroy();
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride =
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	// A diagonal key light exposes top and side faces simultaneously. The larger
+	// source angle keeps shadows readable without producing razor-sharp edges.
+	ADirectionalLight* KeyLight = World->SpawnActor<ADirectionalLight>(
+		FVector::ZeroVector,
+		FRotator(-42.0f, -35.0f, 0.0f),
+		SpawnParams);
+	if (KeyLight)
+	{
+		KeyLight->Tags.AddUnique(CurriculumArenaTag);
+
+		if (UDirectionalLightComponent* LightComponent =
+			Cast<UDirectionalLightComponent>(KeyLight->GetLightComponent()))
+		{
+			LightComponent->SetMobility(EComponentMobility::Movable);
+			LightComponent->SetIntensity(6.0f);
+			LightComponent->SetLightColor(FLinearColor(1.0f, 0.93f, 0.82f));
+			LightComponent->SetUseTemperature(false);
+			LightComponent->LightSourceAngle = 3.0f;
+			LightComponent->ContactShadowLength = 0.08f;
+			LightComponent->ContactShadowLengthInWS = false;
+			LightComponent->SetCastShadows(true);
+		}
+	}
+
+	// Low-strength neutral sky fill preserves color and detail on faces turned
+	// away from the key light without flattening the directional shading.
+	ASkyLight* FillLight = World->SpawnActor<ASkyLight>(
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		SpawnParams);
+	if (FillLight)
+	{
+		FillLight->Tags.AddUnique(CurriculumArenaTag);
+
+		if (USkyLightComponent* LightComponent = FillLight->GetLightComponent())
+		{
+			LightComponent->SetMobility(EComponentMobility::Movable);
+			LightComponent->SetIntensity(0.65f);
+			LightComponent->SetLightColor(FLinearColor(0.82f, 0.90f, 1.0f));
+			LightComponent->SetCastShadows(true);
+			LightComponent->RecaptureSky();
+		}
+	}
+
+	// Lock exposure and reinforce local contact cues. Auto exposure would make
+	// identical actions produce different pixels depending on recent camera views.
+	APostProcessVolume* PostProcess = World->SpawnActor<APostProcessVolume>(
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		SpawnParams);
+	if (PostProcess)
+	{
+		PostProcess->Tags.AddUnique(CurriculumArenaTag);
+		PostProcess->bUnbound = true;
+		PostProcess->BlendWeight = 1.0f;
+		PostProcess->Settings.bOverride_AutoExposureMethod = true;
+		PostProcess->Settings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+		PostProcess->Settings.bOverride_AutoExposureBias = true;
+		PostProcess->Settings.AutoExposureBias = 0.5f;
+		PostProcess->Settings.bOverride_AutoExposureApplyPhysicalCameraExposure = true;
+		PostProcess->Settings.AutoExposureApplyPhysicalCameraExposure = false;
+		PostProcess->Settings.bOverride_AmbientOcclusionIntensity = true;
+		PostProcess->Settings.AmbientOcclusionIntensity = 0.65f;
+		PostProcess->Settings.bOverride_AmbientOcclusionRadius = true;
+		PostProcess->Settings.AmbientOcclusionRadius = 140.0f;
+	}
+
+	UE_LOG(
+		LogTemp,
+		Display,
+		TEXT("Curriculum lighting built: fixed diagonal key, sky fill, locked exposure."));
 }
 
 void Ahe_grenade_gameGameMode::RestartPlayer(AController* NewPlayer)
@@ -173,11 +290,20 @@ void Ahe_grenade_gameGameMode::BuildFixedCurriculumArena()
 		FVector(3.4f),
 		MatteHoopMaterial);
 
+	constexpr float RampLengthCm = 500.0f;
+	constexpr float RampWidthCm = 260.0f;
+	constexpr float RampThicknessCm = 36.0f;
+	constexpr float RampPitchDegrees = -18.0f;
+	const float RampPitchRadians = FMath::DegreesToRadians(RampPitchDegrees);
+	const float RampSupportHeightCm =
+		(FMath::Abs(FMath::Sin(RampPitchRadians)) * RampLengthCm * 0.5f)
+		+ (FMath::Abs(FMath::Cos(RampPitchRadians)) * RampThicknessCm * 0.5f);
+
 	SpawnBox(
 		TEXT("CurriculumObject_Ramp"),
-		FVector(0.0f, 0.0f, 100.0f),
-		FRotator(-18.0f, 0.0f, 0.0f),
-		FVector(500.0f, 260.0f, 36.0f),
+		FVector(0.0f, 0.0f, RampSupportHeightCm),
+		FRotator(RampPitchDegrees, 0.0f, 0.0f),
+		FVector(RampLengthCm, RampWidthCm, RampThicknessCm),
 		MatteRampMaterial);
 
 	// Single-player inspection spawn, looking from the west side toward the center.

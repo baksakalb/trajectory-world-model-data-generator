@@ -70,6 +70,7 @@ protected:
 
 private:
 	void BuildFixedCurriculumArena();
+	void BuildFixedCurriculumLighting();
 	void SpawnBox(
 		FName ObjectTag,
 		const FVector& Location,

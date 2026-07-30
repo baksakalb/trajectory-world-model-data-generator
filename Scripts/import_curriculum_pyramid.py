@@ -33,6 +33,10 @@ def main():
     )
     options.static_mesh_import_data.set_editor_property("combine_meshes", True)
     options.static_mesh_import_data.set_editor_property(
+        "normal_import_method",
+        unreal.FBXNormalImportMethod.FBXNIM_IMPORT_NORMALS,
+    )
+    options.static_mesh_import_data.set_editor_property(
         "generate_lightmap_u_vs",
         True,
     )
