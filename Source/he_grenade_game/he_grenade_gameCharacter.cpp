@@ -30,6 +30,8 @@ Ahe_grenade_gameCharacter::Ahe_grenade_gameCharacter(const FObjectInitializer& O
 	FirstPersonMesh->SetOnlyOwnerSee(true);
 	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
 	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
+	FirstPersonMesh->SetHiddenInGame(true);
+	FirstPersonMesh->SetCastShadow(false);
 
 	// Create the Camera Component
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
@@ -41,13 +43,16 @@ Ahe_grenade_gameCharacter::Ahe_grenade_gameCharacter(const FObjectInitializer& O
 	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
 	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
 
-	// Grenade systems
-	GrenadeThrowerComponent = CreateDefaultSubobject<UGrenadeThrowerComponent>(TEXT("GrenadeThrowerComponent"));
-	GrenadeTrajectoryComponent = CreateDefaultSubobject<UGrenadeTrajectoryComponent>(TEXT("GrenadeTrajectoryComponent"));
+	// Curriculum V1 contains no grenade or trajectory component instances. Their
+	// source remains in the repository for later curriculum branches.
+	GrenadeThrowerComponent = nullptr;
+	GrenadeTrajectoryComponent = nullptr;
 
 	// Configure character visuals
 	GetMesh()->SetOwnerNoSee(true);
 	GetMesh()->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::WorldSpaceRepresentation;
+	GetMesh()->SetHiddenInGame(true);
+	GetMesh()->SetCastShadow(false);
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 96.0f);
 
 	// Crouch support
@@ -78,53 +83,87 @@ void Ahe_grenade_gameCharacter::BeginPlay()
 	{
 		StandingMeshRelativeLocation = FirstPersonMesh->GetRelativeLocation();
 		CurrentCrouchCameraOffsetCm = 0.0f;
+		FirstPersonMesh->SetVisibility(false, true);
+		FirstPersonMesh->SetHiddenInGame(true, true);
+		FirstPersonMesh->SetCastShadow(false);
+	}
+
+	if (USkeletalMeshComponent* ThirdPersonMesh = GetMesh())
+	{
+		ThirdPersonMesh->SetVisibility(false, true);
+		ThirdPersonMesh->SetHiddenInGame(true, true);
+		ThirdPersonMesh->SetCastShadow(false);
+	}
+
+	// Curriculum V1 keeps the complete future-curriculum components in source but
+	// makes them inert and invisible at runtime.
+	bAimModeActive = false;
+	if (GrenadeThrowerComponent)
+	{
+		GrenadeThrowerComponent->SetAimModeActive(false);
+		GrenadeThrowerComponent->SetComponentTickEnabled(false);
+	}
+	if (GrenadeTrajectoryComponent)
+	{
+		GrenadeTrajectoryComponent->bTrajectoryEnabled = false;
+		GrenadeTrajectoryComponent->SetAimModeActive(false);
+		GrenadeTrajectoryComponent->SetComponentTickEnabled(false);
 	}
 }
 
 void Ahe_grenade_gameCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	RefreshCrouchFromInput();
-	UpdateCrouchCamera(DeltaSeconds);
+	ProcessCurriculumMovementInput(DeltaSeconds);
 }
 
 void Ahe_grenade_gameCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
-	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
-	{
-		// Jumping
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &Ahe_grenade_gameCharacter::DoJumpStart);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &Ahe_grenade_gameCharacter::DoJumpEnd);
+	// Curriculum V1 reads only the canonical keyboard bits directly each frame.
+	// No Enhanced Input action, mouse, jump, crouch, touch, or grenade binding is
+	// installed.
+}
 
-		// Moving
-		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &Ahe_grenade_gameCharacter::MoveInput);
-
-		// Looking/Aiming
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &Ahe_grenade_gameCharacter::LookInput);
-		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &Ahe_grenade_gameCharacter::LookInput);
-	}
-	else
+void Ahe_grenade_gameCharacter::ProcessCurriculumMovementInput(const float DeltaSeconds)
+{
+	APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	if (!PlayerController || !PlayerController->IsLocalPlayerController())
 	{
-		UE_LOG(Loghe_grenade_game, Error, TEXT("'%s' Failed to find an Enhanced Input Component!"), *GetNameSafe(this));
+		return;
 	}
 
-	if (PlayerInputComponent)
-	{
-		// Action bindings that intentionally avoid requiring additional IA/IMC assets.
-		PlayerInputComponent->BindKey(EKeys::LeftMouseButton, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoThrowPressed);
-		PlayerInputComponent->BindKey(EKeys::LeftMouseButton, IE_Released, this, &Ahe_grenade_gameCharacter::DoThrowReleased);
+	const float ForwardAxis =
+		(PlayerController->IsInputKeyDown(EKeys::W) ? 1.0f : 0.0f)
+		- (PlayerController->IsInputKeyDown(EKeys::S) ? 1.0f : 0.0f);
+	const float RightAxis =
+		(PlayerController->IsInputKeyDown(EKeys::D) ? 1.0f : 0.0f)
+		- (PlayerController->IsInputKeyDown(EKeys::A) ? 1.0f : 0.0f);
+	const float YawAxis =
+		(PlayerController->IsInputKeyDown(EKeys::Right) ? 1.0f : 0.0f)
+		- (PlayerController->IsInputKeyDown(EKeys::Left) ? 1.0f : 0.0f);
+	const float PitchAxis =
+		(PlayerController->IsInputKeyDown(EKeys::Up) ? 1.0f : 0.0f)
+		- (PlayerController->IsInputKeyDown(EKeys::Down) ? 1.0f : 0.0f);
 
-		PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoAimStart);
-		PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Released, this, &Ahe_grenade_gameCharacter::DoAimEnd);
+	FRotator ControlRotation = PlayerController->GetControlRotation();
+	ControlRotation.Yaw = FRotator::NormalizeAxis(
+		ControlRotation.Yaw
+		+ (YawAxis * FMath::Max(1.0f, ArrowKeyYawRateDegreesPerSecond) * DeltaSeconds));
 
-		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoTrajectoryHeightStart);
-		PlayerInputComponent->BindKey(EKeys::LeftControl, IE_Released, this, &Ahe_grenade_gameCharacter::DoTrajectoryHeightEnd);
+	const float SafeMinPitch = FMath::Min(MinimumCameraPitchDegrees, MaximumCameraPitchDegrees);
+	const float SafeMaxPitch = FMath::Max(MinimumCameraPitchDegrees, MaximumCameraPitchDegrees);
+	ControlRotation.Pitch = FMath::Clamp(
+		FRotator::NormalizeAxis(
+			ControlRotation.Pitch
+			+ (PitchAxis * FMath::Max(1.0f, ArrowKeyPitchRateDegreesPerSecond) * DeltaSeconds)),
+		SafeMinPitch,
+		SafeMaxPitch);
+	ControlRotation.Roll = 0.0f;
+	PlayerController->SetControlRotation(ControlRotation);
 
-		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Pressed, this, &Ahe_grenade_gameCharacter::DoCrouchStart);
-		PlayerInputComponent->BindKey(EKeys::LeftShift, IE_Released, this, &Ahe_grenade_gameCharacter::DoCrouchEnd);
-	}
+	DoMove(RightAxis, ForwardAxis);
 }
 
 void Ahe_grenade_gameCharacter::MoveInput(const FInputActionValue& Value)
@@ -150,23 +189,13 @@ void Ahe_grenade_gameCharacter::DoAim(float Yaw, float Pitch)
 
 void Ahe_grenade_gameCharacter::DoMove(float Right, float Forward)
 {
-	if (UGGMovementComponent* MovementComponent = GetGGMovementComponent())
-	{
-		if (MovementComponent->IsCrouchHopChainActive())
-		{
-			constexpr float HopBreakAxisThreshold = 0.2f;
-			const bool bHopBreakInput = FMath::Abs(Right) > HopBreakAxisThreshold || Forward < -HopBreakAxisThreshold;
-			if (bHopBreakInput)
-			{
-				MovementComponent->CancelCrouchHopChain();
-			}
-		}
-	}
-
 	if (GetController())
 	{
-		AddMovementInput(GetActorRightVector(), Right);
-		AddMovementInput(GetActorForwardVector(), Forward);
+		const FRotator YawRotation(0.0f, GetController()->GetControlRotation().Yaw, 0.0f);
+		const FVector ForwardDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+		const FVector RightDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+		AddMovementInput(RightDirection, Right);
+		AddMovementInput(ForwardDirection, Forward);
 	}
 }
 

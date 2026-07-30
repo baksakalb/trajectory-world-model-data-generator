@@ -68,6 +68,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Crouch", meta = (AllowPrivateAccess = "true", ClampMin = "1.0"))
 	float CrouchCameraInterpSpeed = 14.0f;
 
+	/** Deterministic keyboard-camera rates used by Curriculum V1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Camera", meta = (ClampMin = "1.0", Units = "deg/s"))
+	float ArrowKeyYawRateDegreesPerSecond = 90.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Camera", meta = (ClampMin = "1.0", Units = "deg/s"))
+	float ArrowKeyPitchRateDegreesPerSecond = 75.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Camera", meta = (ClampMin = "-89.0", ClampMax = "0.0", Units = "deg"))
+	float MinimumCameraPitchDegrees = -85.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Camera", meta = (ClampMin = "0.0", ClampMax = "89.0", Units = "deg"))
+	float MaximumCameraPitchDegrees = 85.0f;
+
 public:
 	Ahe_grenade_gameCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
@@ -125,6 +138,7 @@ protected:
 
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 
+	void ProcessCurriculumMovementInput(float DeltaSeconds);
 	void RefreshCrouchFromInput();
 	void UpdateCrouchCamera(float DeltaSeconds);
 	UGGMovementComponent* GetGGMovementComponent() const;

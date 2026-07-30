@@ -1,0 +1,23 @@
+# Solid curriculum pyramid, authored in centimeters.
+o CurriculumPyramid
+v -50.0 -50.0 0.0
+v  50.0 -50.0 0.0
+v  50.0  50.0 0.0
+v -50.0  50.0 0.0
+v   0.0   0.0 100.0
+
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+vt 0.5 0.5
+
+# Square base (outward normal faces downward)
+f 1/1 4/4 3/3
+f 1/1 3/3 2/2
+
+# Four triangular sides
+f 1/1 2/2 5/5
+f 2/1 3/2 5/5
+f 3/1 4/2 5/5
+f 4/1 1/2 5/5
