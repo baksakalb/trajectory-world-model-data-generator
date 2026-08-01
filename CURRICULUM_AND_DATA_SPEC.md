@@ -52,19 +52,100 @@ Curriculum V1 is implemented as a human-inspectable game and has passed:
 - curriculum material import validation
 - pyramid mesh import validation
 
-Not yet implemented:
+The first packaged single-worker generator preflight is also implemented and has
+passed:
 
-- autonomous collection agent
-- fixed-step frame recorder
-- GPU RGB readback
-- Parquet metadata writer
-- WebDataset-style shard writer
-- packaged data-generator executable
-- parallel worker launcher
-- dataset validation/reporting suite
+- Win64 Development packaging
+- deterministic seeded semi-Markov actions
+- fixed 20 Hz simulation and observation stepping
+- synchronous GPU RGB readback from the player camera
+- directly streamed lossless PNG observations inside a tar shard
+- aligned frame, transition, and episode JSONL metadata
+- bounded episode count with automatic process exit
+- shard checksum generation
+- offline count, continuity, dimension, and checksum validation
+- MP4 review generation exclusively from stored shard observations
+- exact same-seed replay across all tested state, action, and RGB records
+- deterministic coverage-guided object-orbit, ramp-traversal, and hoop-passage missions
+- privileged per-frame viewpoint bins and verified per-episode interaction counters
 
-The next engineering milestone is the real packaged data-generation pipeline, not
-a throwaway screen-recording prototype.
+The generator now supports all three fixed-map curriculum stages from one
+executable:
+
+- `-Stage=movement` for V1
+- `-Stage=trajectory` for V2
+- `-Stage=throw` for V3
+
+`Generate_Curriculum_Comparison.bat` runs identical 12-second seeds for all
+three stages at both 320 × 320 and 384 × 384, validates every authoritative
+shard, and derives review MP4s from the stored observations.
+
+Still required before production-scale collection:
+
+- asynchronous GPU RGB readback
+- lossless WebP encoding
+- Parquet metadata
+- target-size shard rollover
+- full elevation, projected-size, occlusion, and action-distribution reporting
+- resumable one-worker-per-GPU batch launcher
+- human-play capture mode using the same observation/action contract
+- final production mission distributions and camera-pitch distribution
+
+The preflight deliberately proves the gameplay loop, synchronization, direct
+sharding, replay, and inspection workflow before those storage and throughput
+upgrades. It does not use screen recording.
+
+## Packaged generator preflight usage
+
+The packaged folder contains:
+
+```text
+he_grenade_game.exe
+Generate_Small_Pilot.bat
+generator-config.json
+Tools/review_dataset.py
+```
+
+Edit `generator-config.json` to select:
+
+- curriculum stage
+- episode count and duration
+- starting seed
+- worker ID
+- observation rate
+- RGB dimensions
+- output directory
+- whether `coverage_guided` collection is enabled
+
+Double-click `Generate_Small_Pilot.bat` to run the configured pilot. The default
+configuration produces two deterministic ten-second episodes and then exits.
+
+The equivalent direct command is:
+
+```text
+he_grenade_game.exe -GenerateDataset
+  -GeneratorConfig="generator-config.json"
+  -RenderOffscreen -unattended -nosound -NoSplash -NoVSync
+```
+
+Command-line values such as `-Stage=`, `-Episodes=`, `-EpisodeSeconds=`, `-SeedStart=`,
+`-WorkerId=`, `-ObservationRate=`, `-Width=`, `-Height=`, and `-Output=` override
+the JSON configuration.
+
+`-TrajectoryShowcase` is an inspection-only trajectory policy with continuous
+trajectory visibility and controlled camera motion. Its dataset metadata is
+marked `inspection_only_trajectory_showcase`; it must not be mixed into training.
+
+Validate a completed run with:
+
+```text
+python Tools/review_dataset.py GeneratedData/small-pilot --validate-only
+```
+
+To derive review videos, install FFmpeg and omit `--validate-only`, optionally
+passing `--ffmpeg="C:\path\to\ffmpeg.exe"`. The converter reads every PNG directly
+from the authoritative shard in frame-index order. It never renders a second
+gameplay pass.
 
 ## Canonical action interface
 
@@ -108,10 +189,10 @@ Rules:
 
 The arena contains exactly one of each:
 
-- blue rectangular prism
-- orange solid square-based pyramid
-- green sphere
-- purple hoop
+- brown rectangular prism
+- yellow solid square-based pyramid
+- orange sphere
+- magenta hoop
 - red ramp
 
 The objects form a geometrically balanced layout while their different shapes and
@@ -153,7 +234,16 @@ Every arena surface uses a dedicated opaque matte material:
 - no glossy reflection
 - no legacy white object material
 
-Floor and walls also use fixed non-white matte colors.
+The floor uses a fixed neutral gray. Each wall uses a distinct muted matte
+color with approximately matched luminance:
+
+- north: terracotta
+- south: blue-gray
+- east: ochre
+- west: mauve
+
+The four colors provide orientation and make every corner visually unique
+without competing with the green trajectory or red cooldown crosshair.
 
 ### Lighting and rendering environment
 
@@ -165,16 +255,20 @@ Current lighting contract:
 - one fixed diagonal directional key light
 - key rotation: -42 degrees pitch, -35 degrees yaw
 - warm key color
-- key intensity: 6.0
+- key intensity: 10.0
 - directional source angle: 3.0 degrees for readable soft shadows
 - contact shadows enabled
+- one neutral opposing directional fill
+- fill rotation: -25 degrees pitch, 145 degrees yaw
+- fill intensity: 2.0
+- fill shadows disabled
 - one low-strength neutral/cool skylight fill
-- skylight intensity: 0.65
-- ambient occlusion intensity: 0.65
+- neutral non-shadowing skylight intensity: 1.4
+- ambient occlusion intensity: 0.25
 - ambient occlusion radius: 140 cm
 - unbound post-process volume
 - manual exposure
-- exposure bias: 0.5
+- exposure bias: 1.45
 - physical-camera exposure disabled
 - automatic exposure adaptation disabled
 - volumetric clouds removed
@@ -305,10 +399,12 @@ Generation must not use time dilation. Simulation advances by fixed time without
 waiting for real time. If readback or output cannot keep up, the worker blocks
 instead of dropping frames.
 
-The final resolution will be locked after visual inspection. The current
-recommended starting point is 256 × 256 RGB at 20 Hz. Crosshair and future
-trajectory lines must remain clearly resolvable at the chosen training
-resolution.
+The final resolution will be locked after matched-seed visual inspection. The
+current training candidate is 320 × 320 RGB at 20 Hz, compared against a
+384 × 384 authoritative-source candidate. The compact crosshair and trajectory
+ribbon use fixed screen-pixel widths rather than scaling with resolution. The
+trajectory ribbon is rasterized from every 120 Hz simulation point with a
+one-pixel antialiased fringe so its low-resolution edges remain smooth.
 
 Disable:
 
@@ -432,6 +528,14 @@ Camera coverage must include:
 - full yaw coverage
 - camera-only and camera-plus-movement states
 
+Camera pitch must not be sampled uniformly. Ordinary eye-height views are the
+dominant gameplay distribution and must receive substantially more frames than
+views looking steeply upward or downward. Moderate pitch changes remain common
+enough to learn vertical camera dynamics. Near-limit up/down views remain
+present but deliberately sparse. The exact near-eye, moderate, and extreme
+mixture is an open parameter to choose after reviewing pitch histograms from
+both automated and human-play pilots.
+
 Collision behavior:
 
 1. Deliberately approach a wall or object.
@@ -445,6 +549,94 @@ movement is blocked.
 The collector may use privileged position, contact, visibility, and visitation
 statistics to balance the dataset. This does not make those fields model inputs.
 A 16 × 16 arena visitation grid can upweight underrepresented regions.
+
+### Implemented coverage-guided mission schedule
+
+Coverage guidance is enabled by default for dataset generation and can be
+disabled with `coverage_guided: false` or `-NoCoverageGuided`. It never
+teleports, rotates, or corrects the player inside an episode. Privileged state
+only selects canonical action bits and measures coverage.
+
+Every repeating ten-episode block contains:
+
+| Slot | Mission |
+| ---: | --- |
+| 0 | canonical-spawn semi-Markov reference |
+| 1 | orbit and continuously view the rectangle |
+| 2 | orbit and continuously view the pyramid |
+| 3 | orbit and continuously view the sphere |
+| 4 | orbit and continuously view the hoop |
+| 5 | orbit and continuously view the ramp |
+| 6 | physically traverse the ramp from its usable low side |
+| 7 | physically pass through the hoop opening one to three times |
+| 8–9 | randomized semi-Markov action diversity |
+
+Mission geometry is sampled once from the deterministic episode random stream.
+The recorded seed therefore reproduces the exact mission, while different seeds
+vary it:
+
+- object approach position, orbit radius, direction, per-sector angle, and
+  radial waypoint jitter
+- ramp low-side start, far-side goal, and lateral approach offsets
+- hoop starting side, entry and exit offsets, and required passage count
+- initial camera yaw and pitch offsets
+
+Object missions use twelve perturbed azimuth goal regions rather than one fixed
+circle. Translation pauses when camera yaw falls too far behind, allowing
+ordinary arrow-key input to recover the target without hidden camera snapping.
+A viewpoint bin is credited only while the target is inside the accepted camera
+angles and no other object occludes the line of sight.
+
+Ramp traversal is credited only after the character capsule rises substantially
+above floor height and reaches the ground beyond the high edge. Hoop passage is
+credited only when the capsule crosses the hoop plane inside both its lateral
+and vertical safe corridors.
+
+Guided episodes terminate immediately when their measured requirement succeeds.
+If movement actions produce less than one centimeter of displacement for one
+second, the generic no-progress watchdog terminates the attempt as a failure.
+The ordinary episode time limit remains a generic mission timeout. This avoids
+per-obstacle recovery exceptions and prevents post-success duplicate frames.
+
+Frames record the active mission, target, visibility, azimuth bin, distance
+band, waypoint, success/failure state, and no-progress counter. Episode metadata
+records all sampled mission parameters, requested and actual length, outcome,
+and termination reason. Dataset metadata summarizes successes and failures.
+
+The packaged validation run `seeded-missions-validation-128` exercised two
+independently sampled ten-episode schedules at 20 Hz. All fourteen guided
+missions succeeded with zero mission failures. Both ramp variants traversed the
+incline, the hoop variants successfully completed one and three requested
+passages, and both variants of every object mission reached all twelve visible
+azimuth bins. Early termination reduced the run from a possible 4,000
+transitions to 1,962 without adding stationary post-success footage.
+
+The 384 × 384 review exposed an important open design issue: repeated hoop
+passages can look unnaturally fast because the character reaches its real
+1,100 cm/s speed quickly and immediately reverses between nearby goals. The
+current one-to-three-passage sampler is therefore validation scaffolding, not an
+approved production distribution. Mission count, approach length, action
+variation, pauses, and whether repeated interactions belong in one episode or
+separate seeded episodes will be decided through visual review before the large
+V1 collection.
+
+### Planned human-play collection
+
+The user will also play the game and contribute human-generated trajectories.
+Human data complements rather than replaces guided and semi-Markov data:
+
+- guided missions guarantee rare geometry and interaction coverage
+- seeded semi-Markov play supplies broad canonical-action transitions
+- human play supplies natural navigation, hesitation, corrections, attention,
+  and action combinations that scripted policies may underrepresent
+
+A capture-only human mode still needs to be implemented. It must disable the
+action override, record the same 20 Hz RGB/action/state alignment, write the same
+authoritative shard format, and tag every episode with a distinct
+`human_keyboard` collection policy and session ID. Human and automated episodes
+must remain identifiable so mixture weights can be changed during training.
+Whole human sessions—not neighboring clips from one session—must be assigned to
+train or held-out evaluation to avoid temporal leakage.
 
 ## Dataset schema
 
@@ -463,6 +655,9 @@ A 16 × 16 arena visitation grid can upweight underrepresented regions.
 - camera FOV
 - initial player transform
 - requested and actual episode length
+- collection mission and seed-sampled mission parameters
+- mission-required and mission-success flags
+- achieved viewpoint-bin mask and verified interaction counts
 - termination reason
 - shard and checksum information
 
@@ -477,6 +672,8 @@ A 16 × 16 arena visitation grid can upweight underrepresented regions.
 - camera yaw, pitch, roll
 - grounded state
 - contact/collision diagnostics
+- active collection mission, target, waypoint, and coverage bins
+- mission success/failure and no-progress counter
 - crosshair state: Neutral, Ready, or Cooldown
 - cooldown remaining in steps
 - Q visibility
@@ -567,6 +764,23 @@ The packaged build must accept:
 
 Each worker writes independent shards using disjoint worker IDs and seed ranges.
 
+### Current same-GPU worker benchmark
+
+The packaged synchronous PNG preflight was benchmarked at 384 × 384 on the
+trajectory stage using identical 20-second seeded workloads:
+
+- one worker: 20 simulated seconds in 19.42 seconds after generator
+  configuration (22.27 seconds from process launch)
+- three concurrent workers: 60 aggregate simulated seconds in 396.79 seconds
+- aggregate three-worker throughput: 0.151 simulated seconds per wall second
+- scaling versus one worker: 0.147×
+- all four resulting shards passed validation
+
+Three Unreal D3D12 capture processes therefore show severe negative scaling on
+the tested single-GPU desktop. Production collection on this machine must use
+one worker per GPU unless a later asynchronous-readback implementation is
+re-benchmarked. Multiple workers remain valid across separate GPUs or machines.
+
 ## Validation requirements
 
 Generation fails if:
@@ -598,12 +812,30 @@ Automatic reports must include:
 
 Data-volume rollout:
 
-1. 19,200-transition packaged pilot.
-2. 100,000-frame distribution and visual pilot.
-3. 1,000,000-frame first training run.
-4. Scale toward 10,000,000 frames only after rollout evaluation.
+1. Approximately 10,000 frames for trainer and schema smoke tests.
+2. Implement coverage, pitch, action, collision, duplicate-frame, and
+   human-versus-automated mixture reports.
+3. Generate a serious initial Movement V1 dataset of approximately 500,000
+   frames at the working 384 × 384 candidate resolution.
+4. Reserve approximately 10% using disjoint seeds/sessions for held-out
+   evaluation.
+5. Train and inspect multi-step rollouts before extending Movement V1 toward one
+   million frames.
+6. Add V2 trajectory data and then V3 throw data only after the preceding
+   curriculum gate passes.
 
-At 20 Hz, one million frames represent approximately 13.9 simulated hours.
+At 20 Hz, 500,000 frames represent approximately 6.94 simulated hours. With the
+current lossless PNG preflight this is estimated at roughly 70–75 GB and seven
+to eight hours of single-worker desktop generation. One million frames represent
+approximately 13.9 simulated hours and 140–150 GB before the planned lossless
+WebP/storage improvements.
+
+The working training budget is approximately USD 100 using RunPod for storage
+and training. This rules out retaining thousands of hours or multi-terabyte
+lossless datasets for the first iteration. Collection must be coverage-driven,
+resumable, and evaluated incrementally. The tested desktop configuration uses
+one generator process per GPU; the three-worker same-GPU benchmark was severely
+slower than sequential generation.
 
 ## Curriculum evaluation gates
 
@@ -633,14 +865,54 @@ V3:
 
 Progression is based on multi-step rollout quality, not only one-frame pixel loss.
 
-## Immediate next milestone
+## Current agreed plan and immediate next work
 
-After final human visual acceptance of the fixed V1 arena, implement the real
-packaged data generator:
+The curriculum order remains:
 
-- deterministic semi-Markov collector
-- fixed 20 Hz transition loop
-- synchronized RGB and privileged state
-- lossless WebP + Parquet tar shards
-- packaged Win64 Development executable
-- 32-episode validation pilot
+1. Movement V1
+2. held trajectory V2
+3. persistent harmless throw V3
+
+The current arena, lighting, object colors, compact crosshair, smoothed
+trajectory, fixed 20 Hz observation rate, and authoritative frame-first
+data/video workflow are accepted working foundations. MP4 is always derived
+from saved authoritative observations; gameplay and review video are never
+generated as separate passes.
+
+The working visual candidate is 384 × 384. It preserves more meaningful object
+and trajectory geometry than the lower candidates while remaining manageable
+for the initial budget. It is not a permanent commitment for every future model
+or encoder.
+
+Mission mechanics are implemented and validated, but their production
+distributions are intentionally not yet frozen. The next design session will
+decide how missions vary and how much of the mixture they occupy. Required
+principles:
+
+- sample mission variables deterministically from the recorded episode seed
+- specify goal regions and measurable outcomes rather than one exact path
+- vary start position, approach direction, lateral offset, camera offset,
+  movement pattern, and relevant interaction count
+- use only the canonical action bits during an episode
+- never teleport, snap the camera, or correct velocity inside an episode
+- terminate immediately on verified success
+- use generic no-progress and time-limit failures rather than obstacle-specific
+  recovery scripts
+- retain failed attempts as identifiable diagnostics and exclude them from the
+  accepted training mixture unless deliberately studying collision failure
+- guarantee views around all five objects plus successful ramp and hoop examples
+- avoid unnaturally rapid repeated hoop/ramp interactions merely to inflate
+  counts
+
+Before the 500,000-frame Movement V1 collection:
+
+- visually review and approve the final seeded mission distributions
+- choose and verify an eye-height-dominant pitch mixture with sparse extremes
+- implement human keyboard capture in the same authoritative schema
+- decide initial guided/semi-Markov/human mixture weights
+- implement asynchronous frame-ID-keyed GPU readback
+- implement lossless WebP + Parquet tar shards
+- implement target-size shard rollover and resumable sequential batches
+- implement complete coverage and distribution reports
+- run a small mixed-policy pilot with disjoint held-out seeds and human sessions
+- train the smoke model before authorizing the serious 500,000-frame run

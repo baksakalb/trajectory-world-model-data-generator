@@ -30,3 +30,7 @@ Plugins/*/Intermediate/
 # Node modules (MCP server testing)
 node_modules/
 package-lock.json
+
+# Python helper caches
+__pycache__/
+*.py[cod]

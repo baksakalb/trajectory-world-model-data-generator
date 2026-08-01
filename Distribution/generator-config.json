@@ -1,0 +1,13 @@
+{
+  "stage": "movement",
+  "episodes": 2,
+  "episode_seconds": 10,
+  "seed_start": 1000,
+  "worker_id": 0,
+  "observation_rate_hz": 20,
+  "rgb_width": 320,
+  "rgb_height": 320,
+  "output": "GeneratedData/small-pilot",
+  "exit_on_complete": true,
+  "coverage_guided": true
+}

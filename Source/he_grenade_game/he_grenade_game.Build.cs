@@ -12,6 +12,8 @@ public class he_grenade_game : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"ImageWrapper",
+			"Json",
 			"RenderCore",
 			"InputCore",
 			"EnhancedInput",

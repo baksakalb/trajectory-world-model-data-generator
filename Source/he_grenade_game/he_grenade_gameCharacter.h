@@ -152,9 +152,19 @@ public:
 	UGrenadeThrowerComponent* GetGrenadeThrowerComponent() const { return GrenadeThrowerComponent; }
 	UGrenadeTrajectoryComponent* GetGrenadeTrajectoryComponent() const { return GrenadeTrajectoryComponent; }
 
+	/**
+	 * Enables deterministic externally supplied curriculum actions. The mask uses
+	 * the canonical [W,A,S,D,Up,Down,Left,Right,Q,E] bit order.
+	 */
+	void SetCurriculumActionOverride(bool bEnabled, uint16 ActionMask);
+
 	UFUNCTION(BlueprintPure, Category = "Grenade")
 	bool IsAimModeActive() const { return bAimModeActive; }
 
 	UFUNCTION(BlueprintPure, Category = "Grenade")
 	bool IsGrenadeStateGreen() const;
+
+private:
+	bool bCurriculumActionOverrideEnabled = false;
+	uint16 CurriculumActionOverrideMask = 0;
 };

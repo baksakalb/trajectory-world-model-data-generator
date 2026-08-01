@@ -12,13 +12,13 @@ MASTER_NAME = "M_CurriculumMatte"
 MASTER_PATH = f"{ASSET_FOLDER}/{MASTER_NAME}"
 
 COLORS = {
-    "MI_Curriculum_Floor": unreal.LinearColor(0.12, 0.14, 0.17, 1.0),
-    "MI_Curriculum_Wall": unreal.LinearColor(0.24, 0.27, 0.31, 1.0),
-    "MI_Curriculum_Rectangle": unreal.LinearColor(0.10, 0.28, 0.68, 1.0),
-    "MI_Curriculum_Triangle": unreal.LinearColor(0.82, 0.30, 0.06, 1.0),
-    "MI_Curriculum_Sphere": unreal.LinearColor(0.08, 0.52, 0.20, 1.0),
-    "MI_Curriculum_Hoop": unreal.LinearColor(0.46, 0.14, 0.62, 1.0),
-    "MI_Curriculum_Ramp": unreal.LinearColor(0.68, 0.08, 0.08, 1.0),
+    "MI_Curriculum_Floor": unreal.LinearColor(0.32, 0.32, 0.32, 1.0),
+    "MI_Curriculum_Wall": unreal.LinearColor(0.28, 0.28, 0.28, 1.0),
+    "MI_Curriculum_Rectangle": unreal.LinearColor(0.24, 0.08, 0.025, 1.0),
+    "MI_Curriculum_Triangle": unreal.LinearColor(0.70, 0.48, 0.04, 1.0),
+    "MI_Curriculum_Sphere": unreal.LinearColor(0.72, 0.18, 0.02, 1.0),
+    "MI_Curriculum_Hoop": unreal.LinearColor(0.60, 0.04, 0.20, 1.0),
+    "MI_Curriculum_Ramp": unreal.LinearColor(0.55, 0.025, 0.02, 1.0),
 }
 
 

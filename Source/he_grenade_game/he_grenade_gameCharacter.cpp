@@ -13,6 +13,7 @@
 #include "GameFramework/PlayerController.h"
 #include "InputActionValue.h"
 #include "InputCoreTypes.h"
+#include "DataGenerator/CurriculumAction.h"
 #include "Grenade/GGMovementComponent.h"
 #include "Grenade/GrenadeThrowerComponent.h"
 #include "Grenade/GrenadeTrajectoryComponent.h"
@@ -134,18 +135,24 @@ void Ahe_grenade_gameCharacter::ProcessCurriculumMovementInput(const float Delta
 		return;
 	}
 
-	const float ForwardAxis =
-		(PlayerController->IsInputKeyDown(EKeys::W) ? 1.0f : 0.0f)
-		- (PlayerController->IsInputKeyDown(EKeys::S) ? 1.0f : 0.0f);
-	const float RightAxis =
-		(PlayerController->IsInputKeyDown(EKeys::D) ? 1.0f : 0.0f)
-		- (PlayerController->IsInputKeyDown(EKeys::A) ? 1.0f : 0.0f);
-	const float YawAxis =
-		(PlayerController->IsInputKeyDown(EKeys::Right) ? 1.0f : 0.0f)
-		- (PlayerController->IsInputKeyDown(EKeys::Left) ? 1.0f : 0.0f);
-	const float PitchAxis =
-		(PlayerController->IsInputKeyDown(EKeys::Up) ? 1.0f : 0.0f)
-		- (PlayerController->IsInputKeyDown(EKeys::Down) ? 1.0f : 0.0f);
+	uint16 ActionMask = CurriculumActionOverrideMask;
+	if (!bCurriculumActionOverrideEnabled)
+	{
+		ActionMask =
+			(PlayerController->IsInputKeyDown(EKeys::W) ? CurriculumAction::W : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::A) ? CurriculumAction::A : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::S) ? CurriculumAction::S : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::D) ? CurriculumAction::D : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::Up) ? CurriculumAction::ArrowUp : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::Down) ? CurriculumAction::ArrowDown : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::Left) ? CurriculumAction::ArrowLeft : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::Right) ? CurriculumAction::ArrowRight : 0);
+	}
+
+	const float ForwardAxis = CurriculumAction::ForwardAxis(ActionMask);
+	const float RightAxis = CurriculumAction::RightAxis(ActionMask);
+	const float YawAxis = CurriculumAction::YawAxis(ActionMask);
+	const float PitchAxis = CurriculumAction::PitchAxis(ActionMask);
 
 	FRotator ControlRotation = PlayerController->GetControlRotation();
 	ControlRotation.Yaw = FRotator::NormalizeAxis(
@@ -164,6 +171,15 @@ void Ahe_grenade_gameCharacter::ProcessCurriculumMovementInput(const float Delta
 	PlayerController->SetControlRotation(ControlRotation);
 
 	DoMove(RightAxis, ForwardAxis);
+}
+
+void Ahe_grenade_gameCharacter::SetCurriculumActionOverride(
+	const bool bEnabled,
+	const uint16 ActionMask)
+{
+	bCurriculumActionOverrideEnabled = bEnabled;
+	CurriculumActionOverrideMask =
+		bEnabled ? (ActionMask & CurriculumAction::CanonicalMask) : 0;
 }
 
 void Ahe_grenade_gameCharacter::MoveInput(const FInputActionValue& Value)
