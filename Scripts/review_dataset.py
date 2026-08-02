@@ -15,7 +15,7 @@ import struct
 import subprocess
 import sys
 import tarfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -112,6 +112,772 @@ def png_dimensions(stream: BinaryIO) -> tuple[int, int]:
     return struct.unpack(">II", header[16:24])
 
 
+def validate_final_agent_mission(
+    episode: dict[str, Any],
+    episode_frames: list[dict[str, Any]],
+    *,
+    strict_v8: bool = False,
+    strict_v9: bool = False,
+    strict_v10: bool = False,
+    observation_rate_hz: int = 20,
+) -> None:
+    """Validate recorded success against the finalized mission contract."""
+    episode_id = str(episode["episode_id"])
+    mission = episode.get("collection_mission")
+    known_missions = {
+        "semi_markov",
+        "object_view",
+        "contact_recovery",
+        "ramp_traverse",
+        "hoop_pass",
+    }
+    if mission not in known_missions:
+        raise DatasetValidationError(f"{episode_id}: unknown mission {mission!r}.")
+
+    mission_required = bool(episode.get("mission_required"))
+    mission_success = bool(episode.get("mission_success"))
+    termination_reason = episode.get("termination_reason")
+    if mission == "semi_markov":
+        if mission_required or termination_reason != "completed":
+            raise DatasetValidationError(
+                f"{episode_id}: invalid semi-Markov termination contract."
+            )
+        if strict_v10:
+            if any(
+                frame.get("mission_phase") != "semi_markov"
+                or frame.get("mission_success")
+                or int(frame.get("required_post_success_steps", 0)) != 0
+                for frame in episode_frames
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid semi-Markov phase/post-success metadata."
+                )
+            current_contact_run = 0
+            maximum_contact_run = 0
+            for frame in episode_frames:
+                if frame.get("contact"):
+                    current_contact_run += 1
+                    recorded_run = int(frame.get("natural_play_contact_steps", -1))
+                    limit = int(
+                        frame.get("natural_play_contact_limit_steps", -1)
+                    )
+                    if recorded_run != current_contact_run or not 4 <= limit <= 10:
+                        raise DatasetValidationError(
+                            f"{episode_id}: inconsistent natural-play contact "
+                            f"state on frame {frame.get('frame_index')}."
+                        )
+                    maximum_contact_run = max(maximum_contact_run, current_contact_run)
+                else:
+                    current_contact_run = 0
+                    if (
+                        int(frame.get("natural_play_contact_steps", -1)) != 0
+                        or int(
+                            frame.get("natural_play_contact_limit_steps", -1)
+                        )
+                        != 0
+                    ):
+                        raise DatasetValidationError(
+                            f"{episode_id}: contact counters did not reset."
+                        )
+            recorded_maximum = int(
+                episode.get("maximum_consecutive_contact_steps", -1)
+            )
+            if recorded_maximum != maximum_contact_run:
+                raise DatasetValidationError(
+                    f"{episode_id}: maximum contact run {recorded_maximum} "
+                    f"!= realized {maximum_contact_run}."
+                )
+            if recorded_maximum > max(1, observation_rate_hz):
+                raise DatasetValidationError(
+                    f"{episode_id}: natural play remained in contact for "
+                    f"{recorded_maximum} frames (>1 second)."
+                )
+        return
+
+    if not mission_required:
+        raise DatasetValidationError(
+            f"{episode_id}: guided mission is not marked required."
+        )
+    if mission_success and termination_reason != "mission_success":
+        raise DatasetValidationError(
+            f"{episode_id}: successful mission has termination "
+            f"{termination_reason!r}."
+        )
+    if not mission_success:
+        if termination_reason not in {"mission_timeout", "mission_no_progress"}:
+            raise DatasetValidationError(
+                f"{episode_id}: failed mission has termination "
+                f"{termination_reason!r}."
+            )
+        if strict_v8 and episode.get("accepted_for_balancing"):
+            raise DatasetValidationError(
+                f"{episode_id}: failed mission advanced balancing counters."
+            )
+        if strict_v10 and (
+            episode.get("mission_success_frame_index") is not None
+            or int(episode.get("post_success_observation_frames", 0)) != 0
+            or int(episode.get("post_success_steps", 0)) != 0
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: failed mission contains a post-success rollout."
+            )
+        return
+
+    if not episode_frames or not episode_frames[-1].get("mission_success"):
+        raise DatasetValidationError(
+            f"{episode_id}: final observation does not record mission success."
+        )
+    if strict_v8:
+        if not episode.get("primary_objective_achieved"):
+            raise DatasetValidationError(
+                f"{episode_id}: success was recorded before the primary objective."
+            )
+        required_tail = int(episode.get("required_post_objective_steps", 0))
+        achieved_tail = int(episode.get("post_objective_steps", 0))
+        if required_tail <= 0 or achieved_tail < required_tail:
+            raise DatasetValidationError(
+                f"{episode_id}: post-objective tail "
+                f"{achieved_tail} < {required_tail}."
+            )
+        if not episode.get("accepted_for_balancing"):
+            raise DatasetValidationError(
+                f"{episode_id}: successful mission was not accepted for balancing."
+            )
+
+    if strict_v10:
+        success_frame_index = int(episode.get("mission_success_frame_index", -1))
+        if success_frame_index <= 0 or success_frame_index >= len(episode_frames) - 1:
+            raise DatasetValidationError(
+                f"{episode_id}: success frame {success_frame_index} does not "
+                "leave a post-success rollout."
+            )
+        required_rollout = int(episode.get("required_post_success_steps", 0))
+        achieved_rollout = int(episode.get("post_success_steps", 0))
+        recorded_rollout_frames = int(
+            episode.get("post_success_observation_frames", -1)
+        )
+        minimum_rollout = max(1, round(observation_rate_hz * 0.75))
+        maximum_rollout = max(minimum_rollout, round(observation_rate_hz * 1.50))
+        if not minimum_rollout <= required_rollout <= maximum_rollout:
+            raise DatasetValidationError(
+                f"{episode_id}: post-success requirement {required_rollout} "
+                f"is outside {minimum_rollout}-{maximum_rollout} frames."
+            )
+        realized_rollout = len(episode_frames) - 1 - success_frame_index
+        if (
+            achieved_rollout != required_rollout
+            or recorded_rollout_frames != required_rollout
+            or realized_rollout != required_rollout
+            or int(episode.get("mission_observation_frames", 0))
+            != success_frame_index + 1
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: post-success rollout metadata disagree "
+                f"(required={required_rollout}, achieved={achieved_rollout}, "
+                f"frames={recorded_rollout_frames}, realized={realized_rollout})."
+            )
+        known_rollout_styles = {
+            "continue",
+            "gentle_turn",
+            "glance_reacquire",
+            "strafe_blend",
+            "ease_and_observe",
+            "drift_and_settle",
+        }
+        rollout_style = episode.get("post_success_style")
+        if rollout_style not in known_rollout_styles:
+            raise DatasetValidationError(
+                f"{episode_id}: unknown post-success style {rollout_style!r}."
+            )
+
+        frozen_fields = (
+            "visited_azimuth_bins_mask",
+            "visible_azimuth_bins_mask",
+            "visible_hold_steps",
+            "ramp_traversals",
+            "hoop_passes",
+            "contact_hold_steps",
+            "verified_contact_steps",
+            "recovery_steps",
+            "primary_objective_achieved",
+            "post_objective_steps",
+            "facing_moving_frames",
+            "facing_matched_frames",
+            "hoop_crossing_recorded",
+            "hoop_crossing_y",
+            "hoop_crossing_z",
+        )
+        success_frame = episode_frames[success_frame_index]
+        for frame_index, frame in enumerate(episode_frames):
+            expected_success = frame_index >= success_frame_index
+            expected_phase = (
+                "success"
+                if frame_index == success_frame_index
+                else "post_success"
+                if frame_index > success_frame_index
+                else None
+            )
+            expected_post_step = max(0, frame_index - success_frame_index)
+            if (
+                bool(frame.get("mission_success")) != expected_success
+                or (
+                    expected_phase is not None
+                    and frame.get("mission_phase") != expected_phase
+                )
+                or (
+                    expected_phase is None
+                    and frame.get("mission_phase")
+                    not in {"objective", "completion_hold"}
+                )
+                or int(frame.get("post_success_steps", -1))
+                != expected_post_step
+                or int(frame.get("required_post_success_steps", 0))
+                != required_rollout
+                or frame.get("post_success_style") != rollout_style
+                or frame.get("mission_success_frame_index")
+                != (success_frame_index if expected_success else None)
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid success latch/phase metadata "
+                    f"on frame {frame_index}."
+                )
+            if frame_index > success_frame_index and any(
+                frame.get(field) != success_frame.get(field)
+                for field in frozen_fields
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: mission counters changed during "
+                    f"post-success frame {frame_index}."
+                )
+
+    parameters = episode.get("mission_parameters") or {}
+    if mission == "object_view":
+        mode = episode.get("object_view_mode")
+        gaze_pattern = episode.get("object_gaze_pattern")
+        known_gaze_patterns = {
+            "target_center",
+            "target_offset",
+            "travel_direction",
+            "roam_reacquire",
+        }
+        if gaze_pattern is not None:
+            if gaze_pattern not in known_gaze_patterns:
+                raise DatasetValidationError(
+                    f"{episode_id}: unknown object gaze pattern {gaze_pattern!r}."
+                )
+            if parameters.get("gaze_pattern") != gaze_pattern:
+                raise DatasetValidationError(
+                    f"{episode_id}: episode and mission-parameter gaze patterns "
+                    "do not match."
+                )
+            gaze_plan = parameters.get("gaze_plan")
+            if not isinstance(gaze_plan, list) or not gaze_plan:
+                raise DatasetValidationError(
+                    f"{episode_id}: object gaze plan is missing or empty."
+                )
+            known_gaze_intents = {
+                "target_center",
+                "target_offset",
+                "travel_direction",
+                "survey_point",
+            }
+            for frame in episode_frames:
+                if frame.get("object_gaze_pattern") != gaze_pattern:
+                    raise DatasetValidationError(
+                        f"{episode_id}: frame gaze pattern does not match episode."
+                    )
+                if frame.get("object_gaze_intent") not in known_gaze_intents:
+                    raise DatasetValidationError(
+                        f"{episode_id}: frame has an unknown gaze intent."
+                    )
+        if mode in {"approach_observe", "pass_by"}:
+            required_hold = int(parameters.get("required_visible_hold_steps", 0))
+            achieved_hold = int(episode.get("visible_hold_steps", 0))
+            if required_hold <= 0 or achieved_hold < required_hold:
+                raise DatasetValidationError(
+                    f"{episode_id}: visible hold {achieved_hold} < {required_hold}."
+                )
+        elif mode in {"partial_orbit", "full_orbit"}:
+            if strict_v8:
+                orbit_direction = episode.get("orbit_direction")
+                if orbit_direction not in {"clockwise", "counter_clockwise"}:
+                    raise DatasetValidationError(
+                        f"{episode_id}: orbit direction is missing or invalid."
+                    )
+                if parameters.get("orbit_direction") != orbit_direction:
+                    raise DatasetValidationError(
+                        f"{episode_id}: episode and parameter "
+                        "orbit directions differ."
+                    )
+            required_bins = int(
+                episode.get(
+                    "required_azimuth_bin_count",
+                    episode.get("required_visible_bin_count", 0),
+                )
+            )
+            achieved_bins = int(
+                episode.get(
+                    "visited_azimuth_bin_count",
+                    episode.get("visible_azimuth_bin_count", 0),
+                )
+            )
+            required_mask = int(episode.get("required_azimuth_bins_mask", 0))
+            visited_mask = int(
+                episode.get(
+                    "visited_azimuth_bins_mask",
+                    episode.get("visible_azimuth_bins_mask", 0),
+                )
+            )
+            expected_bins = 12 if mode == "full_orbit" else required_bins
+            if (
+                required_bins != expected_bins
+                or achieved_bins < required_bins
+                or required_mask == 0
+                or (visited_mask & required_mask) != required_mask
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: visited bins {achieved_bins} do not satisfy "
+                    f"{mode} requirement {required_bins} / mask {required_mask}."
+                )
+            if strict_v8:
+                waypoint_count = int(parameters.get("waypoint_count", 0))
+                expected_waypoints = 13 if mode == "full_orbit" else required_bins
+                if waypoint_count != expected_waypoints:
+                    raise DatasetValidationError(
+                        f"{episode_id}: {mode} has {waypoint_count} waypoints, "
+                        f"expected {expected_waypoints}."
+                    )
+        else:
+            raise DatasetValidationError(
+                f"{episode_id}: unknown object-view mode {mode!r}."
+            )
+    elif mission == "contact_recovery":
+        if strict_v8:
+            recovery_style = episode.get("contact_recovery_style")
+            if recovery_style not in {
+                "backward",
+                "strafe_left",
+                "strafe_right",
+                "diagonal_left",
+                "diagonal_right",
+            }:
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid contact recovery style "
+                    f"{recovery_style!r}."
+                )
+            if parameters.get("recovery_style") != recovery_style:
+                raise DatasetValidationError(
+                    f"{episode_id}: contact recovery style metadata disagree."
+                )
+            if int(parameters.get("approach_sector", -1)) not in range(8):
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid contact approach sector."
+                )
+        if strict_v9:
+            approach_profile = episode.get("contact_approach_profile")
+            if approach_profile not in {"direct", "glance_left", "glance_right"}:
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid contact approach profile "
+                    f"{approach_profile!r}."
+                )
+            if parameters.get("approach_profile") != approach_profile:
+                raise DatasetValidationError(
+                    f"{episode_id}: contact approach profile metadata disagree."
+                )
+        required_hold = int(parameters.get("required_contact_hold_steps", 0))
+        required_recovery = int(parameters.get("required_recovery_steps", 0))
+        if (
+            int(episode.get("contact_hold_steps", 0)) < required_hold
+            or int(episode.get("verified_contact_steps", 0)) < min(2, required_hold)
+            or int(episode.get("recovery_steps", 0)) < required_recovery
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: contact/recovery counters do not satisfy "
+                "the recorded requirements."
+            )
+    elif mission == "ramp_traverse":
+        if int(episode.get("ramp_traversals", 0)) < 1:
+            raise DatasetValidationError(
+                f"{episode_id}: successful ramp mission has no traversal."
+            )
+        if strict_v9:
+            path_profile = episode.get("ramp_path_profile")
+            if path_profile not in {
+                "center",
+                "diagonal_left_to_right",
+                "diagonal_right_to_left",
+            }:
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid ramp path profile {path_profile!r}."
+                )
+            if parameters.get("path_profile") != path_profile:
+                raise DatasetValidationError(
+                    f"{episode_id}: ramp path profile metadata disagree."
+                )
+            scenario_index = int(episode.get("ramp_scenario_index", -1))
+            if scenario_index not in range(30):
+                raise DatasetValidationError(
+                    f"{episode_id}: ramp scenario index {scenario_index} is invalid."
+                )
+    elif mission == "hoop_pass":
+        if int(episode.get("hoop_passes", 0)) != 1:
+            raise DatasetValidationError(
+                f"{episode_id}: hoop mission must record exactly one passage."
+            )
+        if strict_v9:
+            path_profile = episode.get("hoop_path_profile")
+            if path_profile not in {
+                "center",
+                "oblique_left_to_right",
+                "oblique_right_to_left",
+            }:
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid hoop path profile {path_profile!r}."
+                )
+            if parameters.get("path_profile") != path_profile:
+                raise DatasetValidationError(
+                    f"{episode_id}: hoop path profile metadata disagree."
+                )
+            scenario_index = int(episode.get("hoop_scenario_index", -1))
+            if scenario_index not in range(30):
+                raise DatasetValidationError(
+                    f"{episode_id}: hoop scenario index {scenario_index} is invalid."
+                )
+            crossing_y = float(episode.get("hoop_crossing_y", 1e9))
+            crossing_z = float(episode.get("hoop_crossing_z", 1e9))
+            if (
+                not episode.get("hoop_crossing_recorded")
+                or abs(crossing_y + 700.0) >= 90.0
+                or not 80.0 <= crossing_z <= 145.0
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: interpolated hoop crossing "
+                    f"(y={crossing_y:.1f}, z={crossing_z:.1f}) is outside the opening."
+                )
+
+    if strict_v9 and mission in {
+        "contact_recovery",
+        "ramp_traverse",
+        "hoop_pass",
+    }:
+        facing_profile = episode.get("locomotion_facing_profile")
+        known_facing_profiles = {
+            "forward",
+            "backward",
+            "strafe_left",
+            "strafe_right",
+            "free_attention",
+        }
+        if facing_profile not in known_facing_profiles:
+            raise DatasetValidationError(
+                f"{episode_id}: invalid locomotion-facing profile "
+                f"{facing_profile!r}."
+            )
+        if parameters.get("locomotion_facing_profile") != facing_profile:
+            raise DatasetValidationError(
+                f"{episode_id}: locomotion-facing metadata disagree."
+            )
+        moving_frames = int(episode.get("facing_moving_frames", 0))
+        matched_frames = int(episode.get("facing_matched_frames", 0))
+        match_ratio = float(episode.get("facing_match_ratio", -1.0))
+        if (
+            moving_frames < 0
+            or matched_frames < 0
+            or matched_frames > moving_frames
+            or not 0.0 <= match_ratio <= 1.0001
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: invalid realized-facing counters."
+            )
+        expected_ratio = matched_frames / moving_frames if moving_frames else 0.0
+        if abs(match_ratio - expected_ratio) > 0.002:
+            raise DatasetValidationError(
+                f"{episode_id}: realized-facing ratio does not match its counters."
+            )
+        if facing_profile != "free_attention" and (
+            moving_frames < 5 or match_ratio < 0.45
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: {facing_profile} was selected but only "
+                f"{matched_frames}/{moving_frames} qualifying moving frames matched."
+            )
+        for frame in episode_frames:
+            if frame.get("locomotion_facing_profile") != facing_profile:
+                raise DatasetValidationError(
+                    f"{episode_id}: frame locomotion-facing profile changed."
+                )
+
+    if strict_v8:
+        final_distance = float(
+            episode.get(
+                "distance_to_goal_at_success_cm"
+                if strict_v10
+                else "final_distance_to_goal_cm",
+                1e9,
+            )
+        )
+        maximum_final_distance = 180.0 if mission == "contact_recovery" else 165.0
+        if final_distance >= maximum_final_distance:
+            raise DatasetValidationError(
+                f"{episode_id}: success distance {final_distance:.1f} cm is outside "
+                f"the completion radius {maximum_final_distance:.1f} cm."
+            )
+
+        for field in ("start", "goal", "recovery_goal"):
+            point = parameters.get(field)
+            if not isinstance(point, dict):
+                continue
+            x = abs(float(point.get("x", 0.0)))
+            y = abs(float(point.get("y", 0.0)))
+            if x >= 1450.0 or y >= 1450.0:
+                raise DatasetValidationError(
+                    f"{episode_id}: {field} lies on/outside "
+                    "the old clamp boundary."
+                )
+
+
+def validate_run_distributions(
+    dataset: dict[str, Any],
+    episodes: list[dict[str, Any]],
+) -> None:
+    """Enforce run-level diversity gates when a run is large enough to judge."""
+    policy = dataset.get("collection_policy")
+    strict_v9 = str(dataset.get("schema_version", "")).endswith(
+        ("-preflight-9", "-preflight-10")
+    )
+    guided = [
+        episode
+        for episode in episodes
+        if episode.get("collection_mission") != "semi_markov"
+    ]
+    failures = [episode for episode in guided if not episode.get("mission_success")]
+    if policy == "inspection_only_mission_review_suite":
+        expected_episode_count = 60 if strict_v9 else 44
+        expected_guided_count = 59 if strict_v9 else 43
+        if (
+            len(episodes) != expected_episode_count
+            or len(guided) != expected_guided_count
+        ):
+            raise DatasetValidationError(
+                "Mission review suite must contain "
+                f"{expected_episode_count} episodes / "
+                f"{expected_guided_count} guided missions."
+            )
+        slugs = [episode.get("mission_review_slug") for episode in episodes]
+        if any(not slug for slug in slugs) or len(set(slugs)) != expected_episode_count:
+            raise DatasetValidationError(
+                "Mission review slugs must be present and unique."
+            )
+        mission_counts = Counter(
+            episode.get("collection_mission") for episode in episodes
+        )
+        expected_counts = (
+            {
+                "semi_markov": 1,
+                "object_view": 30,
+                "contact_recovery": 9,
+                "ramp_traverse": 10,
+                "hoop_pass": 10,
+            }
+            if strict_v9
+            else {
+                "semi_markov": 1,
+                "object_view": 30,
+                "contact_recovery": 9,
+                "ramp_traverse": 2,
+                "hoop_pass": 2,
+            }
+        )
+        if mission_counts != expected_counts:
+            raise DatasetValidationError(
+                f"Mission review family counts {dict(mission_counts)} "
+                f"!= {expected_counts}."
+            )
+        orbit_pairs = Counter(
+            (
+                episode.get("coverage_target"),
+                episode.get("object_view_mode"),
+                episode.get("orbit_direction"),
+            )
+            for episode in episodes
+            if episode.get("object_view_mode") in {"partial_orbit", "full_orbit"}
+        )
+        if len(orbit_pairs) != 20 or any(count != 1 for count in orbit_pairs.values()):
+            raise DatasetValidationError(
+                "Review suite must contain each target/mode/orbit-direction once."
+            )
+        if strict_v9:
+            for mission, direction_field, directions in (
+                ("ramp_traverse", "ramp_direction", {"uphill", "downhill"}),
+                (
+                    "hoop_pass",
+                    "mission_parameters.direction",
+                    {"positive_x_to_negative_x", "negative_x_to_positive_x"},
+                ),
+            ):
+                mission_episodes = [
+                    episode
+                    for episode in episodes
+                    if episode.get("collection_mission") == mission
+                ]
+                by_direction: dict[str, set[str]] = defaultdict(set)
+                for episode in mission_episodes:
+                    if direction_field == "ramp_direction":
+                        direction = str(episode.get(direction_field))
+                    else:
+                        direction = str(
+                            (episode.get("mission_parameters") or {}).get("direction")
+                        )
+                    by_direction[direction].add(
+                        str(episode.get("locomotion_facing_profile"))
+                    )
+                expected_facing = {
+                    "forward",
+                    "backward",
+                    "strafe_left",
+                    "strafe_right",
+                    "free_attention",
+                }
+                if set(by_direction) != directions or any(
+                    profiles != expected_facing for profiles in by_direction.values()
+                ):
+                    raise DatasetValidationError(
+                        f"Review suite does not demonstrate every {mission} "
+                        "direction with all five locomotion-facing profiles."
+                    )
+        if failures:
+            raise DatasetValidationError(
+                f"Mission review suite has {len(failures)} guided failure(s)."
+            )
+
+    orbit_episodes = [
+        episode
+        for episode in guided
+        if episode.get("object_view_mode") in {"partial_orbit", "full_orbit"}
+        and episode.get("mission_success")
+    ]
+    if len(orbit_episodes) >= 10:
+        direction_counts = Counter(
+            episode.get("orbit_direction") for episode in orbit_episodes
+        )
+        if set(direction_counts) != {"clockwise", "counter_clockwise"}:
+            raise DatasetValidationError(
+                "Orbit run is one-sided; both directions are required."
+            )
+        minority_share = min(direction_counts.values()) / len(orbit_episodes)
+        if len(orbit_episodes) >= 20 and minority_share < 0.30:
+            raise DatasetValidationError(
+                f"Orbit direction minority share is only {minority_share:.1%}."
+            )
+
+    object_episodes = [
+        episode
+        for episode in guided
+        if episode.get("collection_mission") == "object_view"
+        and episode.get("mission_success")
+    ]
+    if len(object_episodes) >= 80:
+        distinct_cells = {
+            int(episode["object_scenario_index"])
+            for episode in object_episodes
+            if episode.get("object_scenario_index") is not None
+        }
+        minimum_cells = 45 if len(object_episodes) < 400 else 90
+        if len(distinct_cells) < minimum_cells:
+            raise DatasetValidationError(
+                f"Only {len(distinct_cells)} object scenario cells were covered; "
+                f"expected at least {minimum_cells}."
+            )
+
+    contact_episodes = [
+        episode
+        for episode in guided
+        if episode.get("collection_mission") == "contact_recovery"
+        and episode.get("mission_success")
+    ]
+    if len(contact_episodes) >= 45:
+        distinct_cells = {
+            int(episode["contact_scenario_index"])
+            for episode in contact_episodes
+            if episode.get("contact_scenario_index") is not None
+        }
+        if len(distinct_cells) < 40:
+            raise DatasetValidationError(
+                f"Only {len(distinct_cells)} contact scenario cells were covered."
+            )
+        if strict_v9:
+            profile_sets = {
+                field: {episode.get(field) for episode in contact_episodes}
+                for field in (
+                    "contact_recovery_style",
+                    "contact_approach_profile",
+                    "locomotion_facing_profile",
+                )
+            }
+            expected_sizes = {
+                "contact_recovery_style": 5,
+                "contact_approach_profile": 3,
+                "locomotion_facing_profile": 5,
+            }
+            for field, expected_size in expected_sizes.items():
+                if len(profile_sets[field]) != expected_size:
+                    raise DatasetValidationError(
+                        f"Contact run covers only {len(profile_sets[field])} "
+                        f"{field} values; expected {expected_size}."
+                    )
+
+    for mission, scenario_field, path_field in (
+        ("ramp_traverse", "ramp_scenario_index", "ramp_path_profile"),
+        ("hoop_pass", "hoop_scenario_index", "hoop_path_profile"),
+    ) if strict_v9 else ():
+        mission_episodes = [
+            episode
+            for episode in guided
+            if episode.get("collection_mission") == mission
+            and episode.get("mission_success")
+        ]
+        if len(mission_episodes) >= 30:
+            scenario_count = len(
+                {
+                    int(episode[scenario_field])
+                    for episode in mission_episodes
+                    if episode.get(scenario_field) is not None
+                }
+            )
+            if scenario_count < 24:
+                raise DatasetValidationError(
+                    f"Only {scenario_count} / 30 {mission} scenario cells were covered."
+                )
+            if len({episode.get(path_field) for episode in mission_episodes}) != 3:
+                raise DatasetValidationError(
+                    f"{mission} run did not cover all three path profiles."
+                )
+            if (
+                len(
+                    {
+                        episode.get("locomotion_facing_profile")
+                        for episode in mission_episodes
+                    }
+                )
+                != 5
+            ):
+                raise DatasetValidationError(
+                    f"{mission} run did not cover all five facing profiles."
+                )
+
+    radii = [
+        round(float((episode.get("mission_parameters") or {}).get("orbit_radius_cm", 0)), 3)
+        for episode in object_episodes
+        if episode.get("object_view_mode") in {"partial_orbit", "full_orbit"}
+    ]
+    if len(radii) >= 16:
+        most_common = Counter(radii).most_common(1)[0][1]
+        if len(set(radii)) < 8 or most_common / len(radii) > 0.25:
+            raise DatasetValidationError(
+                "Orbit radii show a clamp spike or insufficient stratified diversity."
+            )
+
+
 def validate_dataset(
     dataset_dir: Path,
 ) -> tuple[
@@ -203,6 +969,41 @@ def validate_dataset(
                     f"{episode_id}: discontinuous transition indices."
                 )
 
+            schema_version = str(dataset.get("schema_version", ""))
+            schema_is_v8_or_newer = schema_version.endswith(
+                ("-preflight-8", "-preflight-9", "-preflight-10")
+            )
+            if (
+                dataset.get("collection_policy")
+                in {
+                    "training_frame_balanced_final_agent_v1",
+                    "training_frame_balanced_final_agent_v2",
+                    "training_frame_balanced_final_agent_v3",
+                    "training_frame_balanced_final_agent_v4",
+                    "training_frame_balanced_final_agent_v5",
+                    "inspection_only_mission_review_suite",
+                }
+                and schema_version.endswith(
+                    (
+                        "-preflight-6",
+                        "-preflight-7",
+                        "-preflight-8",
+                        "-preflight-9",
+                        "-preflight-10",
+                    )
+                )
+            ):
+                validate_final_agent_mission(
+                    episode,
+                    episode_frames,
+                    strict_v8=schema_is_v8_or_newer,
+                    strict_v9=schema_version.endswith(
+                        ("-preflight-9", "-preflight-10")
+                    ),
+                    strict_v10=schema_version.endswith("-preflight-10"),
+                    observation_rate_hz=int(dataset.get("observation_rate_hz", 20)),
+                )
+
             for frame in episode_frames:
                 extracted = tar.extractfile(frame["rgb_key"])
                 if extracted is None:
@@ -216,6 +1017,11 @@ def validate_dataset(
                         f"{(expected_width, expected_height)}"
                     )
             records_by_episode[episode_id] = episode_frames
+
+        if str(dataset.get("schema_version", "")).endswith(
+            ("-preflight-8", "-preflight-9", "-preflight-10")
+        ):
+            validate_run_distributions(dataset, episodes)
 
     return dataset, shard_path, checksum, dict(records_by_episode)
 
@@ -324,24 +1130,38 @@ def main() -> int:
         ffmpeg = resolve_ffmpeg(args.ffmpeg)
         output_dir.mkdir(parents=True, exist_ok=True)
         rendered: list[dict[str, Any]] = []
+        used_video_stems: set[str] = set()
 
         with tarfile.open(shard_path, mode="r:") as tar:
             for episode_id in sorted(selected):
-                output_path = output_dir / f"{episode_id}.mp4"
+                frame_records = records_by_episode[episode_id]
+                review_slug = (
+                    frame_records[0].get("mission_review_slug")
+                    if frame_records
+                    else None
+                )
+                video_stem = str(review_slug or episode_id)
+                if video_stem in used_video_stems:
+                    raise DatasetValidationError(
+                        f"Duplicate review-video filename stem: {video_stem}"
+                    )
+                used_video_stems.add(video_stem)
+                output_path = output_dir / f"{video_stem}.mp4"
                 render_episode(
                     tar,
                     ffmpeg,
                     output_path,
-                    records_by_episode[episode_id],
+                    frame_records,
                     int(dataset["observation_rate_hz"]),
                 )
                 rendered.append(
                     {
                         "episode_id": episode_id,
-                        "frame_count": len(records_by_episode[episode_id]),
+                        "mission_review_slug": review_slug,
+                        "frame_count": len(frame_records),
                         "source_rgb_keys": [
                             frame["rgb_key"]
-                            for frame in records_by_episode[episode_id]
+                            for frame in frame_records
                         ],
                         "video": output_path.name,
                     }
