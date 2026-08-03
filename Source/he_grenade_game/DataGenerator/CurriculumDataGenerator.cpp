@@ -915,6 +915,7 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 		Config->TryGetStringField(TEXT("object_view_mode_override"), ObjectViewModeOverride);
 		Config->TryGetStringField(TEXT("coverage_target_override"), CoverageTargetOverride);
 		Config->TryGetStringField(TEXT("mission_direction_override"), MissionDirectionOverride);
+		Config->TryGetStringField(TEXT("recipe_manifest"), RecipeManifestPath);
 		Config->TryGetBoolField(TEXT("exit_on_complete"), bExitOnComplete);
 		Config->TryGetBoolField(TEXT("coverage_guided"), bCoverageGuided);
 
@@ -923,6 +924,12 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 			OutputDirectory = FPaths::Combine(
 				FPaths::GetPath(ConfigPath),
 				OutputDirectory);
+		}
+		if (!RecipeManifestPath.IsEmpty() && FPaths::IsRelative(RecipeManifestPath))
+		{
+			RecipeManifestPath = FPaths::Combine(
+				FPaths::GetPath(ConfigPath),
+				RecipeManifestPath);
 		}
 	}
 
@@ -938,6 +945,7 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	FParse::Value(CommandLine, TEXT("ObjectViewMode="), ObjectViewModeOverride);
 	FParse::Value(CommandLine, TEXT("CoverageTarget="), CoverageTargetOverride);
 	FParse::Value(CommandLine, TEXT("MissionDirection="), MissionDirectionOverride);
+	FParse::Value(CommandLine, TEXT("RecipeManifest="), RecipeManifestPath);
 	FString CommandLineEpisodeIndices;
 	if (FParse::Value(CommandLine, TEXT("EpisodeIndices="), CommandLineEpisodeIndices))
 	{
@@ -977,6 +985,14 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	ObjectViewModeOverride.ToLowerInline();
 	CoverageTargetOverride.ToLowerInline();
 	MissionDirectionOverride.ToLowerInline();
+	if (!RecipeManifestPath.IsEmpty())
+	{
+		RecipeManifestPath = FPaths::ConvertRelativePathToFull(RecipeManifestPath);
+		if (!LoadRecipeManifest(RecipeManifestPath))
+		{
+			return false;
+		}
+	}
 	FString CommandLineStage;
 	if (FParse::Value(CommandLine, TEXT("Stage="), CommandLineStage))
 	{
@@ -1093,6 +1109,184 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	return true;
 }
 
+bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
+{
+	FString ManifestText;
+	if (!FFileHelper::LoadFileToString(ManifestText, *ManifestPath))
+	{
+		LastError = FString::Printf(
+			TEXT("Could not read recipe manifest: %s"),
+			*ManifestPath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Manifest;
+	const TSharedRef<TJsonReader<>> Reader =
+		TJsonReaderFactory<>::Create(ManifestText);
+	if (!FJsonSerializer::Deserialize(Reader, Manifest) || !Manifest.IsValid())
+	{
+		LastError = FString::Printf(
+			TEXT("Recipe manifest is not valid JSON: %s"),
+			*ManifestPath);
+		return false;
+	}
+
+	Manifest->TryGetStringField(TEXT("plan_id"), PlanId);
+	Manifest->TryGetStringField(TEXT("plan_version"), PlanVersion);
+	Manifest->TryGetStringField(TEXT("assignment_id"), AssignmentId);
+	Manifest->TryGetStringField(TEXT("attempt_id"), AttemptId);
+	Manifest->TryGetStringField(TEXT("executor_id"), ExecutorId);
+	Manifest->TryGetStringField(TEXT("split"), DatasetSplit);
+	double NumberValue = 0.0;
+	if (Manifest->TryGetNumberField(TEXT("logical_worker_id"), NumberValue))
+	{
+		WorkerId = FMath::RoundToInt(NumberValue);
+	}
+	const TSharedPtr<FJsonObject>* GeneratorObject = nullptr;
+	if (Manifest->TryGetObjectField(TEXT("generator"), GeneratorObject)
+		&& GeneratorObject
+		&& GeneratorObject->IsValid())
+	{
+		FString StageValue;
+		if ((*GeneratorObject)->TryGetStringField(TEXT("stage"), StageValue))
+		{
+			StageValue.ToLowerInline();
+			if (StageValue == TEXT("movement") || StageValue == TEXT("movement_v1"))
+			{
+				CurriculumStage = ECurriculumStage::Movement;
+			}
+			else
+			{
+				LastError = TEXT("Prescribed production recipes currently support Movement V1 only.");
+				return false;
+			}
+		}
+		if ((*GeneratorObject)->TryGetNumberField(TEXT("episode_seconds"), NumberValue))
+		{
+			EpisodeSeconds = FMath::RoundToInt(NumberValue);
+		}
+		if ((*GeneratorObject)->TryGetNumberField(TEXT("observation_rate_hz"), NumberValue))
+		{
+			ObservationRate = FMath::RoundToInt(NumberValue);
+		}
+		if ((*GeneratorObject)->TryGetNumberField(TEXT("rgb_width"), NumberValue))
+		{
+			CaptureWidth = FMath::RoundToInt(NumberValue);
+		}
+		if ((*GeneratorObject)->TryGetNumberField(TEXT("rgb_height"), NumberValue))
+		{
+			CaptureHeight = FMath::RoundToInt(NumberValue);
+		}
+		if ((*GeneratorObject)->TryGetNumberField(TEXT("webp_lossless_effort"), NumberValue))
+		{
+			WebPLosslessEffort = FMath::RoundToInt(NumberValue);
+		}
+		if ((*GeneratorObject)->TryGetNumberField(TEXT("seed_start"), NumberValue))
+		{
+			SeedStart = FMath::RoundToInt(NumberValue);
+		}
+		FString StorageValue;
+		if ((*GeneratorObject)->TryGetStringField(TEXT("storage_format"), StorageValue))
+		{
+			StorageValue.ToLowerInline();
+			if (StorageValue == TEXT("webp_parquet"))
+			{
+				StorageFormat = EStorageFormat::WebPParquet;
+			}
+			else if (StorageValue == TEXT("png_jsonl"))
+			{
+				StorageFormat = EStorageFormat::PngJsonl;
+			}
+			else
+			{
+				LastError = FString::Printf(
+					TEXT("Unknown prescribed storage format: %s"),
+					*StorageValue);
+				return false;
+			}
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* RecipeValues = nullptr;
+	if (!Manifest->TryGetArrayField(TEXT("recipes"), RecipeValues)
+		|| !RecipeValues
+		|| RecipeValues->IsEmpty())
+	{
+		LastError = TEXT("Recipe manifest must contain a non-empty recipes array.");
+		return false;
+	}
+
+	PrescribedRecipes.Reset();
+	RequestedEpisodeIndices.Reset();
+	TSet<FString> RecipeIds;
+	TSet<int32> EpisodeIndices;
+	for (const TSharedPtr<FJsonValue>& RecipeValue : *RecipeValues)
+	{
+		const TSharedPtr<FJsonObject> RecipeObject =
+			RecipeValue.IsValid() ? RecipeValue->AsObject() : nullptr;
+		if (!RecipeObject.IsValid())
+		{
+			LastError = TEXT("Every recipe manifest entry must be an object.");
+			return false;
+		}
+		FPrescribedRecipe Recipe;
+		if (!RecipeObject->TryGetStringField(TEXT("recipe_id"), Recipe.RecipeId)
+			|| Recipe.RecipeId.IsEmpty()
+			|| RecipeIds.Contains(Recipe.RecipeId))
+		{
+			LastError = TEXT("Recipe IDs must be present and unique within an assignment.");
+			return false;
+		}
+		if (!RecipeObject->TryGetStringField(TEXT("mission"), Recipe.Mission))
+		{
+			LastError = FString::Printf(
+				TEXT("Recipe %s does not specify a mission."),
+				*Recipe.RecipeId);
+			return false;
+		}
+		Recipe.Mission.ToLowerInline();
+		if (!RecipeObject->TryGetNumberField(TEXT("episode_index"), NumberValue))
+		{
+			LastError = FString::Printf(
+				TEXT("Recipe %s does not specify episode_index."),
+				*Recipe.RecipeId);
+			return false;
+		}
+		Recipe.EpisodeIndex = FMath::RoundToInt(NumberValue);
+		if (Recipe.EpisodeIndex < 0 || EpisodeIndices.Contains(Recipe.EpisodeIndex))
+		{
+			LastError = TEXT("Recipe episode indices must be unique non-negative integers.");
+			return false;
+		}
+		if (RecipeObject->TryGetNumberField(TEXT("scenario_index"), NumberValue))
+		{
+			Recipe.ScenarioIndex = FMath::RoundToInt(NumberValue);
+		}
+		if (RecipeObject->TryGetNumberField(TEXT("continuous_sample_ordinal"), NumberValue))
+		{
+			Recipe.ContinuousSampleOrdinal = FMath::RoundToInt(NumberValue);
+		}
+		if (RecipeObject->TryGetNumberField(TEXT("refinement_level"), NumberValue))
+		{
+			Recipe.RefinementLevel = FMath::RoundToInt(NumberValue);
+		}
+		if (RecipeObject->TryGetNumberField(TEXT("repetition_index"), NumberValue))
+		{
+			Recipe.RepetitionIndex = FMath::RoundToInt(NumberValue);
+		}
+		RecipeIds.Add(Recipe.RecipeId);
+		EpisodeIndices.Add(Recipe.EpisodeIndex);
+		RequestedEpisodeIndices.Add(Recipe.EpisodeIndex);
+		PrescribedRecipes.Add(MoveTemp(Recipe));
+	}
+
+	EpisodeCount = PrescribedRecipes.Num();
+	EpisodeIndex = PrescribedRecipes[0].EpisodeIndex;
+	bCoverageGuided = true;
+	bPrescribedRecipes = true;
+	return true;
+}
+
 bool ACurriculumDataGenerator::OpenOutput()
 {
 	if (FPaths::FileExists(FPaths::Combine(OutputDirectory, TEXT("dataset.json"))))
@@ -1159,6 +1353,22 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	{
 		LastError = TEXT("Cannot start episode without a possessed player character.");
 		return false;
+	}
+	if (bPrescribedRecipes)
+	{
+		if (!PrescribedRecipes.IsValidIndex(EpisodeOrdinal))
+		{
+			LastError = TEXT("Recipe manifest and episode ordinal are inconsistent.");
+			return false;
+		}
+		const FPrescribedRecipe& Recipe = PrescribedRecipes[EpisodeOrdinal];
+		EpisodeIndex = Recipe.EpisodeIndex;
+		CurrentRecipeId = Recipe.RecipeId;
+		MissionOverride = Recipe.Mission;
+		CurrentPrescribedScenarioIndex = Recipe.ScenarioIndex;
+		CurrentContinuousSampleOrdinal = Recipe.ContinuousSampleOrdinal;
+		CurrentRefinementLevel = Recipe.RefinementLevel;
+		CurrentRepetitionIndex = Recipe.RepetitionIndex;
 	}
 
 	const int32 EpisodeSeed = SeedStart + EpisodeIndex;
@@ -1550,7 +1760,12 @@ void ACurriculumDataGenerator::EndEpisode()
 			: 0.0f;
 	EpisodesJsonLines += FString::Printf(
 		TEXT("{\"episode_id\":\"%s\",\"episode_index\":%d,\"worker_id\":%d,")
-		TEXT("\"seed\":%d,\"requested_transitions\":%d,\"actual_transitions\":%d,")
+		TEXT("\"seed\":%d,\"prescribed\":%s,\"plan_id\":%s,")
+		TEXT("\"plan_version\":%s,\"assignment_id\":%s,\"attempt_id\":%s,")
+		TEXT("\"executor_id\":%s,\"split\":%s,\"recipe_id\":%s,")
+		TEXT("\"continuous_sample_ordinal\":%s,\"refinement_level\":%s,")
+		TEXT("\"repetition_index\":%s,\"prescribed_scenario_index\":%s,")
+		TEXT("\"requested_transitions\":%d,\"actual_transitions\":%d,")
 		TEXT("\"observation_count\":%d,\"collection_mission\":\"%s\",")
 		TEXT("\"mission_review_slug\":%s,")
 		TEXT("\"mission_observation_frames\":%d,")
@@ -1590,6 +1805,32 @@ void ACurriculumDataGenerator::EndEpisode()
 		EpisodeIndex,
 		WorkerId,
 		SeedStart + EpisodeIndex,
+		JsonBool(bPrescribedRecipes),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *PlanId.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *PlanVersion.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *AssignmentId.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *AttemptId.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *ExecutorId.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *DatasetSplit.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes
+			? *FString::Printf(TEXT("\"%s\""), *CurrentRecipeId.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bPrescribedRecipes ? *FString::FromInt(CurrentContinuousSampleOrdinal) : TEXT("null"),
+		bPrescribedRecipes ? *FString::FromInt(CurrentRefinementLevel) : TEXT("null"),
+		bPrescribedRecipes ? *FString::FromInt(CurrentRepetitionIndex) : TEXT("null"),
+		bPrescribedRecipes ? *FString::FromInt(CurrentPrescribedScenarioIndex) : TEXT("null"),
 		TransitionsPerEpisode,
 		FrameIndex,
 		FrameIndex + 1,
@@ -2245,6 +2486,28 @@ uint16 ACurriculumDataGenerator::SelectAction()
 
 uint16 ACurriculumDataGenerator::SelectBaseAction()
 {
+	if (bPrescribedRecipes
+		&& CoverageMission == ECoverageMission::SemiMarkov
+		&& FrameIndex == 0
+		&& CurrentPrescribedScenarioIndex >= 0)
+	{
+		switch ((CurrentPrescribedScenarioIndex / 4) % 8)
+		{
+		case 0: return 0;
+		case 1: return CurriculumAction::W;
+		case 2: return SampleParameterBool(TEXT("prescribed_strafe"))
+			? CurriculumAction::A : CurriculumAction::D;
+		case 3: return SampleParameterBool(TEXT("prescribed_yaw"))
+			? CurriculumAction::ArrowLeft : CurriculumAction::ArrowRight;
+		case 4: return SampleParameterBool(TEXT("prescribed_pitch"))
+			? CurriculumAction::ArrowUp : CurriculumAction::ArrowDown;
+		case 5: return CurriculumAction::W
+			| (SampleParameterBool(TEXT("prescribed_move_camera"))
+				? CurriculumAction::ArrowLeft : CurriculumAction::ArrowRight);
+		case 6: return CurriculumAction::W | CurriculumAction::S;
+		default: return SelectMovementBits(true);
+		}
+	}
 	const float Roll = EpisodeRandom.FRandRange(0.0f, 100.0f);
 	if (Roll < 8.0f)
 	{
@@ -2278,6 +2541,19 @@ uint16 ACurriculumDataGenerator::SelectBaseAction()
 
 int32 ACurriculumDataGenerator::SelectHoldSteps()
 {
+	if (bPrescribedRecipes
+		&& CoverageMission == ECoverageMission::SemiMarkov
+		&& FrameIndex == 0
+		&& CurrentPrescribedScenarioIndex >= 0)
+	{
+		switch (CurrentPrescribedScenarioIndex % 4)
+		{
+		case 0: return 2;
+		case 1: return 8;
+		case 2: return 24;
+		default: return 60;
+		}
+	}
 	const float Roll = EpisodeRandom.FRandRange(0.0f, 100.0f);
 	if (Roll < 25.0f)
 	{
@@ -2533,7 +2809,10 @@ uint64 ACurriculumDataGenerator::GetParameterBits(
 	const int32 SampleIndex) const
 {
 	uint64 Key = static_cast<uint64>(static_cast<uint32>(SeedStart));
-	Key ^= static_cast<uint64>(static_cast<uint32>(WorkerId)) << 32;
+	if (!bPrescribedRecipes)
+	{
+		Key ^= static_cast<uint64>(static_cast<uint32>(WorkerId)) << 32;
+	}
 	Key = MixParameterBits(
 		Key ^ static_cast<uint64>(static_cast<uint32>(EpisodeIndex)));
 	Key ^= HashParameterName(ParameterName);
@@ -2596,6 +2875,35 @@ float ACurriculumDataGenerator::SampleStratifiedRange(
 	const int32 SampleIndex) const
 {
 	const int32 SafeBinCount = FMath::Max(1, BinCount);
+	if (bPrescribedRecipes)
+	{
+		// A digitally shifted base-2 radical-inverse sequence is nested: every
+		// larger prefix refines the same earlier prefix. Parameter-specific digital
+		// shifts decorrelate dimensions without changing that prefix property.
+		uint32 Bits = static_cast<uint32>(
+			FMath::Max(0, CurrentContinuousSampleOrdinal) + 1);
+		uint32 Reversed = 0;
+		for (int32 BitIndex = 0; BitIndex < 24; ++BitIndex)
+		{
+			Reversed = (Reversed << 1) | (Bits & 1u);
+			Bits >>= 1;
+		}
+		const uint32 Shift = static_cast<uint32>(
+			MixParameterBits(
+				HashParameterName(ParameterName)
+				^ static_cast<uint64>(static_cast<uint32>(SampleIndex)))
+			& 0x00ffffffull);
+		const float ProgressiveUnit = static_cast<float>((Reversed ^ Shift) & 0x00ffffffu)
+			/ static_cast<float>(1u << 24);
+		const int32 BinIndex = FMath::Min(
+			SafeBinCount - 1,
+			FMath::FloorToInt(ProgressiveUnit * static_cast<float>(SafeBinCount)));
+		const float BinWidth =
+			(Maximum - Minimum) / static_cast<float>(SafeBinCount);
+		return Minimum
+			+ ((static_cast<float>(BinIndex)
+				+ SampleParameterUnit(ParameterName, SampleIndex)) * BinWidth);
+	}
 	const uint64 NameHash = HashParameterName(ParameterName);
 	int32 Stride =
 		1 + static_cast<int32>((NameHash >> 17) % static_cast<uint64>(SafeBinCount));
@@ -3046,7 +3354,36 @@ void ACurriculumDataGenerator::SelectCoverageMission()
 	// silently skew the intended 55/20/5/5/5 final frame mixture (the remaining
 	// 10% is supplied by separately captured human sessions).
 	bool bMissionOverridden = false;
-	if (bMissionReviewSuite)
+	if (bPrescribedRecipes)
+	{
+		if (MissionOverride == TEXT("semi_markov") || MissionOverride == TEXT("semimarkov"))
+		{
+			CoverageMission = ECoverageMission::SemiMarkov;
+		}
+		else if (MissionOverride == TEXT("object_view"))
+		{
+			CoverageMission = ECoverageMission::ObjectView;
+		}
+		else if (MissionOverride == TEXT("contact_recovery"))
+		{
+			CoverageMission = ECoverageMission::ContactRecovery;
+		}
+		else if (MissionOverride == TEXT("ramp_traverse"))
+		{
+			CoverageMission = ECoverageMission::RampTraverse;
+		}
+		else if (MissionOverride == TEXT("hoop_pass"))
+		{
+			CoverageMission = ECoverageMission::HoopPass;
+		}
+		else
+		{
+			bCoverageMissionConfigurationValid = false;
+			return;
+		}
+		bMissionOverridden = true;
+	}
+	else if (bMissionReviewSuite)
 	{
 		if (EpisodeIndex == 0)
 		{
@@ -3171,7 +3508,27 @@ void ACurriculumDataGenerator::SelectCoverageMission()
 
 void ACurriculumDataGenerator::ConfigureObjectViewMission()
 {
-	if (bMissionReviewSuite)
+	if (bPrescribedRecipes)
+	{
+		if (CurrentPrescribedScenarioIndex < 0
+			|| CurrentPrescribedScenarioIndex >= ObjectScenarioCount)
+		{
+			bCoverageMissionConfigurationValid = false;
+			return;
+		}
+		CurrentObjectScenarioIndex = CurrentPrescribedScenarioIndex;
+		int32 ModeIndex = 0;
+		int32 GazeIndex = 0;
+		DecodeObjectScenario(
+			CurrentObjectScenarioIndex,
+			CoverageTargetIndex,
+			ModeIndex,
+			GazeIndex,
+			bCoverageOrbitClockwise);
+		ObjectViewMode = static_cast<EObjectViewMode>(ModeIndex);
+		ObjectGazePattern = static_cast<EObjectGazePattern>(GazeIndex);
+	}
+	else if (bMissionReviewSuite)
 	{
 		if (EpisodeIndex <= 10)
 		{
@@ -3982,7 +4339,28 @@ void ACurriculumDataGenerator::ConfigureContactRecoveryMission()
 	constexpr int32 FacingProfileCount =
 		static_cast<int32>(ELocomotionFacingProfile::Count);
 	int32 BaseScenarioIndex = INDEX_NONE;
-	if (bMissionReviewSuite)
+	if (bPrescribedRecipes)
+	{
+		if (CurrentPrescribedScenarioIndex < 0
+			|| CurrentPrescribedScenarioIndex >= ContactScenarioCount)
+		{
+			bCoverageMissionConfigurationValid = false;
+			return;
+		}
+		CurrentContactScenarioIndex = CurrentPrescribedScenarioIndex;
+		BaseScenarioIndex = CurrentContactScenarioIndex / FacingProfileCount;
+		ContactTargetIndex =
+			BaseScenarioIndex / (RecoveryStyleCount * ApproachProfileCount);
+		const int32 LocalBaseScenario =
+			BaseScenarioIndex % (RecoveryStyleCount * ApproachProfileCount);
+		ContactRecoveryStyle = static_cast<EContactRecoveryStyle>(
+			LocalBaseScenario / ApproachProfileCount);
+		ContactApproachProfile = static_cast<EContactApproachProfile>(
+			LocalBaseScenario % ApproachProfileCount);
+		LocomotionFacingProfile = static_cast<ELocomotionFacingProfile>(
+			CurrentContactScenarioIndex % FacingProfileCount);
+	}
+	else if (bMissionReviewSuite)
 	{
 		ContactTargetIndex = EpisodeIndex - 31;
 		ContactRecoveryStyle = static_cast<EContactRecoveryStyle>(
@@ -4378,7 +4756,22 @@ void ACurriculumDataGenerator::ConfigureContactRecoveryMission()
 void ACurriculumDataGenerator::ConfigureRampMission()
 {
 	int32 DirectionIndex = 0;
-	if (bMissionReviewSuite)
+	if (bPrescribedRecipes)
+	{
+		if (CurrentPrescribedScenarioIndex < 0
+			|| CurrentPrescribedScenarioIndex >= RampScenarioCount)
+		{
+			bCoverageMissionConfigurationValid = false;
+			return;
+		}
+		CurrentRampScenarioIndex = CurrentPrescribedScenarioIndex;
+		DirectionIndex = CurrentRampScenarioIndex / 15;
+		RampPathProfile = static_cast<ERampPathProfile>(
+			(CurrentRampScenarioIndex / 5) % 3);
+		LocomotionFacingProfile = static_cast<ELocomotionFacingProfile>(
+			CurrentRampScenarioIndex % 5);
+	}
+	else if (bMissionReviewSuite)
 	{
 		const int32 ReviewVariantIndex = EpisodeIndex - 40;
 		DirectionIndex = ReviewVariantIndex / 5;
@@ -4615,7 +5008,22 @@ void ACurriculumDataGenerator::ConfigureRampMission()
 void ACurriculumDataGenerator::ConfigureHoopMission()
 {
 	int32 DirectionIndex = 0;
-	if (bMissionReviewSuite)
+	if (bPrescribedRecipes)
+	{
+		if (CurrentPrescribedScenarioIndex < 0
+			|| CurrentPrescribedScenarioIndex >= HoopScenarioCount)
+		{
+			bCoverageMissionConfigurationValid = false;
+			return;
+		}
+		CurrentHoopScenarioIndex = CurrentPrescribedScenarioIndex;
+		DirectionIndex = CurrentHoopScenarioIndex / 15;
+		HoopPathProfile = static_cast<EHoopPathProfile>(
+			(CurrentHoopScenarioIndex / 5) % 3);
+		LocomotionFacingProfile = static_cast<ELocomotionFacingProfile>(
+			CurrentHoopScenarioIndex % 5);
+	}
+	else if (bMissionReviewSuite)
 	{
 		const int32 ReviewVariantIndex = EpisodeIndex - 50;
 		DirectionIndex = ReviewVariantIndex / 5;
@@ -6012,6 +6420,7 @@ void ACurriculumDataGenerator::PrepareNextAction()
 
 	if (ActionScriptIndex >= ActionScriptMasks.Num()
 		&& HoldStepsRemaining <= 0
+		&& !(bPrescribedRecipes && FrameIndex == 0)
 		&& EpisodeRandom.FRand() < 0.30f)
 	{
 		BuildTransitionScript();
@@ -6353,6 +6762,10 @@ FString ACurriculumDataGenerator::GetStageSchemaVersion() const
 
 FString ACurriculumDataGenerator::MakeEpisodeId() const
 {
+	if (bPrescribedRecipes)
+	{
+		return FString::Printf(TEXT("p-e%09d"), EpisodeIndex);
+	}
 	return FString::Printf(TEXT("w%03d-e%06d"), WorkerId, EpisodeIndex);
 }
 
@@ -6388,13 +6801,18 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		CameraPitchRate =
 			Character->GetCurriculumCameraPitchRateDegreesPerSecond();
 	}
-	const TCHAR* CollectionPolicy = bTrajectoryShowcase
+	const TCHAR* CollectionPolicy = bPrescribedRecipes
+		? TEXT("training_central_prescribed_recipes_v1")
+		: (bTrajectoryShowcase
 		? TEXT("inspection_only_trajectory_showcase")
 		: (bMissionReviewSuite
 			? TEXT("inspection_only_mission_review_suite")
 			: (bCoverageGuided
 				? TEXT("training_frame_balanced_final_agent_v5")
-				: TEXT("training_semimarkov")));
+				: TEXT("training_semimarkov"))));
+	const TCHAR* ParameterSampler = bPrescribedRecipes
+		? TEXT("prescribed_nested_radical_inverse_stratified_v1")
+		: TEXT("enumerated_cells_global_replay_stratified_stateless_v2");
 	return FString::Printf(
 		TEXT("{\n")
 		TEXT("  \"schema_version\": \"%s\",\n")
@@ -6411,7 +6829,14 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		TEXT("  \"object_view_mode_override\": \"%s\",\n")
 		TEXT("  \"coverage_target_override\": \"%s\",\n")
 		TEXT("  \"mission_direction_override\": \"%s\",\n")
-		TEXT("  \"parameter_sampler\": \"enumerated_cells_global_replay_stratified_stateless_v2\",\n")
+		TEXT("  \"prescribed_recipes\": %s,\n")
+		TEXT("  \"plan_id\": \"%s\",\n")
+		TEXT("  \"plan_version\": \"%s\",\n")
+		TEXT("  \"assignment_id\": \"%s\",\n")
+		TEXT("  \"attempt_id\": \"%s\",\n")
+		TEXT("  \"executor_id\": \"%s\",\n")
+		TEXT("  \"split\": \"%s\",\n")
+		TEXT("  \"parameter_sampler\": \"%s\",\n")
 		TEXT("  \"balancing_counter_policy\": \"accepted_successful_realized_behavior_frames_only\",\n")
 		TEXT("  \"coverage_azimuth_bin_count\": %d,\n")
 		TEXT("  \"coverage_summary\": {\n")
@@ -6508,6 +6933,14 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		*ObjectViewModeOverride.ReplaceCharWithEscapedChar(),
 		*CoverageTargetOverride.ReplaceCharWithEscapedChar(),
 		*MissionDirectionOverride.ReplaceCharWithEscapedChar(),
+		JsonBool(bPrescribedRecipes),
+		*PlanId.ReplaceCharWithEscapedChar(),
+		*PlanVersion.ReplaceCharWithEscapedChar(),
+		*AssignmentId.ReplaceCharWithEscapedChar(),
+		*AttemptId.ReplaceCharWithEscapedChar(),
+		*ExecutorId.ReplaceCharWithEscapedChar(),
+		*DatasetSplit.ReplaceCharWithEscapedChar(),
+		ParameterSampler,
 		CoverageAzimuthBinCount,
 		OverallObjectViewBins[0],
 		OverallObjectViewBins[1],

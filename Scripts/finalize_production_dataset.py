@@ -155,6 +155,33 @@ EPISODE_SCHEMA = pa.schema(
                 "episode_index",
                 "worker_id",
                 "seed",
+            )
+        ],
+        pa.field("prescribed", pa.bool_()),
+        *[
+            pa.field(name, pa.string())
+            for name in (
+                "plan_id",
+                "plan_version",
+                "assignment_id",
+                "attempt_id",
+                "executor_id",
+                "split",
+                "recipe_id",
+            )
+        ],
+        *[
+            pa.field(name, pa.int32())
+            for name in (
+                "continuous_sample_ordinal",
+                "refinement_level",
+                "repetition_index",
+                "prescribed_scenario_index",
+            )
+        ],
+        *[
+            pa.field(name, pa.int32(), nullable=False)
+            for name in (
                 "requested_transitions",
                 "actual_transitions",
                 "observation_count",

@@ -177,7 +177,19 @@ private:
 		TWeakObjectPtr<AStaticMeshActor> VisualActor;
 	};
 
+	struct FPrescribedRecipe
+	{
+		FString RecipeId;
+		FString Mission;
+		int32 EpisodeIndex = 0;
+		int32 ScenarioIndex = INDEX_NONE;
+		int32 ContinuousSampleOrdinal = 0;
+		int32 RefinementLevel = 0;
+		int32 RepetitionIndex = 0;
+	};
+
 	bool ParseConfiguration();
+	bool LoadRecipeManifest(const FString& ManifestPath);
 	bool OpenOutput();
 	bool ResolvePlayer();
 	bool BeginEpisode();
@@ -308,7 +320,16 @@ private:
 	FString ObjectViewModeOverride;
 	FString CoverageTargetOverride;
 	FString MissionDirectionOverride;
+	FString RecipeManifestPath;
+	FString PlanId;
+	FString PlanVersion;
+	FString AssignmentId;
+	FString AttemptId;
+	FString ExecutorId;
+	FString DatasetSplit;
+	FString CurrentRecipeId;
 	TArray<int32> RequestedEpisodeIndices;
+	TArray<FPrescribedRecipe> PrescribedRecipes;
 
 	int32 EpisodeCount = 2;
 	int32 EpisodeSeconds = 10;
@@ -338,6 +359,10 @@ private:
 	int32 CurrentHoopScenarioIndex = INDEX_NONE;
 	int32 CurrentCoveragePositionBin = INDEX_NONE;
 	int32 CurrentCoveragePositionDistanceBand = INDEX_NONE;
+	int32 CurrentPrescribedScenarioIndex = INDEX_NONE;
+	int32 CurrentContinuousSampleOrdinal = 0;
+	int32 CurrentRefinementLevel = 0;
+	int32 CurrentRepetitionIndex = 0;
 	int32 CurrentEpisodeRampTraversals = 0;
 	int32 CurrentEpisodeHoopPasses = 0;
 	int32 OverallRampTraversals = 0;
@@ -472,4 +497,5 @@ private:
 	bool bTrajectoryShowcase = false;
 	bool bMissionReviewSuite = false;
 	bool bCoverageGuided = true;
+	bool bPrescribedRecipes = false;
 };

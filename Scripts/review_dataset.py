@@ -1059,6 +1059,12 @@ def validate_dataset(
                 f"Episode count {len(episodes)} != manifest "
                 f"{dataset['completed_episode_count']}"
             )
+        if dataset.get("prescribed_recipes"):
+            recipe_ids = [episode.get("recipe_id") for episode in episodes]
+            if None in recipe_ids or len(recipe_ids) != len(set(recipe_ids)):
+                raise DatasetValidationError(
+                    "Prescribed shard recipe IDs must be present and unique."
+                )
 
         for frame in frames:
             image_key = frame["rgb_key"]
@@ -1072,6 +1078,38 @@ def validate_dataset(
 
         for episode in episodes:
             episode_id = episode["episode_id"]
+            if dataset.get("prescribed_recipes"):
+                required_identity = (
+                    "plan_id",
+                    "plan_version",
+                    "assignment_id",
+                    "attempt_id",
+                    "executor_id",
+                    "split",
+                    "recipe_id",
+                )
+                missing_identity = [
+                    field for field in required_identity if not episode.get(field)
+                ]
+                if missing_identity:
+                    raise DatasetValidationError(
+                        f"{episode_id}: prescribed episode is missing controller "
+                        f"identity fields: {', '.join(missing_identity)}"
+                    )
+                for field in (
+                    "continuous_sample_ordinal",
+                    "refinement_level",
+                    "repetition_index",
+                    "prescribed_scenario_index",
+                ):
+                    if episode.get(field) is None or int(episode[field]) < 0:
+                        raise DatasetValidationError(
+                            f"{episode_id}: invalid prescribed field {field}."
+                        )
+                if episode.get("plan_id") != dataset.get("plan_id"):
+                    raise DatasetValidationError(
+                        f"{episode_id}: plan_id disagrees with dataset manifest."
+                    )
             episode_frames = sorted(
                 records_by_episode.get(episode_id, []),
                 key=lambda record: int(record["frame_index"]),

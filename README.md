@@ -80,15 +80,16 @@ path are implemented on Windows. A paired 19,232-observation pilot measures the
 actual storage and generation tradeoff below; the production encoder defaults to
 its fastest lossless effort because higher lossless effort was not useful for
 this collection workload. Central prescribed scheduling, assignment/result
-tracking, and Linux packaging are not implemented yet.
+tracking, whole-shard retry, and reconstructable inventory are now implemented
+and validated on Windows. Linux packaging is the next platform milestone.
 
 ### First-dataset collection plan
 
 The first production dataset is automated Movement V1. Its exact accepted-frame
-target and nested quotas are intentionally not frozen while the controller is
-still unimplemented. They will be recorded in an immutable, versioned
-`collection-plan.json` after the Windows and Linux prescribed-generation toy
-pilots pass.
+target and nested quotas remain intentionally unfrozen until the Linux
+prescribed-generation toy also passes. They will then be recorded in an
+immutable, versioned `collection-plan.json`; the Windows planner and execution
+contract are already validated.
 That plan must allocate semi-Markov, object-view, contact/recovery, ramp, and hoop
 coverage; enumerate the required discrete cells and continuous strata; assign
 disjoint train/evaluation recipe identities; and reserve a bounded set of makeup
@@ -139,16 +140,16 @@ Implemented and validated now:
 - native lossless-WebP tar observations and typed Parquet metadata
 - paired-format benchmarking and exact decoded-pixel/metadata comparison
 - focused, mixed, stress, replay, 384 x 384 video, and all-frame mission QA
+- optional immutable prescribed-recipe manifests in the packaged Windows game
+- a deterministic breadth-first planner covering 887 complete discrete cells:
+  32 semi-Markov, 120 object, 675 contact, 30 ramp, and 30 hoop cells
+- immutable assignments, attempt claims, results, inventory snapshots,
+  whole-shard retry, duplicate suppression, graceful stop, and bounded reserves
+- a coverage-complete 20 Hz Windows toy: 887/887 recipes and cells credited,
+  zero semantic failures, and 54,868 validated WebP observations
 
 Still required before serious automated Movement V1 production:
 
-- add immutable prescribed episode-recipe input to the Windows generator
-- implement the central controller, assignment blocks, worker wrapper, and
-  reconstructable persistent ledger
-- implement bounded semantic-failure handling, technical retry, interruption,
-  graceful-stop, and duplicate-result rules
-- run and evaluate a coverage-complete Windows toy collection using every
-  discrete cell, including interruption and deterministic replay tests
 - freeze the numerical production plan only after the Windows and Linux gates
   pass
 - add Linux libwebp support, package Linux x86-64, and validate on RunPod
@@ -190,10 +191,10 @@ The preserved implementation checkpoints are:
 | `486511f` | native lossless-WebP encoding, typed Parquet finalization, cross-format validation, and paired storage benchmark |
 | `892cceb` | engine-authoritative camera pitch alignment and focused deterministic regression |
 
-The current Windows baseline includes the schema-v10 mission policy and the
-one-shard WebP/Parquet production-v1 path. It does not include prescribed episode
-recipes, a central controller, Linux libwebp linkage, a Linux packaged build,
-asynchronous frame readback, or in-process shard rollover.
+The current Windows baseline includes the schema-v10 mission policy, the
+one-shard WebP/Parquet production-v1 path, prescribed episode recipes, and the
+central controller/worker ledger. It does not include Linux libwebp linkage, a
+Linux packaged build, asynchronous frame readback, or in-process shard rollover.
 
 ## Current status
 
@@ -257,6 +258,15 @@ The current project revision retains that preflight path and adds:
   payloads, appended to the tar without copying or re-encoding its observations
 - validation and review support for both image/metadata formats
 - exhaustive PNG-versus-WebP decoded-pixel and normalized-metadata comparison
+- assignment-manifest parsing with prescribed mission/scenario indices and
+  nested continuous sample ordinals while retaining the automatic QA policy
+- controller-owned plans and disjoint assignment blocks; stable logical replay
+  identity separated from physical executor/attempt identity
+- immutable attempt/result records, exact whole-shard retries, reconstructed
+  inventory, idempotent reserve activation, duplicate-result suppression, and
+  graceful stop between assignments
+- prescribed episode identity fields in typed episode Parquet metadata and
+  controller-result semantic/technical outcomes
 
 The retained reference/preflight data path is:
 
@@ -298,13 +308,6 @@ shard, and derives review MP4s from the stored observations.
 
 Still required before production-scale collection:
 
-- prescribed episode-recipe execution on the working Windows generator
-- a central controller with immutable plans, assignments, attempts, results,
-  progress reconstruction, bounded semantic-failure handling, and whole-shard
-  technical retry
-- a coverage-complete Windows toy pilot which exercises every discrete cell and
-  proves non-overlap, replay, interruption, graceful stop, validation, and
-  progress accounting
 - Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation
 - full elevation, projected-size, occlusion, action, collision-duration, and
   duplication reporting
@@ -315,6 +318,30 @@ It does not use screen recording. A same-GPU concurrency experiment was also
 completed and rejected for this desktop. The first distributed design therefore
 keeps synchronous capture and scales by running one process on each separate
 RunPod GPU.
+
+### Windows prescribed-controller evidence
+
+The coverage-complete packaged Windows toy used one primary recipe for every
+finite cell at 64 x 64 and the reference 20 Hz control/observation rate. Its
+single assignment produced 887 episodes, 53,981 transitions, and 54,868
+lossless-WebP observations. Native Parquet finalization, checksum/schema/mission
+validation, and inventory reconstruction all passed. Credited outcomes were
+32/32 semi-Markov, 120/120 object-view, 675/675 contact/recovery, 30/30 ramp,
+and 30/30 hoop cells, with zero semantic failures.
+
+A controlled interruption left attempt 000 unresolved; the same 32-recipe
+assignment then failed production-format validation at attempt 001 because an
+integration bug had ignored manifest capture settings. After that bug was fixed,
+attempt 002 reused the exact logical recipes and passed with 705 WebP
+observations. Replaying that prescribed manifest produced identical normalized
+metadata and decoded RGBA for all 705 frames, with SHA-256
+`c14db252967e917241feaaf3ce4f475701d1156683e88a25430d79171e3bf965`.
+
+A separate deliberately coarse 5 Hz full-catalog diagnostic was technically
+valid but resolved 659 guided recipes as semantic failures. It did not block the
+ledger, credited only successful cells, activated exactly 659 predefined
+reserves, and treated a repeated activation request as a no-op. The 20 Hz pass
+shows those cells are valid at the accepted reference rate.
 
 ## Packaged generator usage
 
@@ -356,6 +383,24 @@ Command-line values such as `-Stage=`, `-Episodes=`, `-EpisodeSeconds=`,
 `-SeedStart=`, `-WorkerId=`, `-ObservationRate=`, `-Width=`, `-Height=`,
 `-StorageFormat=`, `-WebPEffort=`, and `-Output=` override the JSON
 configuration.
+
+For centrally prescribed collection, create and verify an immutable plan, then
+run the assignments owned by a logical worker:
+
+```text
+python Scripts/dataset_controller.py plan <collection-root> --frame-budget <accepted-frames> --workers <count>
+python Scripts/dataset_controller.py verify-plan <collection-root>
+python Scripts/dataset_worker.py <collection-root> --executable <he_grenade_game.exe> --worker-id <id>
+python Scripts/dataset_controller.py inventory <collection-root> --write-snapshot
+```
+
+The planner rejects a frame budget below its conservative mandatory-coverage
+lower bound. The worker passes `-RecipeManifest=<attempt-request.json>` to the
+game, finalizes Parquet, validates the shard, and only then publishes an
+immutable validated result. Put a file named `STOP` in the collection root to
+prevent another assignment from starting after the current one. Use
+`activate-reserves` after inventory reconstruction to assign the predefined
+reserves for valid semantic failures.
 
 Use `-EpisodeIndices=0+18+19+30` to regenerate only specific deterministic
 episode indices while preserving their original seeds, IDs, and policy choices.
@@ -1417,8 +1462,14 @@ collection-plan ID/version, recipe ID, assignment ID, attempt ID, stable logical
 worker/replay identity, physical executor ID, train/evaluation split, prescribed
 discrete cell, prescribed continuous stratum indices, intentional repetition
 index, progressive sample ordinal/refinement level, technical result, semantic
-result, coverage-credit decision, and any plan-amendment ID. These fields are
-pending and are not present in the current automatic Windows schema-v10 output.
+result, coverage-credit decision, and any plan-amendment ID. Plan, recipe,
+assignment, attempt, executor, split, scenario, repetition, and progressive
+sample fields are now present in prescribed episode Parquet rows. Technical and
+semantic outcomes plus coverage credit are stored in the immutable controller
+result, where they can reflect finalization and validation rather than an
+in-progress Unreal episode. Plan amendments remain deferred until one is
+actually required; the automatic Windows schema-v10 path remains backward
+compatible and leaves prescribed fields null.
 
 ### Per observation
 
@@ -1608,21 +1659,24 @@ Audited workflow state:
 | Run the production-format 32-episode pilot | complete | paired PNG/JSONL and WebP/Parquet run: 19,232 observations, identical seeds/settings, exhaustive decoded-pixel and metadata equivalence |
 | Freeze centralized prescribed-controller architecture | complete design | immutable plans and recipes; controller-owned assignments; one assignment/one shard; reconstructable ledger; bounded semantic failure; whole-shard technical retry |
 | Update README to the controller architecture | complete design checkpoint | documentation is committed before generator/controller implementation |
-| Implement prescribed recipe input on Windows | pending | current generator still selects missions internally and does not accept an assignment/recipe manifest |
-| Implement controller, worker wrapper, and ledger | pending | no central assignment, attempt, result, interruption, or inventory implementation exists yet |
-| Run the Windows controller toy pilot | pending | must cover the complete discrete catalog with minimal repetition/coarsest continuous refinement and prove success/failure semantics, non-overlap, exact retry, interruption, graceful stop, validation, and reconstructed progress |
+| Implement prescribed recipe input on Windows | complete | packaged generator accepts an assignment manifest and consumes exact per-episode mission/scenario/replay identities while retaining automatic mode |
+| Implement controller, worker wrapper, and ledger | complete on Windows | immutable plan/recipe/assignment/claim/attempt/result records; inventory reconstruction; semantic failure resolution; reserve activation; duplicate suppression; whole-shard retry; graceful stop |
+| Run the Windows controller toy pilot | complete | 887/887 catalog cells, 887/887 credited recipes, 54,868 WebP observations, zero semantic failures at 20 Hz; controlled interruption then exact retry; a separate 5 Hz diagnostic resolved failures without blocking and activated 659 reserves idempotently |
 | Freeze numeric production plan | pending | accepted-frame targets and nested quotas are deliberately deferred until the Windows and Linux pilots pass |
 | Package and validate Linux x86-64 | pending after Windows gate | add Linux libwebp linkage, package the synchronous build, and validate it on RunPod |
 | Add complete distribution reports | pending | mission/mode/target/direction/pitch summaries exist; broader action, spatial, contact-duration, duplicate, and storage reports remain |
-| Scale collection | blocked by controller, Windows toy, Linux, and reporting gates | RunPod workers will execute centrally prescribed assignment blocks |
+| Scale collection | blocked by Linux and reporting gates | RunPod workers will execute centrally prescribed assignment blocks |
 
-The current packaged build accepts stage, worker ID, seed start, episode count
-and duration, an explicit `+`-separated episode-index list, output directory,
-observation rate, and render resolution. It does not yet accept a contiguous
-seed/episode range, prescribed recipe manifest, assignment ID, attempt ID, plan
-ID, split, or physical executor ID. It also does not enforce global recipe
-uniqueness. Those are the next Windows implementation changes. The central
-controller—not each generator process—will own global assignment and coverage
+The current packaged build accepts the existing automatic arguments plus
+`-RecipeManifest=<assignment.json>`. A prescribed manifest supplies plan,
+assignment, attempt, split, logical-worker, physical-executor, recipe,
+episode-index, exact discrete-scenario, repetition, refinement, continuous
+sample, and capture-configuration fields. The generator rejects duplicate recipe
+IDs/episode indices within an assignment. `Scripts/dataset_controller.py` owns
+global recipe uniqueness, planning, assignment, inventory, and reserve
+activation; `Scripts/dataset_worker.py` owns attempt claims, packaged execution,
+finalization, validation, and immutable result publication. The central
+controller—not each generator process—owns global assignment and coverage
 accounting.
 
 ### Current same-GPU worker benchmark
@@ -1818,32 +1872,21 @@ stratified valid geometry, measurable outcomes, canonical action bits only, no
 mid-episode state correction, generic no-progress/time-limit failures,
 accepted-frame balancing, and natural endpoint-tail completion.
 
-The Windows baseline does not yet implement the frozen centralized production
-architecture. The next code checkpoint is therefore not asynchronous readback or
-in-process shard rollover. It is prescribed episode-recipe execution plus the
-central controller and persistent assignment/result ledger, while retaining the
-current synchronous one-shard generator as the trusted capture baseline.
+The Windows baseline now implements the frozen centralized production
+architecture while retaining the synchronous one-shard generator as the trusted
+capture baseline. The complete 20 Hz prescribed toy validated all 887 discrete
+cells in one shard with 54,868 authoritative observations and zero semantic
+failures. Interruption/retry, deliberate coarse-rate semantic failure, reserve
+activation, graceful stop, duplicate suppression, canonical-prefix stability,
+and inventory reconstruction were tested separately.
 
 Immediate implementation order:
 
-1. Commit this README design checkpoint before changing generator behavior.
-2. Add an optional prescribed recipe/assignment manifest to the Windows
-   generator without removing the automatic QA path.
-3. Add controller and worker tools which create immutable plans, recipes,
-   assignments, attempts, results, inventories, and whole-shard retries.
-4. Extend metadata and validation with plan/recipe/assignment/attempt identities,
-   prescribed-versus-realized checks, split isolation, duplicate rejection, and
-   semantic-versus-technical result handling.
-5. Run the coverage-complete Windows toy plan across every discrete scenario
-   cell with minimal repetition and coarsest progressive continuous refinement;
-   include ordinary successes, a controlled semantic failure,
-   interruption/retry, graceful stop, replay, non-overlap, finalization,
-   checksum validation, and inventory reconstruction.
-6. Evaluate the stored RGB and metadata and commit/push the working Windows
-   controller checkpoint only after every toy gate passes.
-7. Add Linux libwebp linkage, package Linux x86-64, and reproduce the toy plan on
-   RunPod persistent storage.
-8. Freeze the numerical production plan after the Windows and Linux evidence
+1. Commit and push this validated Windows controller checkpoint.
+2. Add Linux libwebp linkage, package Linux x86-64, and reproduce the prescribed
+   toy workflow on RunPod persistent storage.
+3. Complete distribution reports and a small trainer/model smoke test.
+4. Freeze the numerical production plan after the Windows and Linux evidence
    exists, then authorize only the staged data-volume rollout above.
 
 Deferred work which is not a first-dataset gate includes asynchronous GPU
