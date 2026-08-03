@@ -58,7 +58,9 @@ after Movement V1 passes its model-training gates.
 | Evaluation reserve | assigned before collection through disjoint prescribed recipe identities |
 | Automated behavior | frame-balanced semi-Markov play plus object, contact, ramp, and hoop missions |
 | Replay | exact replay keys, explicit categorical scenario cells, stratified continuous values, and stateless jitter |
-| Production scheduling | one central controller prescribes immutable episode recipes; workers do not select production missions independently |
+| Production scheduling | one central controller creates a global budget-driven recipe plan before worker assignment; workers do not select production missions independently |
+| Budget semantics | the user requests accepted frames; the planner maximizes breadth first, rejects a budget too small for mandatory discrete coverage, and refines continuous coverage as budget grows |
+| Toy-plan meaning | the complete discrete catalog with minimal repetition and the coarsest progressive continuous coverage; never a reduced object/mission catalog |
 | Distributed execution | one synchronous generator process per GPU; scale with separate RunPod workers rather than multiple processes on one GPU |
 | Work boundary | one assignment block produces one shard; interrupted partial shards are discarded and the assignment is retried |
 | Controller ledger | immutable plans, recipes, assignments, attempts, and validated results on persistent storage; derived progress can be rebuilt |
@@ -90,7 +92,9 @@ pilots pass.
 That plan must allocate semi-Markov, object-view, contact/recovery, ramp, and hoop
 coverage; enumerate the required discrete cells and continuous strata; assign
 disjoint train/evaluation recipe identities; and reserve a bounded set of makeup
-recipes for valid semantic failures.
+recipes for valid semantic failures. A smaller requested dataset reduces
+intentional repetition and continuous refinement, not the supported missions,
+objects, directions, or discrete scenario cells.
 
 These sources serve different purposes. Semi-Markov play supplies broad,
 coherent action transitions. Guided missions guarantee rare geometry and
@@ -143,8 +147,8 @@ Still required before serious automated Movement V1 production:
   reconstructable persistent ledger
 - implement bounded semantic-failure handling, technical retry, interruption,
   graceful-stop, and duplicate-result rules
-- run and evaluate a fast Windows toy collection, including interruption and
-  deterministic replay tests
+- run and evaluate a coverage-complete Windows toy collection using every
+  discrete cell, including interruption and deterministic replay tests
 - freeze the numerical production plan only after the Windows and Linux gates
   pass
 - add Linux libwebp support, package Linux x86-64, and validate on RunPod
@@ -298,8 +302,9 @@ Still required before production-scale collection:
 - a central controller with immutable plans, assignments, attempts, results,
   progress reconstruction, bounded semantic-failure handling, and whole-shard
   technical retry
-- a Windows toy pilot which proves non-overlap, replay, interruption, graceful
-  stop, validation, and progress accounting
+- a coverage-complete Windows toy pilot which exercises every discrete cell and
+  proves non-overlap, replay, interruption, graceful stop, validation, and
+  progress accounting
 - Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation
 - full elevation, projected-size, occlusion, action, collision-duration, and
   duplication reporting
@@ -892,35 +897,77 @@ catalog, continuous parameter strata, intentional repetition rules, and bounded
 reserve recipes. Numerical targets belong to that plan rather than being
 hard-coded into the orchestration layer.
 
+The primary user inputs are the requested accepted-frame target, worker count,
+train/evaluation allocation, and capture/build configuration. Worker count affects
+only execution partitioning; it must not change the globally selected recipe set.
+The planner calculates the required recipe count, complete base catalog, highest
+feasible continuous refinement depth, reserve recipes, assignment sizes, expected
+clean-boundary overage, and recipe-to-worker allocation before execution.
+
 Each prescribed episode recipe contains:
 
 - a globally unique recipe ID and stable replay identity
 - train or evaluation split
 - mission and complete discrete scenario cell
 - continuous stratum indices
+- progressive continuous sample ordinal and refinement level
 - intentional repetition index
 - plan/schema version
 
 The finite discrete cells cross the already implemented mission dimensions:
 object target, object-view mode, gaze plan, and orbit direction; contact target,
 approach, recovery, and locomotion-facing profile; and ramp/hoop direction, path,
-and facing profile. Repeating a cell is permitted only through an explicit new
-recipe and repetition index. Generating the same recipe ID twice is a retry or a
-duplicate attempt, never new coverage.
+and facing profile. Semi-Markov recipes similarly cover behavior families,
+meaningful action/transition scripts, mirroring, hold-duration bands, pitch bands,
+and collision behavior. Repeating a cell is permitted only through an explicit
+new recipe and repetition index. Generating the same recipe ID twice is a retry
+or a duplicate attempt, never new coverage.
 
-The controller prescribes continuous strata rather than duplicating Unreal's
-geometry code. Unreal derives the actual value with the existing named stateless
-jitter inside the scenario's validated range and records every realized value.
-It must not sample broadly and repair invalid geometry by clamping. A recipe that
-cannot construct valid geometry is a recorded configuration/semantic result.
+Discrete planning is coverage-first. The deterministic selection priority is:
 
-The controller is the sole assignment authority. It groups recipes into
-assignment blocks, assigns each block to a physical worker, records attempts and
-heartbeats, imports validated results, updates accepted-frame deficits, dispatches
-predefined reserve recipes, and produces the final shard index. Workers never
-choose production missions and never coordinate directly with one another. A
-recipe's logical worker/replay identity remains fixed across retries; the RunPod
-or PC which executes an attempt is recorded separately.
+1. represent every top-level mission family
+2. represent every value of every categorical dimension
+3. cover unseen pairs of categorical values
+4. cover every complete joint scenario cell
+5. add new continuous samples to the least-covered cells and spatial regions
+6. add intentional repetitions while filling accepted-frame deficits
+
+Stable hashing breaks otherwise equal priorities. Every full discrete cell must
+be scheduled at least once before an avoidable repetition of that cell. If a
+requested accepted-frame target is too small to execute the mandatory discrete
+catalog, plan creation fails with the estimated minimum budget and uncovered
+requirements. The planner never silently deletes objects, missions, directions,
+modes, or joint cells to make a small plan fit.
+
+The canonical recipe/refinement order is independent of requested budget and
+worker count. Once the mandatory discrete layer is present, a larger feasible
+plan extends the smaller plan with later recipes rather than reshuffling or
+replacing its earlier broad samples. Runtime semantic outcomes may activate
+predefined reserve recipes, but cannot change the identity of already planned
+work.
+
+Continuous coverage is progressive because a continuum cannot be exhausted. The
+controller assigns a deterministic nested low-discrepancy sample ordinal across
+the normalized continuous parameter vector. Early samples occupy widely separated
+regions; later samples fill progressively smaller gaps. A larger budget retains
+the same coverage structure and increases refinement rather than replacing broad
+samples with a new unrelated draw.
+
+The controller prescribes continuous strata/sample ordinals rather than
+duplicating Unreal's geometry code. Unreal maps them into each scenario's
+validated safe range, applies the existing named bounded stateless jitter, and
+records every realized value. It must not sample broadly and repair invalid
+geometry by clamping. A recipe that cannot construct valid geometry is a recorded
+configuration/semantic result.
+
+The controller is the sole assignment authority. It selects the global recipe set
+first, then groups those recipes into assignment blocks and assigns each block to
+a physical worker. It records attempts and heartbeats, imports validated results,
+updates accepted-frame deficits, dispatches predefined reserve recipes, and
+produces the final shard index. Workers never choose production missions and
+never coordinate directly with one another. A recipe's logical worker/replay
+identity remains fixed across retries; the RunPod or PC which executes an attempt
+is recorded separately.
 
 One assignment block produces one shard through one packaged Unreal invocation.
 The worker finalizes Parquet, performs complete validation, computes the checksum,
@@ -985,6 +1032,28 @@ process per GPU. Additional throughput comes from separate RunPod workers using
 the same packaged build, container, and preferably GPU class. Assignments are
 movable and should be distributed so a mission family is not permanently
 correlated with one renderer or machine.
+
+#### Coverage-complete toy-plan gate
+
+`Toy` describes scale, repetition, resolution, and continuous refinement—not a
+smaller behavioral specification. The Windows controller toy plan must use the
+same complete discrete catalog as production, including every object and wall,
+all mission families and submodes, both relevant directions, every gaze,
+approach, recovery, path, facing, and semi-Markov category, and every complete
+joint scenario cell. It uses the minimum intentional repetition and coarsest
+progressive continuous layer which can exercise that catalog.
+
+The planner computes the minimum feasible recipe/frame estimate for this gate.
+If an arbitrary requested toy budget is below that minimum, it rejects the plan
+and reports the missing budget rather than producing a coverage-incomplete toy.
+The resulting toy may therefore contain more frames than an informal initial
+guess. Cheap capture settings may reduce runtime, but they must not remove a
+discrete case or bypass ordinary mission execution and validation.
+
+After mandatory discrete coverage, any additional toy budget selects the next
+recipes from the same progressive continuous/refinement order used by production.
+Changing the worker count repartitions those recipes only; it cannot change which
+recipes the toy plan contains.
 
 ### Implemented automatic collection-agent and mission policy
 
@@ -1347,9 +1416,9 @@ The prescribed-controller schema extension must additionally record the
 collection-plan ID/version, recipe ID, assignment ID, attempt ID, stable logical
 worker/replay identity, physical executor ID, train/evaluation split, prescribed
 discrete cell, prescribed continuous stratum indices, intentional repetition
-index, technical result, semantic result, coverage-credit decision, and any
-plan-amendment ID. These fields are pending and are not present in the current
-automatic Windows schema-v10 output.
+index, progressive sample ordinal/refinement level, technical result, semantic
+result, coverage-credit decision, and any plan-amendment ID. These fields are
+pending and are not present in the current automatic Windows schema-v10 output.
 
 ### Per observation
 
@@ -1541,7 +1610,7 @@ Audited workflow state:
 | Update README to the controller architecture | complete design checkpoint | documentation is committed before generator/controller implementation |
 | Implement prescribed recipe input on Windows | pending | current generator still selects missions internally and does not accept an assignment/recipe manifest |
 | Implement controller, worker wrapper, and ledger | pending | no central assignment, attempt, result, interruption, or inventory implementation exists yet |
-| Run the Windows controller toy pilot | pending | must prove success/failure semantics, non-overlap, exact retry, interruption, graceful stop, validation, and reconstructed progress |
+| Run the Windows controller toy pilot | pending | must cover the complete discrete catalog with minimal repetition/coarsest continuous refinement and prove success/failure semantics, non-overlap, exact retry, interruption, graceful stop, validation, and reconstructed progress |
 | Freeze numeric production plan | pending | accepted-frame targets and nested quotas are deliberately deferred until the Windows and Linux pilots pass |
 | Package and validate Linux x86-64 | pending after Windows gate | add Linux libwebp linkage, package the synchronous build, and validate it on RunPod |
 | Add complete distribution reports | pending | mission/mode/target/direction/pitch summaries exist; broader action, spatial, contact-duration, duplicate, and storage reports remain |
@@ -1628,6 +1697,11 @@ Generation fails if:
 The centralized prescribed pipeline additionally fails validation if:
 
 - a result references an unknown plan, recipe, assignment, or attempt
+- plan creation accepts a budget below mandatory complete discrete coverage
+- the selected global recipe set changes only because worker count changes
+- a mandatory discrete cell is omitted before an avoidable repetition is added
+- progressive continuous sample ordinals repeat or regress without an explicit
+  prescribed repetition
 - a physical executor changes a recipe's stable logical replay identity
 - two accepted results claim the same recipe ID
 - a shard contains an episode not listed in its assignment
@@ -1658,7 +1732,9 @@ Automatic reports must include:
 
 Data-volume rollout:
 
-1. Run the fast prescribed-controller toy plan on the working Windows baseline.
+1. Run the coverage-complete prescribed-controller toy plan on the working
+   Windows baseline; it uses every discrete cell with minimal repetition and
+   coarsest progressive continuous refinement.
 2. Reproduce that toy plan with the packaged Linux build on RunPod.
 3. Generate approximately 10,000 frames for trainer, schema, controller,
    interruption, and report smoke tests.
@@ -1758,9 +1834,11 @@ Immediate implementation order:
 4. Extend metadata and validation with plan/recipe/assignment/attempt identities,
    prescribed-versus-realized checks, split isolation, duplicate rejection, and
    semantic-versus-technical result handling.
-5. Run a fast Windows toy plan that includes ordinary successes, a controlled
-   semantic failure, interruption/retry, graceful stop, replay, non-overlap,
-   finalization, checksum validation, and inventory reconstruction.
+5. Run the coverage-complete Windows toy plan across every discrete scenario
+   cell with minimal repetition and coarsest progressive continuous refinement;
+   include ordinary successes, a controlled semantic failure,
+   interruption/retry, graceful stop, replay, non-overlap, finalization,
+   checksum validation, and inventory reconstruction.
 6. Evaluate the stored RGB and metadata and commit/push the working Windows
    controller checkpoint only after every toy gate passes.
 7. Add Linux libwebp linkage, package Linux x86-64, and reproduce the toy plan on
