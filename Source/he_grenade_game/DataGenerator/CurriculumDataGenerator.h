@@ -195,6 +195,7 @@ private:
 	uint16 SelectMovementBits(bool bTowardWall);
 	uint16 SelectCameraBits();
 	float SelectPitchTargetDegrees();
+	int32 GetPitchBandIndex(float PitchDegrees) const;
 	void UpdatePitchMetrics(float PitchDegrees);
 	uint16 BalancePitchAction(uint16 ActionMask);
 	uint64 GetParameterBits(const TCHAR* ParameterName, int32 SampleIndex = 0) const;
@@ -307,6 +308,7 @@ private:
 	FString ObjectViewModeOverride;
 	FString CoverageTargetOverride;
 	FString MissionDirectionOverride;
+	TArray<int32> RequestedEpisodeIndices;
 
 	int32 EpisodeCount = 2;
 	int32 EpisodeSeconds = 10;
@@ -321,6 +323,7 @@ private:
 	int32 NextThrowRequestFrame = 0;
 	int32 TransitionsPerEpisode = 200;
 	int32 EpisodeIndex = 0;
+	int32 EpisodeOrdinal = 0;
 	int32 FrameIndex = 0;
 	int32 GlobalTransitionCount = 0;
 	int32 HoldStepsRemaining = 0;

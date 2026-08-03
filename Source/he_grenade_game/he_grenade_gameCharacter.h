@@ -83,6 +83,8 @@ protected:
 
 public:
 	Ahe_grenade_gameCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	void GetCurriculumCameraPitchLimits(float& OutMinimum, float& OutMaximum) const;
+	float GetCurriculumCameraPitchRateDegreesPerSecond() const;
 
 protected:
 	virtual void BeginPlay() override;

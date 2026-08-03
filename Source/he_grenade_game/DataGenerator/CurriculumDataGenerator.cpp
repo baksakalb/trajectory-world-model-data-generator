@@ -380,24 +380,6 @@ namespace
 			+ (FMath::Abs(FMath::Cos(PitchRadians)) * RampThicknessCm * 0.5f);
 	}
 
-	int32 GetPitchBandIndex(const float PitchDegrees)
-	{
-		const float AbsolutePitch = FMath::Abs(PitchDegrees);
-		if (AbsolutePitch <= 15.0f)
-		{
-			return 0;
-		}
-		if (AbsolutePitch <= 40.0f)
-		{
-			return 1;
-		}
-		if (AbsolutePitch <= 70.0f)
-		{
-			return 2;
-		}
-		return 3;
-	}
-
 	FString JsonNumber(const double Value)
 	{
 		return FString::SanitizeFloat(Value, 6);
@@ -794,10 +776,16 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 		|| bMissionTimedOut)
 	{
 		EndEpisode();
-		++EpisodeIndex;
-		if (EpisodeIndex >= EpisodeCount)
+		++EpisodeOrdinal;
+		if (EpisodeOrdinal >= EpisodeCount)
 		{
 			FinishRun(true);
+		}
+		else
+		{
+			EpisodeIndex = RequestedEpisodeIndices.IsEmpty()
+				? EpisodeOrdinal
+				: RequestedEpisodeIndices[EpisodeOrdinal];
 		}
 		return;
 	}
@@ -950,6 +938,41 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	FParse::Value(CommandLine, TEXT("ObjectViewMode="), ObjectViewModeOverride);
 	FParse::Value(CommandLine, TEXT("CoverageTarget="), CoverageTargetOverride);
 	FParse::Value(CommandLine, TEXT("MissionDirection="), MissionDirectionOverride);
+	FString CommandLineEpisodeIndices;
+	if (FParse::Value(CommandLine, TEXT("EpisodeIndices="), CommandLineEpisodeIndices))
+	{
+		TArray<FString> EpisodeIndexTokens;
+		CommandLineEpisodeIndices.ParseIntoArray(
+			EpisodeIndexTokens,
+			TEXT("+"),
+			true);
+		for (const FString& Token : EpisodeIndexTokens)
+		{
+			if (!Token.IsNumeric())
+			{
+				LastError = FString::Printf(
+					TEXT("Invalid episode index in -EpisodeIndices: %s"),
+					*Token);
+				return false;
+			}
+			const int32 RequestedIndex = FCString::Atoi(*Token);
+			if (RequestedIndex < 0 || RequestedEpisodeIndices.Contains(RequestedIndex))
+			{
+				LastError = FString::Printf(
+					TEXT("Episode indices must be unique non-negative integers: %s"),
+					*Token);
+				return false;
+			}
+			RequestedEpisodeIndices.Add(RequestedIndex);
+		}
+		if (RequestedEpisodeIndices.IsEmpty())
+		{
+			LastError = TEXT("-EpisodeIndices did not contain any episode indices.");
+			return false;
+		}
+		EpisodeCount = RequestedEpisodeIndices.Num();
+		EpisodeIndex = RequestedEpisodeIndices[0];
+	}
 	MissionOverride.ToLowerInline();
 	ObjectViewModeOverride.ToLowerInline();
 	CoverageTargetOverride.ToLowerInline();
@@ -1173,6 +1196,10 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		Yaw = bCanonicalSpawn ? 0.0f : EpisodeRandom.FRandRange(-180.0f, 180.0f);
 		Pitch = bCanonicalSpawn ? 0.0f : SelectPitchTargetDegrees();
 	}
+	float MinimumPitch = -89.9f;
+	float MaximumPitch = 89.9f;
+	Character->GetCurriculumCameraPitchLimits(MinimumPitch, MaximumPitch);
+	Pitch = FMath::Clamp(FRotator::NormalizeAxis(Pitch), MinimumPitch, MaximumPitch);
 	Character->TeleportTo(SpawnLocation, FRotator(0.0f, Yaw, 0.0f), false, true);
 	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 	{
@@ -1211,7 +1238,7 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		LogTemp,
 		Display,
 		TEXT("Dataset episode %d/%d started (seed %d, mission %s, target %s)."),
-		EpisodeIndex + 1,
+		EpisodeOrdinal + 1,
 		EpisodeCount,
 		EpisodeSeed,
 		*GetCoverageMissionSlug(),
@@ -1669,7 +1696,7 @@ void ACurriculumDataGenerator::EndEpisode()
 		LogTemp,
 		Display,
 		TEXT("Dataset episode %d/%d completed."),
-		EpisodeIndex + 1,
+		EpisodeOrdinal + 1,
 		EpisodeCount);
 }
 
@@ -1718,9 +1745,9 @@ void ACurriculumDataGenerator::FinishRun(
 				*GetStageSlug(),
 				JsonBool(bSuccess),
 				WorkerId,
-				EpisodeIndex + (bEpisodeActive ? 1 : 0),
+				EpisodeOrdinal + (bEpisodeActive ? 1 : 0),
 				GlobalTransitionCount,
-				GlobalTransitionCount + EpisodeIndex + (bEpisodeActive ? 1 : 0));
+				GlobalTransitionCount + EpisodeOrdinal + (bEpisodeActive ? 1 : 0));
 
 			bWriteSuccess =
 				TarWriter->AddTextFile(TEXT("metadata/frames.jsonl"), FramesJsonLines)
@@ -1938,9 +1965,8 @@ bool ACurriculumDataGenerator::CaptureObservation(
 
 	OutState.Position = Character->GetActorLocation();
 	OutState.Velocity = Character->GetVelocity();
-	OutState.CameraRotation = Character->GetController()
-		? Character->GetController()->GetControlRotation()
-		: PlayerCamera->GetComponentRotation();
+	OutState.CameraRotation =
+		Character->GetControlRotation().GetNormalized();
 	OutState.CameraRotation.Roll = 0.0f;
 	OutState.bGrounded =
 		Character->GetCharacterMovement()
@@ -2323,7 +2349,8 @@ uint16 ACurriculumDataGenerator::SelectCameraBits()
 	HeldCameraPitchTargetDegrees = SelectPitchTargetDegrees();
 	const float CurrentPitch =
 		Character && Character->GetController()
-			? Character->GetController()->GetControlRotation().Pitch
+			? FRotator::NormalizeAxis(
+				Character->GetController()->GetControlRotation().Pitch)
 			: 0.0f;
 	const float PitchDeadZone =
 		37.5f / static_cast<float>(FMath::Max(1, ObservationRate));
@@ -2353,6 +2380,25 @@ uint16 ACurriculumDataGenerator::SelectCameraBits()
 
 float ACurriculumDataGenerator::SelectPitchTargetDegrees()
 {
+	float MinimumPitch = -89.9f;
+	float MaximumPitch = 89.9f;
+	if (Character)
+	{
+		Character->GetCurriculumCameraPitchLimits(MinimumPitch, MaximumPitch);
+	}
+	const auto SampleClampedRange =
+		[this, MinimumPitch, MaximumPitch](float Minimum, float Maximum)
+		{
+			Minimum = FMath::Clamp(Minimum, MinimumPitch, MaximumPitch);
+			Maximum = FMath::Clamp(Maximum, MinimumPitch, MaximumPitch);
+			if (Minimum > Maximum)
+			{
+				Swap(Minimum, Maximum);
+			}
+			return FMath::IsNearlyEqual(Minimum, Maximum)
+				? Minimum
+				: EpisodeRandom.FRandRange(Minimum, Maximum);
+		};
 	const int32 PitchBand = SelectFrameDeficitBucket(
 		OverallPitchBandObservationFrames,
 		PitchBandFrameShares,
@@ -2364,25 +2410,51 @@ float ACurriculumDataGenerator::SelectPitchTargetDegrees()
 	{
 	case 1:
 		return bDownward
-			? EpisodeRandom.FRandRange(-40.0f, -15.0f)
-			: EpisodeRandom.FRandRange(15.0f, 40.0f);
+			? SampleClampedRange(-40.0f, -15.0f)
+			: SampleClampedRange(15.0f, 40.0f);
 	case 2:
 		return bDownward
-			? EpisodeRandom.FRandRange(-70.0f, -40.0f)
-			: EpisodeRandom.FRandRange(40.0f, 70.0f);
+			? SampleClampedRange(MinimumPitch + 10.0f, -40.0f)
+			: SampleClampedRange(40.0f, MaximumPitch - 10.0f);
 	case 3:
 		return bDownward
-			? EpisodeRandom.FRandRange(-85.0f, -70.0f)
-			: EpisodeRandom.FRandRange(70.0f, 85.0f);
+			? SampleClampedRange(MinimumPitch, MinimumPitch + 10.0f)
+			: SampleClampedRange(MaximumPitch - 10.0f, MaximumPitch);
 	default:
 		// Average two uniform samples to concentrate ordinary views near level,
 		// with the intended small downward gameplay bias.
 		return FMath::Clamp(
 			((EpisodeRandom.FRandRange(-15.0f, 15.0f)
 				+ EpisodeRandom.FRandRange(-15.0f, 15.0f)) * 0.5f) - 2.0f,
-			-15.0f,
-			15.0f);
+			FMath::Max(-15.0f, MinimumPitch),
+			FMath::Min(15.0f, MaximumPitch));
 	}
+}
+
+int32 ACurriculumDataGenerator::GetPitchBandIndex(const float PitchDegrees) const
+{
+	float MinimumPitch = -89.9f;
+	float MaximumPitch = 89.9f;
+	if (Character)
+	{
+		Character->GetCurriculumCameraPitchLimits(MinimumPitch, MaximumPitch);
+	}
+	const float NormalizedPitch = FRotator::NormalizeAxis(PitchDegrees);
+	const float AbsolutePitch = FMath::Abs(NormalizedPitch);
+	if (AbsolutePitch <= 15.0f)
+	{
+		return 0;
+	}
+	if (AbsolutePitch <= 40.0f)
+	{
+		return 1;
+	}
+	if (NormalizedPitch <= MinimumPitch + 10.0f
+		|| NormalizedPitch >= MaximumPitch - 10.0f)
+	{
+		return 3;
+	}
+	return 2;
 }
 
 void ACurriculumDataGenerator::UpdatePitchMetrics(const float PitchDegrees)
@@ -6303,7 +6375,19 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 	const bool bComplete,
 	const FString& ErrorMessage) const
 {
-	const int32 CompletedEpisodes = EpisodeIndex + (bEpisodeActive ? 1 : 0);
+	const int32 CompletedEpisodes =
+		EpisodeOrdinal + (bEpisodeActive ? 1 : 0);
+	float CameraPitchMinimum = -89.9f;
+	float CameraPitchMaximum = 89.9f;
+	float CameraPitchRate = 75.0f;
+	if (Character)
+	{
+		Character->GetCurriculumCameraPitchLimits(
+			CameraPitchMinimum,
+			CameraPitchMaximum);
+		CameraPitchRate =
+			Character->GetCurriculumCameraPitchRateDegreesPerSecond();
+	}
 	const TCHAR* CollectionPolicy = bTrajectoryShowcase
 		? TEXT("inspection_only_trajectory_showcase")
 		: (bMissionReviewSuite
@@ -6397,6 +6481,9 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		TEXT("  \"completed_episode_count\": %d,\n")
 		TEXT("  \"episode_seconds\": %d,\n")
 		TEXT("  \"observation_rate_hz\": %d,\n")
+		TEXT("  \"camera_pitch_min_degrees\": %s,\n")
+		TEXT("  \"camera_pitch_max_degrees\": %s,\n")
+		TEXT("  \"camera_pitch_rate_degrees_per_second\": %s,\n")
 		TEXT("  \"transitions_per_episode\": %d,\n")
 		TEXT("  \"transition_count\": %d,\n")
 		TEXT("  \"observation_count\": %d,\n")
@@ -6567,6 +6654,9 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		CompletedEpisodes,
 		EpisodeSeconds,
 		ObservationRate,
+		*JsonNumber(CameraPitchMinimum),
+		*JsonNumber(CameraPitchMaximum),
+		*JsonNumber(CameraPitchRate),
 		TransitionsPerEpisode,
 		GlobalTransitionCount,
 		GlobalTransitionCount + CompletedEpisodes,

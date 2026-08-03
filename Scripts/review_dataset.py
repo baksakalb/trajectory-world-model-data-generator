@@ -935,6 +935,65 @@ def validate_run_distributions(
             )
 
 
+def normalize_angle_degrees(value: float) -> float:
+    return (value + 180.0) % 360.0 - 180.0
+
+
+def validate_camera_pitch_contract(
+    dataset: dict[str, Any],
+    episode_id: str,
+    frames: list[dict[str, Any]],
+    transitions: list[dict[str, Any]],
+) -> None:
+    required_fields = (
+        "camera_pitch_min_degrees",
+        "camera_pitch_max_degrees",
+        "camera_pitch_rate_degrees_per_second",
+    )
+    if any(field not in dataset for field in required_fields):
+        return
+
+    minimum = float(dataset["camera_pitch_min_degrees"])
+    maximum = float(dataset["camera_pitch_max_degrees"])
+    pitch_per_step = float(dataset["camera_pitch_rate_degrees_per_second"]) / float(
+        dataset["observation_rate_hz"]
+    )
+    tolerance = 0.02
+
+    for frame in frames:
+        recorded = float(frame["camera"]["pitch"])
+        normalized = normalize_angle_degrees(recorded)
+        if abs(recorded - normalized) > tolerance:
+            raise DatasetValidationError(
+                f"{episode_id}: frame {frame['frame_index']} has noncanonical "
+                f"camera pitch {recorded}."
+            )
+        if normalized < minimum - tolerance or normalized > maximum + tolerance:
+            raise DatasetValidationError(
+                f"{episode_id}: frame {frame['frame_index']} camera pitch "
+                f"{normalized} lies outside engine limits [{minimum}, {maximum}]."
+            )
+
+    for transition, source, target in zip(transitions, frames, frames[1:]):
+        source_pitch = normalize_angle_degrees(float(source["camera"]["pitch"]))
+        target_pitch = normalize_angle_degrees(float(target["camera"]["pitch"]))
+        expected_pitch = min(
+            maximum,
+            max(
+                minimum,
+                source_pitch
+                + float(transition["pitch_axis"]) * pitch_per_step,
+            ),
+        )
+        if abs(target_pitch - expected_pitch) > tolerance:
+            raise DatasetValidationError(
+                f"{episode_id}: transition {transition['source_frame_index']} "
+                f"camera pitch {source_pitch} -> {target_pitch} does not match "
+                f"recorded pitch axis {transition['pitch_axis']} and engine "
+                f"limits [{minimum}, {maximum}]; expected {expected_pitch}."
+            )
+
+
 def validate_dataset(
     dataset_dir: Path,
 ) -> tuple[
@@ -1037,6 +1096,12 @@ def validate_dataset(
                 raise DatasetValidationError(
                     f"{episode_id}: discontinuous transition indices."
                 )
+            validate_camera_pitch_contract(
+                dataset,
+                episode_id,
+                episode_frames,
+                episode_transitions,
+            )
 
             schema_version = str(dataset.get("schema_version", ""))
             schema_is_v8_or_newer = schema_version.endswith(

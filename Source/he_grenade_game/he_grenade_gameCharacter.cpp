@@ -3,6 +3,7 @@
 #include "he_grenade_gameCharacter.h"
 
 #include "Animation/AnimInstance.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -159,18 +160,46 @@ void Ahe_grenade_gameCharacter::ProcessCurriculumMovementInput(const float Delta
 		ControlRotation.Yaw
 		+ (YawAxis * FMath::Max(1.0f, ArrowKeyYawRateDegreesPerSecond) * DeltaSeconds));
 
-	const float SafeMinPitch = FMath::Min(MinimumCameraPitchDegrees, MaximumCameraPitchDegrees);
-	const float SafeMaxPitch = FMath::Max(MinimumCameraPitchDegrees, MaximumCameraPitchDegrees);
+	float SafeMinPitch = 0.0f;
+	float SafeMaxPitch = 0.0f;
+	GetCurriculumCameraPitchLimits(SafeMinPitch, SafeMaxPitch);
 	ControlRotation.Pitch = FMath::Clamp(
 		FRotator::NormalizeAxis(
 			ControlRotation.Pitch
-			+ (PitchAxis * FMath::Max(1.0f, ArrowKeyPitchRateDegreesPerSecond) * DeltaSeconds)),
+			+ (PitchAxis * GetCurriculumCameraPitchRateDegreesPerSecond() * DeltaSeconds)),
 		SafeMinPitch,
 		SafeMaxPitch);
 	ControlRotation.Roll = 0.0f;
 	PlayerController->SetControlRotation(ControlRotation);
 
 	DoMove(RightAxis, ForwardAxis);
+}
+
+void Ahe_grenade_gameCharacter::GetCurriculumCameraPitchLimits(
+	float& OutMinimum,
+	float& OutMaximum) const
+{
+	OutMinimum = MinimumCameraPitchDegrees;
+	OutMaximum = MaximumCameraPitchDegrees;
+	if (const APlayerController* PlayerController =
+			Cast<APlayerController>(GetController()))
+	{
+		if (const APlayerCameraManager* CameraManager =
+				PlayerController->PlayerCameraManager)
+		{
+			OutMinimum = CameraManager->ViewPitchMin;
+			OutMaximum = CameraManager->ViewPitchMax;
+		}
+	}
+	if (OutMinimum > OutMaximum)
+	{
+		Swap(OutMinimum, OutMaximum);
+	}
+}
+
+float Ahe_grenade_gameCharacter::GetCurriculumCameraPitchRateDegreesPerSecond() const
+{
+	return FMath::Max(1.0f, ArrowKeyPitchRateDegreesPerSecond);
 }
 
 void Ahe_grenade_gameCharacter::SetCurriculumActionOverride(

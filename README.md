@@ -338,6 +338,9 @@ Command-line values such as `-Stage=`, `-Episodes=`, `-EpisodeSeconds=`,
 `-StorageFormat=`, `-WebPEffort=`, and `-Output=` override the JSON
 configuration.
 
+Use `-EpisodeIndices=0+18+19+30` to regenerate only specific deterministic
+episode indices while preserving their original seeds, IDs, and policy choices.
+
 Focused mission validation can additionally use:
 
 - `-Mission=semi_markov|object_view|contact_recovery|ramp_traverse|hoop_pass`
@@ -793,15 +796,19 @@ Camera coverage must include:
 - full yaw coverage
 - camera-only and camera-plus-movement states
 
-Camera pitch is not sampled uniformly. The finalized automated observation-frame
-targets are:
+Camera pitch is not sampled uniformly. The active Unreal
+`PlayerCameraManager` is the authoritative pitch contract; its current limits
+are -70 degrees downward and +80 degrees upward. The character, generator,
+metadata writer, and validator read those runtime limits rather than maintaining
+a second independent range. The finalized automated observation-frame targets
+are:
 
-| Absolute camera pitch | Band | Target |
+| Camera pitch | Band | Target |
 | --- | --- | ---: |
-| 0–15 degrees | eye height | 75% |
-| over 15–40 degrees | moderate | 20% |
-| over 40–70 degrees | extreme | 4% |
-| over 70–85 degrees | near limit | 1% |
+| -15 to +15 degrees | eye height | 75% |
+| -40 to -15 or +15 to +40 degrees | moderate | 20% |
+| -60 to -40 or +40 to +70 degrees | extreme | 4% |
+| -70 to -60 or +70 to +80 degrees | near engine limit | 1% |
 
 Across the 450,000 automated frames in the initial mixture, those quotas are
 337,500 eye-height, 90,000 moderate, 18,000 extreme, and 4,500 near-limit
@@ -816,6 +823,33 @@ has filled its current frame budget it steers back toward eye height even if a
 long movement hold is still active. This prevents a rare steep target from
 accidentally becoming several seconds of near-limit footage. Contradictory
 ArrowUp+ArrowDown examples are preserved and have zero effective pitch axis.
+
+An arrow action at an engine pitch boundary legitimately produces no additional
+camera motion. `dataset.json` records the effective pitch minimum, maximum, and
+action rate. Camera metadata uses the normalized post-engine controller
+rotation that the action contract updates. `SceneCapture2D` still copies the
+engine camera component transform for RGB capture; that component is not used
+as action metadata because Unreal can update it at a different point in the
+frame. Validation checks every transition against the recorded pitch action,
+fixed step, and engine-limit saturation.
+
+A focused regression regenerated only deterministic episode indices 0, 18, 19,
+and 30 with `-EpisodeIndices=0+18+19+30`. These were the clean control and the
+three cases that exposed the former controller/camera-limit discrepancy. The
+lossless-WebP/Parquet result contained 2,404 observations and 2,400 transitions.
+All four episodes passed full validation with zero pitch-contract mismatches and
+zero maximum numerical error. The formerly inspected transitions were:
+
+| Episode | Transition | Recorded pitch | Pitch action | Expected pitch |
+| --- | ---: | ---: | ---: | ---: |
+| `w210-e000000` | 0 to 1 | 0 to 0 | 0 | 0 |
+| `w210-e000018` | 0 to 1 | -29.069036 to -25.319036 | +1 | -25.319036 |
+| `w210-e000019` | 0 to 1 | 37.657810 to 41.407810 | +1 | 41.407810 |
+| `w210-e000030` | 369 to 370 | -60 to -60 | 0 | -60 |
+
+The generated MP4 reviews also decoded and played normally. This regression
+confirms that the fix preserves Unreal's camera behavior while aligning action
+metadata with the same engine-authoritative pitch limits.
 
 Collision behavior:
 
@@ -1398,11 +1432,12 @@ Audited workflow state:
 | Scale collection | blocked by the preceding production-format gates | use one worker on this PC |
 
 The current packaged build accepts stage, worker ID, seed start, episode count
-and duration, output directory, observation rate, and render resolution. It does
-not yet accept a seed range, episode range, shard-size target, resume token, or
-batch manifest. GPU assignment is not required: local collection will use this
-one PC, its single RTX 4060, and one generator process. A future local launcher
-must allocate disjoint seed ranges across sequential runs; the generator does
+and duration, an explicit `+`-separated episode-index list, output directory,
+observation rate, and render resolution. It does not yet accept a contiguous
+seed/episode range, shard-size target, resume token, or batch manifest. GPU
+assignment is not required: local collection will use this one PC, its single
+RTX 4060, and one generator process. A future local launcher must allocate
+disjoint seed ranges across sequential runs; the generator does
 not currently enforce that separation itself.
 
 ### Current same-GPU worker benchmark
