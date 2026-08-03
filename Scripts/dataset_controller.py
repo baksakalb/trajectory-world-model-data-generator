@@ -194,6 +194,7 @@ def create_plan(args: argparse.Namespace) -> None:
         "width": args.width,
         "height": args.height,
         "storage_format": args.storage_format,
+        "seed_start": args.seed_start,
         "active_recipe_count": active_count,
     }
     plan_id = args.plan_id or stable_id("plan", plan_identity)

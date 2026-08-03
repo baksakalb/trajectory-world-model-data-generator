@@ -18,7 +18,9 @@ import dataset_controller as controller
 import dataset_worker as worker
 
 
-def plan_args(root: Path, *, budget: int = 25000, workers: int = 1) -> Namespace:
+def plan_args(
+    root: Path, *, budget: int = 25000, workers: int = 1, seed_start: int = 1000
+) -> Namespace:
     return Namespace(
         collection=root,
         frame_budget=budget,
@@ -30,15 +32,19 @@ def plan_args(root: Path, *, budget: int = 25000, workers: int = 1) -> Namespace
         height=64,
         storage_format="webp_parquet",
         webp_effort=0,
-        seed_start=1000,
+        seed_start=seed_start,
         split="train",
         plan_id=None,
     )
 
 
-def create(root: Path, *, budget: int = 25000, workers: int = 1) -> None:
+def create(
+    root: Path, *, budget: int = 25000, workers: int = 1, seed_start: int = 1000
+) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
-        controller.create_plan(plan_args(root, budget=budget, workers=workers))
+        controller.create_plan(
+            plan_args(root, budget=budget, workers=workers, seed_start=seed_start)
+        )
 
 
 class ControllerContractTests(unittest.TestCase):
@@ -96,6 +102,17 @@ class ControllerContractTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "infeasible"):
                 create(Path(temporary) / "bad", budget=minimum - 1)
+
+    def test_seed_changes_immutable_plan_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            first = base / "first"
+            second = base / "second"
+            create(first, seed_start=1000)
+            create(second, seed_start=1001)
+            first_plan = controller.read_json(first / "plan" / "collection-plan.json")
+            second_plan = controller.read_json(second / "plan" / "collection-plan.json")
+            self.assertNotEqual(first_plan["plan_id"], second_plan["plan_id"])
 
     def test_duplicate_validated_result_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
