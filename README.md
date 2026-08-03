@@ -20,10 +20,9 @@ controls, build workflow, data contract, collection policy, and remaining work.
 
 ## Project-level design record
 
-This section is the short, repository-level explanation of what the project is,
-which decisions are final, how the first dataset will be collected, and which
-production work is still pending. The later sections are the detailed
-authoritative specification.
+This section is the short repository-level explanation of what the project is,
+what works now, which production decisions are frozen, and what must be built
+next. The later sections are the detailed authoritative specification.
 
 ### What the project trains
 
@@ -54,47 +53,49 @@ after Movement V1 passes its model-training gates.
 | Physics | fixed-step simulation; grenade physics uses 120 Hz in V2/V3 |
 | Controls | ten canonical Boolean bits: W, A, S, D, four arrows, Q, and E |
 | Environment | one fixed, deterministic arena layout for an entire episode |
-| Initial dataset | 500,000 accepted Movement V1 observations |
-| Automated/human split | 450,000 automated observations and 50,000 human observations |
-| Evaluation reserve | approximately 10%, using disjoint replay keys and whole human sessions |
+| First production source | automated Movement V1 only; human capture is deferred |
+| Production size and mixture | numeric quotas are frozen in an immutable collection plan only after the Windows and Linux controller pilots pass |
+| Evaluation reserve | assigned before collection through disjoint prescribed recipe identities |
 | Automated behavior | frame-balanced semi-Markov play plus object, contact, ramp, and hoop missions |
 | Replay | exact replay keys, explicit categorical scenario cells, stratified continuous values, and stateless jitter |
+| Production scheduling | one central controller prescribes immutable episode recipes; workers do not select production missions independently |
+| Distributed execution | one synchronous generator process per GPU; scale with separate RunPod workers rather than multiple processes on one GPU |
+| Work boundary | one assignment block produces one shard; interrupted partial shards are discarded and the assignment is retried |
+| Controller ledger | immutable plans, recipes, assignments, attempts, and validated results on persistent storage; derived progress can be rebuilt |
 | Guided movement | canonical action bits only after spawn; no mid-episode teleport, camera snap, velocity correction, or hidden steering |
 | Object attention | movement path and camera gaze are independent; orbiting never requires keeping the object centered or visible |
 | Mission ending | success is latched, followed by 0.75-1.50 seconds of coherent, varied continuation |
 | Ordinary collision | useful contact remains, but continuous contact is bounded and followed by a world-space escape |
 | Balancing | successful pre-success observation frames, not episode counts |
-| Failed missions | retained as diagnostics and excluded from the accepted training mixture by default |
+| Failed missions | a valid semantic failure resolves its recipe, remains diagnostic, receives no intended coverage credit, and never causes an infinite retry loop |
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
-| Local execution | one generator process on this PC and its single RTX 4060 |
-| Production storage target | lossless WebP plus typed Parquet metadata in approximately 500 MB-1 GB tar shards |
+| Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
+| Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
+| Platform order | prove the controller and prescribed pipeline on the working Windows baseline before Linux and RunPod deployment |
 
-The 500,000 observations equal approximately 6.94 hours of simulated experience
-at 20 Hz. Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet
-production path are implemented. A paired 19,232-observation pilot measures the
+Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet production
+path are implemented on Windows. A paired 19,232-observation pilot measures the
 actual storage and generation tradeoff below; the production encoder defaults to
 its fastest lossless effort because higher lossless effort was not useful for
-this collection workload.
+this collection workload. Central prescribed scheduling, assignment/result
+tracking, and Linux packaging are not implemented yet.
 
 ### First-dataset collection plan
 
-The accepted Movement V1 mixture is:
-
-| Source or mission | Observations | Share |
-| --- | ---: | ---: |
-| seeded semi-Markov natural play | 275,000 | 55% |
-| object view/navigation | 100,000 | 20% |
-| deliberate contact and recovery | 25,000 | 5% |
-| ramp traversal | 25,000 | 5% |
-| hoop passage | 25,000 | 5% |
-| human keyboard play | 50,000 | 10% |
-| **total** | **500,000** | **100%** |
+The first production dataset is automated Movement V1. Its exact accepted-frame
+target and nested quotas are intentionally not frozen while the controller is
+still unimplemented. They will be recorded in an immutable, versioned
+`collection-plan.json` after the Windows and Linux prescribed-generation toy
+pilots pass.
+That plan must allocate semi-Markov, object-view, contact/recovery, ramp, and hoop
+coverage; enumerate the required discrete cells and continuous strata; assign
+disjoint train/evaluation recipe identities; and reserve a bounded set of makeup
+recipes for valid semantic failures.
 
 These sources serve different purposes. Semi-Markov play supplies broad,
 coherent action transitions. Guided missions guarantee rare geometry and
-interaction coverage. Human play contributes natural hesitation, corrections,
-attention changes, and combinations that scripted behavior may miss. No one
-source substitutes for the others.
+interaction coverage. Human capture is deliberately outside the first
+production scope and may be added as a later, separately versioned source.
 
 Finite mission choices are enumerated instead of left to chance. Object
 missions cover all five objects, approach/observe, pass-by, partial/full orbit,
@@ -115,12 +116,12 @@ semi-Markov wall/object contact uses a short sampled dwell followed by an
 explicit escape, preventing long blocked holds without deleting useful
 collision and sliding examples.
 
-Production assembly continues sequentially until accepted frame quotas are met.
-Only clean episode/sequence boundaries may be used for trimming or splitting.
-The evaluation reserve uses disjoint automated replay keys and whole human
-sessions to prevent temporal leakage. Distribution reports, shard checksums,
-deterministic replay checks, mission-semantic validation, and visual review are
-required before the serious collection is accepted.
+The central controller dispatches immutable recipe blocks until accepted-frame
+quotas are met, a bounded reserve is exhausted, or a coverage bucket is explicitly
+marked blocked. Only clean episode/sequence boundaries may be used for final
+selection. Distribution reports, shard checksums, deterministic replay checks,
+mission-semantic validation, and visual review are required before the serious
+collection is accepted.
 
 ### Implemented now versus still pending
 
@@ -135,13 +136,20 @@ Implemented and validated now:
 - paired-format benchmarking and exact decoded-pixel/metadata comparison
 - focused, mixed, stress, replay, 384 x 384 video, and all-frame mission QA
 
-Still required before producing the 500,000-frame dataset:
+Still required before serious automated Movement V1 production:
 
-- target-size shard rollover and resumable episode-boundary batching
-- asynchronous frame-ID-keyed GPU readback and a new one-process benchmark
-- capture-only human keyboard collection in the same schema
-- complete action, spatial, contact, duplication, and storage reports
-- a small trainer/model smoke test
+- add immutable prescribed episode-recipe input to the Windows generator
+- implement the central controller, assignment blocks, worker wrapper, and
+  reconstructable persistent ledger
+- implement bounded semantic-failure handling, technical retry, interruption,
+  graceful-stop, and duplicate-result rules
+- run and evaluate a fast Windows toy collection, including interruption and
+  deterministic replay tests
+- freeze the numerical production plan only after the Windows and Linux gates
+  pass
+- add Linux libwebp support, package Linux x86-64, and validate on RunPod
+- implement complete action, spatial, contact, duplication, and storage reports
+- run a small trainer/model smoke test
 
 ## Repository and project lineage
 
@@ -167,20 +175,21 @@ authored source. Unreal regenerates them locally.
 
 ### Audited source lineage
 
-The preserved implementation checkpoints before the finalized schema-v10 policy
-are:
+The preserved implementation checkpoints are:
 
 | Commit | Implemented work |
 | --- | --- |
 | `340d6c5` | fixed Movement V1 arena, canonical keyboard controls, matte curriculum assets, pyramid source/import, minimal HUD, and the first version of this specification |
 | `37cb24d` | accepted lighting, wall/object palette, corrected ramp support geometry, and revised pyramid geometry/import |
 | `b6eee94` | packaged seeded data-generator preflight, all three fixed-map stages, direct tar writing, PNG/JSONL metadata contract, validator/review tool, deterministic replay tests, coverage-guided missions, resolution comparisons, and the same-GPU worker benchmark |
+| `aaf3a21` | finalized schema-v10 automated mission behavior, categorical cells, stratified parameters, mission-semantic validation, post-success continuation, and bounded natural-play collision escape |
+| `486511f` | native lossless-WebP encoding, typed Parquet finalization, cross-format validation, and paired storage benchmark |
+| `892cceb` | engine-authoritative camera pitch alignment and focused deterministic regression |
 
-`b6eee94` is the last packaged-generator preflight checkpoint. This project
-revision extends it with the finalized collection-agent and mission policy
-specified below. No source revision through this document contains a WebP
-encoder, Parquet writer, asynchronous frame-readback path, or shard-rollover
-implementation.
+The current Windows baseline includes the schema-v10 mission policy and the
+one-shard WebP/Parquet production-v1 path. It does not include prescribed episode
+recipes, a central controller, Linux libwebp linkage, a Linux packaged build,
+asynchronous frame readback, or in-process shard rollover.
 
 ## Current status
 
@@ -285,17 +294,22 @@ shard, and derives review MP4s from the stored observations.
 
 Still required before production-scale collection:
 
-- asynchronous GPU RGB readback
-- target-size multi-shard rollover
-- full elevation, projected-size, occlusion, and action-distribution reporting
-- resumable single-process sequential batch launcher for this PC
-- human-play capture mode using the same observation/action contract
+- prescribed episode-recipe execution on the working Windows generator
+- a central controller with immutable plans, assignments, attempts, results,
+  progress reconstruction, bounded semantic-failure handling, and whole-shard
+  technical retry
+- a Windows toy pilot which proves non-overlap, replay, interruption, graceful
+  stop, validation, and progress accounting
+- Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation
+- full elevation, projected-size, occlusion, action, collision-duration, and
+  duplication reporting
 
-The preflight deliberately proves the gameplay loop, synchronization, direct
-sharding, replay, and inspection workflow before those storage and throughput
-upgrades. It does not use screen recording. A same-GPU concurrency experiment
-was also completed and rejected for this desktop; it did not implement
-asynchronous readback or improve the generator itself.
+The current baseline deliberately proves the gameplay loop, synchronization,
+direct sharding, replay, and inspection workflow before distributed orchestration.
+It does not use screen recording. A same-GPU concurrency experiment was also
+completed and rejected for this desktop. The first distributed design therefore
+keeps synchronous capture and scales by running one process on each separate
+RunPod GPU.
 
 ## Packaged generator usage
 
@@ -810,10 +824,8 @@ are:
 | -60 to -40 or +40 to +70 degrees | extreme | 4% |
 | -70 to -60 or +70 to +80 degrees | near engine limit | 1% |
 
-Across the 450,000 automated frames in the initial mixture, those quotas are
-337,500 eye-height, 90,000 moderate, 18,000 extreme, and 4,500 near-limit
-observations. Human pitch is reported separately and is not forcibly corrected;
-the final combined histogram therefore retains natural human variation.
+The final prescribed collection plan converts these percentages into exact frame
+quotas. Selection uses deficits in actual recorded automated observation frames.
 
 Non-eye targets choose downward pitch 58% of the time and upward pitch 42% of
 the time. Eye-height samples are concentrated around level with a -2-degree
@@ -867,32 +879,128 @@ viewpoint statistics to balance future missions. This does not make those fields
 model inputs. A broader spatial visitation report remains part of the separate
 production reporting task.
 
-### Finalized collection-agent and mission policy
+### Frozen centralized production-controller design
 
-Coverage guidance is enabled by default and can be disabled with
+The current automatic policy is implemented and remains the Windows reference
+and QA path, but it is not the final distributed production scheduler. Production
+uses one central controller and simple replaceable workers.
+
+Before production begins, the controller writes an immutable, versioned
+collection plan containing the build and container identities, stage and capture
+settings, accepted-frame targets, train/evaluation allocation, discrete scenario
+catalog, continuous parameter strata, intentional repetition rules, and bounded
+reserve recipes. Numerical targets belong to that plan rather than being
+hard-coded into the orchestration layer.
+
+Each prescribed episode recipe contains:
+
+- a globally unique recipe ID and stable replay identity
+- train or evaluation split
+- mission and complete discrete scenario cell
+- continuous stratum indices
+- intentional repetition index
+- plan/schema version
+
+The finite discrete cells cross the already implemented mission dimensions:
+object target, object-view mode, gaze plan, and orbit direction; contact target,
+approach, recovery, and locomotion-facing profile; and ramp/hoop direction, path,
+and facing profile. Repeating a cell is permitted only through an explicit new
+recipe and repetition index. Generating the same recipe ID twice is a retry or a
+duplicate attempt, never new coverage.
+
+The controller prescribes continuous strata rather than duplicating Unreal's
+geometry code. Unreal derives the actual value with the existing named stateless
+jitter inside the scenario's validated range and records every realized value.
+It must not sample broadly and repair invalid geometry by clamping. A recipe that
+cannot construct valid geometry is a recorded configuration/semantic result.
+
+The controller is the sole assignment authority. It groups recipes into
+assignment blocks, assigns each block to a physical worker, records attempts and
+heartbeats, imports validated results, updates accepted-frame deficits, dispatches
+predefined reserve recipes, and produces the final shard index. Workers never
+choose production missions and never coordinate directly with one another. A
+recipe's logical worker/replay identity remains fixed across retries; the RunPod
+or PC which executes an attempt is recorded separately.
+
+One assignment block produces one shard through one packaged Unreal invocation.
+The worker finalizes Parquet, performs complete validation, computes the checksum,
+publishes the shard, and writes an immutable result. The assignment size is a
+configuration chosen after benchmarking; correctness does not depend on a
+specific megabyte target. There is no in-process multi-shard rollover and no
+partial-shard salvage in the first production design.
+
+The persistent ledger uses ordinary immutable files rather than a distributed
+database:
+
+```text
+collection/
+  plan/collection-plan.json
+  plan/recipes.jsonl
+  assignments/assignment-000001.json
+  attempts/assignment-000001/attempt-000001/
+  results/assignment-000001.json
+  shards/
+  controller-snapshot.json
+  inventory.json
+```
+
+Plans, recipes, assignments, attempt records, and validated results are
+authoritative. Snapshots and inventories are derived and must be reconstructable
+by scanning those immutable records. Workers write only inside their unique
+attempt directories. A controller restart therefore cannot lose the definition
+of completed or remaining work.
+
+Result handling is explicit:
+
+| Result | Controller action |
+| --- | --- |
+| valid mission success | resolve the recipe and credit qualifying pre-success frames to its intended coverage bucket |
+| valid semantic mission failure | resolve the recipe as failed, retain it as diagnostic data, give it no intended coverage credit, and consider the next predefined reserve recipe |
+| technical failure | do not resolve the recipe; retry it after the technical problem is corrected |
+| interrupted assignment | reject the partial shard and retry the same assignment in a new attempt |
+| duplicate validated attempt | accept one result and mark the other redundant |
+
+Semantic failure is never retried without limit. Every coverage bucket has a
+finite base recipe set, finite reserve set, and explicit failure allowance. If
+its reserve is exhausted, that bucket becomes `coverage_blocked` while unrelated
+work continues. Resolving it requires a documented code/configuration fix or a
+new plan amendment; the controller never silently deletes or substitutes the
+requirement.
+
+Accepted-frame quotas measure successful qualifying pre-success observations.
+Post-success continuation and technically valid semantic failures remain
+authoritative stored transition data but are tracked separately. The final
+training index selects the approved mixture at clean episode or sequence
+boundaries. Semi-Markov episodes have no guided semantic objective; technically
+valid completed observations receive their ordinary policy credit.
+
+A graceful stop prevents new assignments and lets active blocks finalize. An
+immediate stop leaves an attempt without a validated result, so the controller
+can identify and reassign it. At all times the inventory must report planned,
+undispatched, active, validated, failed, interrupted, blocked, and remaining work,
+plus accepted frames by coverage bucket and every published shard checksum.
+
+The first implementation keeps synchronous `ReadPixels` and runs one generator
+process per GPU. Additional throughput comes from separate RunPod workers using
+the same packaged build, container, and preferably GPU class. Assignments are
+movable and should be distributed so a mission family is not permanently
+correlated with one renderer or machine.
+
+### Implemented automatic collection-agent and mission policy
+
+Coverage guidance is implemented and enabled by default in the current automatic
+Windows path. It can be disabled with
 `coverage_guided: false` or `-NoCoverageGuided`. A guided mission may choose the
 episode's initial valid spawn and camera offset. After frame zero it never
 teleports, snaps the camera, changes velocity, or applies anything outside the
 canonical action bits. Privileged state only selects those bits, balances future
 episodes, measures success, and records diagnostics.
 
-The final 500,000-frame accepted Movement V1 dataset mixture, before the
-train/evaluation split, is frozen as:
-
-| Source or mission | Final frames | Final share | Simulated time at 20 Hz |
-| --- | ---: | ---: | ---: |
-| seeded semi-Markov | 275,000 | 55% | 3 h 49 m 10 s |
-| object view/navigation | 100,000 | 20% | 1 h 23 m 20 s |
-| contact and recovery | 25,000 | 5% | 20 m 50 s |
-| ramp traversal | 25,000 | 5% | 20 m 50 s |
-| hoop passage | 25,000 | 5% | 20 m 50 s |
-| human keyboard capture | 50,000 | 10% | 41 m 40 s |
-| **total** | **500,000** | **100%** | **6 h 56 m 40 s** |
-
-Human capture is a separate pending input path. The automated generator therefore
-normalizes its five implemented mission weights to 61.111%, 22.222%, 5.556%,
-5.556%, and 5.556% of automated observation frames. Mission selection uses the
-largest deficit in accepted successful observation frames, not episode counts.
+The automatic reference policy currently normalizes its five implemented mission
+weights to 61.111% semi-Markov, 22.222% object view, and 5.556% each contact,
+ramp, and hoop. These are implementation defaults and QA evidence, not the final
+distributed collection plan. Automatic mission selection uses the largest
+deficit in accepted successful observation frames, not episode counts.
 Early-success episodes therefore do not underweight their mission merely because
 they are shorter. Every tenth episode remains a forced canonical-spawn
 semi-Markov reference unless an explicit QA override is supplied.
@@ -918,7 +1026,7 @@ pitch offsets in [-6, 6] degrees.
 #### Object view/navigation
 
 Object-view frames are balanced equally across the rectangle, pyramid, sphere,
-hoop, and ramp: 20,000 accepted frames per target in the 500,000-frame mixture.
+hoop, and ramp.
 The scheduler first balances the submode by accepted frames, then chooses the
 largest-deficit complete scenario cell inside that mode. There are 120 cells:
 20 approach, 20 pass-by, 40 partial-orbit, and 40 full-orbit combinations. Each
@@ -926,12 +1034,12 @@ cell fixes target and gaze pattern; orbit cells additionally fix direction.
 This hierarchical choice prevents short runs from becoming blocks of only one
 mode while still converging to the frozen frame targets:
 
-| Submode | Object-view share | Frames in the 500k mixture | Requirement |
-| --- | ---: | ---: | --- |
-| approach and observe | 40% | 40,000 | reach the sampled view point and keep the target visibly verified for 0.5–1.5 seconds |
-| pass by | 35% | 35,000 | traverse a long chord while accumulating 0.3–1.0 seconds of verified visibility |
-| partial orbit | 20% | 20,000 | visit 4-7 seeded position azimuth bins |
-| full orbit | 5% | 5,000 | visit all 12 position azimuth bins |
+| Submode | Object-view share | Requirement |
+| --- | ---: | --- |
+| approach and observe | 40% | reach the sampled view point and keep the target visibly verified for 0.5–1.5 seconds |
+| pass by | 35% | traverse a long chord while accumulating 0.3–1.0 seconds of verified visibility |
+| partial orbit | 20% | visit 4-7 seeded position azimuth bins |
+| full orbit | 5% | visit all 12 position azimuth bins |
 
 Camera gaze is separate from translation. The scenario still records one of
 four reproducible plan templates—target center, target offset, travel direction,
@@ -986,8 +1094,7 @@ without teaching that orbiting requires camera lock.
 #### Contact and recovery
 
 Contact frames are balanced equally across nine targets: all five learning
-objects and the north, south, east, and west walls. The 25,000-frame allocation
-uses 2,777 or 2,778 accepted frames per target. The base scheduler has 135
+objects and the north, south, east, and west walls. The base scheduler has 135
 target x recovery x approach cells: nine targets, five recovery styles, and
 direct/glance-left/glance-right approaches. Each base cell has five
 locomotion-facing children, producing 675 complete categorical cells. The five
@@ -1018,8 +1125,8 @@ Movement always follows the world-space path through camera-relative WASD.
 
 #### Ramp traversal
 
-Ramp frames are split 50/50: 12,500 accepted frames each for uphill and downhill
-traversal. The complete scheduler contains 30 direction x path x facing cells:
+Ramp frames are split 50/50 between uphill and downhill traversal. The complete
+scheduler contains 30 direction x path x facing cells:
 two directions, center/diagonal-left-to-right/diagonal-right-to-left paths, and
 the same five locomotion-facing profiles used by contact. Center versus the two
 diagonal paths target 50/25/25 accepted frames; facing targets are
@@ -1042,8 +1149,8 @@ and the two strafes occupy the corresponding 90-degree sectors.
 
 #### Hoop passage
 
-Hoop frames are split 50/50: 12,500 accepted frames in each direction. Its 30
-complete cells cross both directions, center/oblique-left-to-right/
+Hoop frames are split 50/50 between passage directions. Its 30 complete cells
+cross both directions, center/oblique-left-to-right/
 oblique-right-to-left paths, and all five locomotion-facing profiles. The path
 and facing shares, unseen-cell pass, and realized-facing gate match the ramp
 policy. Each episode performs exactly one natural passage—never rapid repeated
@@ -1190,23 +1297,15 @@ the same 663 tar member names and byte-identical payloads. Episode, transition,
 frame, and RGB records all matched exactly. Global replay stratification and
 per-parameter mixing therefore add coverage without weakening exact replay.
 
-### Planned human-play collection
+### Deferred human-play collection
 
-The user will also play the game and contribute human-generated trajectories.
-Human data complements rather than replaces guided and semi-Markov data:
-
-- guided missions guarantee rare geometry and interaction coverage
-- seeded semi-Markov play supplies broad canonical-action transitions
-- human play supplies natural navigation, hesitation, corrections, attention,
-  and action combinations that scripted policies may underrepresent
-
-A capture-only human mode still needs to be implemented. It must disable the
-action override, record the same 20 Hz RGB/action/state alignment, write the same
-authoritative shard format, and tag every episode with a distinct
-`human_keyboard` collection policy and session ID. Human and automated episodes
-must remain identifiable so mixture weights can be changed during training.
-Whole human sessions—not neighboring clips from one session—must be assigned to
-train or held-out evaluation to avoid temporal leakage.
+Human keyboard capture is not part of the first production implementation or a
+gate for automated Movement V1 collection. If added later, it must be introduced
+as a separately versioned source, preserve the same 20 Hz RGB/action/state
+alignment and authoritative shard contract, and remain identifiable by collection
+policy and session ID. Whole sessions—not neighboring clips—must remain within a
+single train or evaluation split. No current automated quota reserves space for
+human data.
 
 ## Dataset schema
 
@@ -1243,6 +1342,14 @@ train or held-out evaluation to avoid temporal leakage.
 - natural-play collision-escape count and maximum consecutive contact steps
 - termination reason
 - shard and checksum information
+
+The prescribed-controller schema extension must additionally record the
+collection-plan ID/version, recipe ID, assignment ID, attempt ID, stable logical
+worker/replay identity, physical executor ID, train/evaluation split, prescribed
+discrete cell, prescribed continuous stratum indices, intentional repetition
+index, technical result, semantic result, coverage-credit decision, and any
+plan-amendment ID. These fields are pending and are not present in the current
+automatic Windows schema-v10 output.
 
 ### Per observation
 
@@ -1348,9 +1455,13 @@ and finalization separately, validates both outputs, and calls
 `Scripts/compare_dataset_formats.py` to compare every normalized metadata record
 and every decoded RGBA pixel.
 
-Target-size 500 MB-1 GB rollover, atomic multi-shard closing, and resumable
-episode-boundary batching remain the next storage increment. Review MP4s already
-decode either PNG or WebP members from the authoritative tar.
+The centralized design keeps the proven one-shard-per-Unreal-invocation format.
+The controller groups prescribed recipes into an assignment of configurable
+size, and the worker publishes that shard only after finalization and validation.
+Interrupted partial shards are retried as whole assignments. In-process
+target-size rollover and partial-shard continuation are deliberately not required
+for the first production dataset. Review MP4s already decode either PNG or WebP
+members from the authoritative tar.
 
 ### PNG/JSONL versus lossless-WebP/Parquet benchmark
 
@@ -1423,22 +1534,27 @@ Audited workflow state:
 | Package a Win64 Development generator | complete preflight | bounded packaged runs and automatic exit validated |
 | Validate preflight alignment and shard integrity | complete | PNG/JSONL validator, checksums, review MP4s, comparison runs, and mission-validation runs |
 | Benchmark safe processes on the desktop GPU | complete; parallel result rejected | three workers on the same RTX 4060 were far slower than one |
-| Freeze production mission behavior and mixture | complete | 55/20/5/5/5/10 final mix; 120 object cells; 135 contact base/675 full cells; 30 ramp and 30 hoop cells; explicit bidirectional paths; five locomotion-facing profiles; six post-success styles; schema-v10 focused, stress, video, and all-frame QA |
+| Freeze mission semantics and coverage dimensions | complete | 120 object cells; 135 contact base/675 full cells; 30 ramp and 30 hoop cells; explicit bidirectional paths; five locomotion-facing profiles; six post-success styles; schema-v10 focused, stress, video, and all-frame QA |
 | Implement lossless WebP and Parquet tar payloads | complete production v1 | native libwebp observations, explicit PyArrow schemas, tar append finalization, checksums, validation, review, and exact equivalence tool |
-| Add target-size rollover and resumable sequential batching | pending | current writer and validator require exactly one shard per run |
-| Implement asynchronous frame-ID-keyed GPU readback | pending | current capture blocks in `ReadPixels` |
 | Run the production-format 32-episode pilot | complete | paired PNG/JSONL and WebP/Parquet run: 19,232 observations, identical seeds/settings, exhaustive decoded-pixel and metadata equivalence |
-| Add complete distribution reports and human capture | pending | mission/mode/target/direction/pitch summaries exist; broader action, spatial, contact-duration, duplicate, and human reports remain |
-| Scale collection | blocked by the preceding production-format gates | use one worker on this PC |
+| Freeze centralized prescribed-controller architecture | complete design | immutable plans and recipes; controller-owned assignments; one assignment/one shard; reconstructable ledger; bounded semantic failure; whole-shard technical retry |
+| Update README to the controller architecture | complete design checkpoint | documentation is committed before generator/controller implementation |
+| Implement prescribed recipe input on Windows | pending | current generator still selects missions internally and does not accept an assignment/recipe manifest |
+| Implement controller, worker wrapper, and ledger | pending | no central assignment, attempt, result, interruption, or inventory implementation exists yet |
+| Run the Windows controller toy pilot | pending | must prove success/failure semantics, non-overlap, exact retry, interruption, graceful stop, validation, and reconstructed progress |
+| Freeze numeric production plan | pending | accepted-frame targets and nested quotas are deliberately deferred until the Windows and Linux pilots pass |
+| Package and validate Linux x86-64 | pending after Windows gate | add Linux libwebp linkage, package the synchronous build, and validate it on RunPod |
+| Add complete distribution reports | pending | mission/mode/target/direction/pitch summaries exist; broader action, spatial, contact-duration, duplicate, and storage reports remain |
+| Scale collection | blocked by controller, Windows toy, Linux, and reporting gates | RunPod workers will execute centrally prescribed assignment blocks |
 
 The current packaged build accepts stage, worker ID, seed start, episode count
 and duration, an explicit `+`-separated episode-index list, output directory,
 observation rate, and render resolution. It does not yet accept a contiguous
-seed/episode range, shard-size target, resume token, or batch manifest. GPU
-assignment is not required: local collection will use this one PC, its single
-RTX 4060, and one generator process. A future local launcher must allocate
-disjoint seed ranges across sequential runs; the generator does
-not currently enforce that separation itself.
+seed/episode range, prescribed recipe manifest, assignment ID, attempt ID, plan
+ID, split, or physical executor ID. It also does not enforce global recipe
+uniqueness. Those are the next Windows implementation changes. The central
+controller—not each generator process—will own global assignment and coverage
+accounting.
 
 ### Current same-GPU worker benchmark
 
@@ -1466,12 +1582,11 @@ Three Unreal rendering/capture processes therefore showed severe negative
 scaling on this specific PC. They competed for the same RTX 4060 while each
 worker also blocked on synchronous GPU readback and performed lossless PNG
 compression. The experiment did not demonstrate useful same-GPU parallelism.
-Production collection on this machine must run one generator process at a time.
-Multi-GPU scheduling and GPU selection are outside the local project scope
-because this is the only collection PC and it has one GPU. Re-test local
-concurrency only if the capture architecture changes substantially; do not
-assume asynchronous readback or WebP/Parquet will make multiple local workers
-beneficial.
+Collection on one machine/GPU must run one generator process at a time. The
+failed same-GPU experiment does not argue against separate RunPod workers with
+separate GPUs. The centralized design scales across machines while retaining the
+synchronous reference capture path; asynchronous readback is deferred and is not
+a gate for the first production dataset.
 
 ## Validation requirements
 
@@ -1510,6 +1625,21 @@ Generation fails if:
 - a sampled mission start, goal, or recovery goal lies on the old +/-1450 cm
   repair boundary
 
+The centralized prescribed pipeline additionally fails validation if:
+
+- a result references an unknown plan, recipe, assignment, or attempt
+- a physical executor changes a recipe's stable logical replay identity
+- two accepted results claim the same recipe ID
+- a shard contains an episode not listed in its assignment
+- a prescribed categorical cell or continuous stratum differs from realized
+  metadata without an explicit recorded configuration error
+- a technical or interrupted attempt is credited toward coverage
+- a semantic failure receives intended guided-mission coverage credit
+- a semantic-failure reserve exceeds its plan-defined bound
+- train and evaluation recipes share a replay identity
+- controller progress cannot be reconstructed from immutable records
+- a published result lacks full validation and a matching shard checksum
+
 Automatic reports must include:
 
 - action and action-combination frequencies
@@ -1528,30 +1658,31 @@ Automatic reports must include:
 
 Data-volume rollout:
 
-1. Approximately 10,000 frames for trainer and schema smoke tests.
-2. Implement coverage, pitch, action, collision, duplicate-frame, and
-   human-versus-automated mixture reports.
-3. Generate a serious initial Movement V1 dataset of approximately 500,000
-   frames at the working 384 × 384 candidate resolution.
-4. Reserve approximately 10% using disjoint seeds/sessions for held-out
-   evaluation.
-5. Train and inspect multi-step rollouts before extending Movement V1 toward one
+1. Run the fast prescribed-controller toy plan on the working Windows baseline.
+2. Reproduce that toy plan with the packaged Linux build on RunPod.
+3. Generate approximately 10,000 frames for trainer, schema, controller,
+   interruption, and report smoke tests.
+4. Implement coverage, pitch, action, collision, duplicate-frame, controller,
+   attempt, and storage reports.
+5. Freeze the serious Movement V1 accepted-frame target in the immutable
+   production collection plan.
+6. Reserve the chosen held-out share using disjoint prescribed recipe identities.
+7. Train and inspect multi-step rollouts before extending Movement V1 toward one
    million frames.
-6. Add V2 trajectory data and then V3 throw data only after the preceding
+8. Add V2 trajectory data and then V3 throw data only after the preceding
    curriculum gate passes.
 
-At 20 Hz, 500,000 frames represent approximately 6.94 simulated hours. With the
-current lossless PNG preflight this is estimated at roughly 70–75 GB and seven
-to eight hours of single-worker desktop generation. One million frames represent
-approximately 13.9 simulated hours and 140–150 GB before the planned lossless
-WebP/storage improvements.
+At 20 Hz, 500,000 frames would represent approximately 6.94 simulated hours, but
+that value is now a planning reference rather than a frozen production target.
+The measured WebP/Parquet benchmark below, not the older PNG estimate, must be
+used when sizing the eventual RunPod plan and persistent storage.
 
 The working training budget is approximately USD 100 using RunPod for storage
 and training. This rules out retaining thousands of hours or multi-terabyte
 lossless datasets for the first iteration. Collection must be coverage-driven,
-resumable, and evaluated incrementally. The tested desktop configuration uses
-one generator process total; the three-worker same-GPU benchmark was severely
-slower than sequential generation.
+centrally accounted, interruption-safe, and evaluated incrementally. Each GPU
+uses one synchronous generator process; scale comes from separate centrally
+controlled RunPod workers.
 
 ## Curriculum evaluation gates
 
@@ -1604,40 +1735,40 @@ or encoder.
 
 The authoritative storage conversion is complete for one-shard production-v1
 runs: native lossless WebP, typed Parquet, manifest/checksum updates, validation,
-review, benchmarking, and exact cross-format comparison are implemented. The
-next storage task is target-size shard rollover plus resumable
-episode-boundary continuation.
+review, benchmarking, and exact cross-format comparison are implemented on
+Windows. The automatic schema-v10 mission behavior is also implemented and
+validated. It uses named stateless parameters, enumerated categorical cells,
+stratified valid geometry, measurable outcomes, canonical action bits only, no
+mid-episode state correction, generic no-progress/time-limit failures,
+accepted-frame balancing, and natural endpoint-tail completion.
 
-Asynchronous frame-ID-keyed GPU readback is the next capture-throughput upgrade
-around that storage work. The failed three-worker RTX 4060 experiment is not a
-substitute for it and does not change the one-process-at-a-time rule for this PC.
+The Windows baseline does not yet implement the frozen centralized production
+architecture. The next code checkpoint is therefore not asynchronous readback or
+in-process shard rollover. It is prescribed episode-recipe execution plus the
+central controller and persistent assignment/result ledger, while retaining the
+current synchronous one-shard generator as the trusted capture baseline.
 
-The production mission behavior and mixture are now frozen. The implementation
-uses named stateless parameters, enumerated categorical cells, stratified valid
-geometry, measurable outcomes, canonical action bits only, no mid-episode state
-correction, generic no-progress/time-limit failures, accepted-frame balancing,
-and natural endpoint-tail completion. It covers all five objects, all four
-walls, both orbit directions, both ramp directions, both hoop directions, four
-object-view submodes, four object-gaze patterns, five contact recovery styles,
-three contact approach profiles, three ramp paths, three hoop paths, five
-locomotion-facing profiles, four free-attention camera styles, and six
-post-success continuation styles. Orbit
-movement and camera gaze are explicitly decoupled. Ramp and hoop path selection
-is crossed with facing rather than inferred from camera style. Hoop episodes
-use one long natural pass with an interpolated crossing test. Guided success is
-latched and followed by 0.75-1.50 seconds of coherent natural play; ordinary
-semi-Markov wall/object dwell is bounded by the deterministic escape policy.
+Immediate implementation order:
 
-The policy intentionally balances observation frames rather than promising an
-exact episode schedule. A production batch must keep generating sequential
-episodes until each accepted frame quota is filled, exclude failed diagnostic
-episodes during assembly, and trim only at clean sequence boundaries.
+1. Commit this README design checkpoint before changing generator behavior.
+2. Add an optional prescribed recipe/assignment manifest to the Windows
+   generator without removing the automatic QA path.
+3. Add controller and worker tools which create immutable plans, recipes,
+   assignments, attempts, results, inventories, and whole-shard retries.
+4. Extend metadata and validation with plan/recipe/assignment/attempt identities,
+   prescribed-versus-realized checks, split isolation, duplicate rejection, and
+   semantic-versus-technical result handling.
+5. Run a fast Windows toy plan that includes ordinary successes, a controlled
+   semantic failure, interruption/retry, graceful stop, replay, non-overlap,
+   finalization, checksum validation, and inventory reconstruction.
+6. Evaluate the stored RGB and metadata and commit/push the working Windows
+   controller checkpoint only after every toy gate passes.
+7. Add Linux libwebp linkage, package Linux x86-64, and reproduce the toy plan on
+   RunPod persistent storage.
+8. Freeze the numerical production plan after the Windows and Linux evidence
+   exists, then authorize only the staged data-volume rollout above.
 
-Before the 500,000-frame Movement V1 collection:
-
-- implement target-size shard rollover and resumable sequential batches
-- implement asynchronous frame-ID-keyed GPU readback and re-benchmark one worker
-- implement human keyboard capture in the same authoritative schema
-- implement complete coverage and distribution reports
-- run a small mixed-policy pilot with disjoint held-out seeds and human sessions
-- train the smoke model before authorizing the serious 500,000-frame run
+Deferred work which is not a first-dataset gate includes asynchronous GPU
+readback, in-process multi-shard rollover, partial-shard salvage, multiple
+processes on one GPU, and human keyboard capture. Complete distribution reports
+and the trainer/model smoke test remain required before serious collection.
