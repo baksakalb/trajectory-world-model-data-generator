@@ -51,6 +51,12 @@ private:
 		Throw = 3
 	};
 
+	enum class EStorageFormat : uint8
+	{
+		PngJsonl,
+		WebPParquet
+	};
+
 	enum class ECoverageMission : uint8
 	{
 		SemiMarkov,
@@ -309,6 +315,7 @@ private:
 	int32 ObservationRate = 20;
 	int32 CaptureWidth = 256;
 	int32 CaptureHeight = 256;
+	int32 WebPLosslessEffort = 0;
 	int32 CooldownRemainingSteps = 0;
 	int32 NextGrenadeId = 0;
 	int32 NextThrowRequestFrame = 0;
@@ -422,6 +429,7 @@ private:
 	float HeldCameraPitchTargetDegrees = 0.0f;
 	float CoverageDistanceToGoalAtSuccessCm = 0.0f;
 	ECurriculumStage CurriculumStage = ECurriculumStage::Movement;
+	EStorageFormat StorageFormat = EStorageFormat::PngJsonl;
 	ECoverageMission CoverageMission = ECoverageMission::SemiMarkov;
 	EObjectViewMode ObjectViewMode = EObjectViewMode::ApproachObserve;
 	EObjectGazePattern ObjectGazePattern = EObjectGazePattern::TargetCenter;

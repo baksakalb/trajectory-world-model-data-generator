@@ -7,6 +7,7 @@
   "observation_rate_hz": 20,
   "rgb_width": 320,
   "rgb_height": 320,
+  "storage_format": "png_jsonl",
   "exit_on_complete": true,
   "coverage_guided": true
 }

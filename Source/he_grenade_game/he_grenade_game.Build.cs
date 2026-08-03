@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class he_grenade_game : ModuleRules
@@ -26,6 +27,19 @@ public class he_grenade_game : ModuleRules
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
+
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			string LibWebPRoot = Path.Combine(ModuleDirectory, "..", "..", "ThirdParty", "libwebp");
+			PublicSystemIncludePaths.Add(Path.Combine(LibWebPRoot, "include"));
+			PublicAdditionalLibraries.Add(Path.Combine(LibWebPRoot, "lib", "Win64", "libwebp.lib"));
+			PublicAdditionalLibraries.Add(Path.Combine(LibWebPRoot, "lib", "Win64", "libsharpyuv.lib"));
+			PublicDefinitions.Add("CURRICULUM_WITH_LIBWEBP=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("CURRICULUM_WITH_LIBWEBP=0");
+		}
 
 		PublicIncludePaths.AddRange(new string[] {
 			"he_grenade_game",

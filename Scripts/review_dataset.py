@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import shutil
 import struct
@@ -73,6 +74,38 @@ def read_json_lines(tar: tarfile.TarFile, name: str) -> list[dict[str, Any]]:
     return records
 
 
+def read_parquet_records(
+    tar: tarfile.TarFile, name: str, *, episodes: bool = False
+) -> list[dict[str, Any]]:
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as error:
+        raise DatasetValidationError(
+            "PyArrow is required to validate Parquet metadata. Install "
+            "Scripts/requirements-production.txt."
+        ) from error
+
+    extracted = tar.extractfile(name)
+    if extracted is None:
+        raise DatasetValidationError(f"Missing required metadata entry: {name}")
+    try:
+        records = pq.read_table(pa.BufferReader(extracted.read())).to_pylist()
+    except (pa.ArrowException, OSError) as error:
+        raise DatasetValidationError(f"Could not read {name}: {error}") from error
+    if episodes:
+        for record in records:
+            try:
+                record["mission_parameters"] = json.loads(
+                    record.pop("mission_parameters_json")
+                )
+            except (KeyError, json.JSONDecodeError) as error:
+                raise DatasetValidationError(
+                    f"{name}: invalid mission_parameters_json"
+                ) from error
+    return records
+
+
 def md5_file(path: Path) -> str:
     digest = hashlib.md5(usedforsecurity=False)
     with path.open("rb") as stream:
@@ -110,6 +143,30 @@ def png_dimensions(stream: BinaryIO) -> tuple[int, int]:
     if len(header) != 24 or header[:8] != PNG_SIGNATURE or header[12:16] != b"IHDR":
         raise DatasetValidationError("Observation is not a valid PNG stream.")
     return struct.unpack(">II", header[16:24])
+
+
+def image_dimensions(stream: BinaryIO, rgb_format: str) -> tuple[int, int]:
+    if rgb_format == "lossless_png":
+        return png_dimensions(stream)
+    if rgb_format == "lossless_webp":
+        try:
+            from PIL import Image
+        except ImportError as error:
+            raise DatasetValidationError(
+                "Pillow is required to validate WebP observations."
+            ) from error
+        try:
+            with Image.open(io.BytesIO(stream.read())) as image:
+                if image.format != "WEBP":
+                    raise DatasetValidationError(
+                        "Observation is not a valid WebP stream."
+                    )
+                return image.size
+        except OSError as error:
+            raise DatasetValidationError(
+                f"Observation is not a valid WebP stream: {error}"
+            ) from error
+    raise DatasetValidationError(f"Unsupported RGB format: {rgb_format}")
 
 
 def validate_final_agent_mission(
@@ -912,9 +969,21 @@ def validate_dataset(
 
     with tarfile.open(shard_path, mode="r:") as tar:
         names = {member.name for member in tar.getmembers() if member.isfile()}
-        frames = read_json_lines(tar, "metadata/frames.jsonl")
-        transitions = read_json_lines(tar, "metadata/transitions.jsonl")
-        episodes = read_json_lines(tar, "metadata/episodes.jsonl")
+        metadata_format = str(dataset.get("metadata_format", ""))
+        if metadata_format == "jsonl":
+            frames = read_json_lines(tar, "metadata/frames.jsonl")
+            transitions = read_json_lines(tar, "metadata/transitions.jsonl")
+            episodes = read_json_lines(tar, "metadata/episodes.jsonl")
+        elif metadata_format == "parquet":
+            frames = read_parquet_records(tar, "frames.parquet")
+            transitions = read_parquet_records(tar, "transitions.parquet")
+            episodes = read_parquet_records(
+                tar, "episodes.parquet", episodes=True
+            )
+        else:
+            raise DatasetValidationError(
+                f"Unsupported metadata format: {metadata_format}"
+            )
 
         if len(frames) != int(dataset["observation_count"]):
             raise DatasetValidationError(
@@ -971,7 +1040,12 @@ def validate_dataset(
 
             schema_version = str(dataset.get("schema_version", ""))
             schema_is_v8_or_newer = schema_version.endswith(
-                ("-preflight-8", "-preflight-9", "-preflight-10")
+                (
+                    "-preflight-8",
+                    "-preflight-9",
+                    "-preflight-10",
+                    "-production-1",
+                )
             )
             if (
                 dataset.get("collection_policy")
@@ -990,6 +1064,7 @@ def validate_dataset(
                         "-preflight-8",
                         "-preflight-9",
                         "-preflight-10",
+                        "-production-1",
                     )
                 )
             ):
@@ -998,9 +1073,11 @@ def validate_dataset(
                     episode_frames,
                     strict_v8=schema_is_v8_or_newer,
                     strict_v9=schema_version.endswith(
-                        ("-preflight-9", "-preflight-10")
+                        ("-preflight-9", "-preflight-10", "-production-1")
                     ),
-                    strict_v10=schema_version.endswith("-preflight-10"),
+                    strict_v10=schema_version.endswith(
+                        ("-preflight-10", "-production-1")
+                    ),
                     observation_rate_hz=int(dataset.get("observation_rate_hz", 20)),
                 )
 
@@ -1010,7 +1087,9 @@ def validate_dataset(
                     raise DatasetValidationError(
                         f"Could not read observation: {frame['rgb_key']}"
                     )
-                dimensions = png_dimensions(extracted)
+                dimensions = image_dimensions(
+                    extracted, str(dataset.get("rgb_format", ""))
+                )
                 if dimensions != (expected_width, expected_height):
                     raise DatasetValidationError(
                         f"{frame['rgb_key']}: dimensions {dimensions} != "
@@ -1019,7 +1098,12 @@ def validate_dataset(
             records_by_episode[episode_id] = episode_frames
 
         if str(dataset.get("schema_version", "")).endswith(
-            ("-preflight-8", "-preflight-9", "-preflight-10")
+            (
+                "-preflight-8",
+                "-preflight-9",
+                "-preflight-10",
+                "-production-1",
+            )
         ):
             validate_run_distributions(dataset, episodes)
 
@@ -1048,6 +1132,7 @@ def render_episode(
     output_path: Path,
     frame_records: list[dict[str, Any]],
     fps: int,
+    image_codec: str,
 ) -> None:
     command = [
         str(ffmpeg),
@@ -1060,7 +1145,7 @@ def render_episode(
         "-framerate",
         str(fps),
         "-vcodec",
-        "png",
+        image_codec,
         "-i",
         "pipe:0",
         "-an",
@@ -1153,6 +1238,9 @@ def main() -> int:
                     output_path,
                     frame_records,
                     int(dataset["observation_rate_hz"]),
+                    "webp"
+                    if dataset.get("rgb_format") == "lossless_webp"
+                    else "png",
                 )
                 rendered.append(
                     {

@@ -70,10 +70,11 @@ after Movement V1 passes its model-training gates.
 | Production storage target | lossless WebP plus typed Parquet metadata in approximately 500 MB-1 GB tar shards |
 
 The 500,000 observations equal approximately 6.94 hours of simulated experience
-at 20 Hz. The currently implemented PNG/JSONL preflight is estimated at roughly
-70-75 GB and seven to eight hours of local single-process generation. The final
-lossless-WebP size and throughput are deliberately not promised before the
-production-format pilot measures them.
+at 20 Hz. Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet
+production path are implemented. A paired 19,232-observation pilot measures the
+actual storage and generation tradeoff below; the production encoder defaults to
+its fastest lossless effort because higher lossless effort was not useful for
+this collection workload.
 
 ### First-dataset collection plan
 
@@ -130,16 +131,17 @@ Implemented and validated now:
 - the finalized schema-v10 automated mission and natural-play policy
 - post-success continuation and bounded natural-play collision escape
 - direct PNG/JSONL tar preflight output, checksums, validation, and MP4 review
+- native lossless-WebP tar observations and typed Parquet metadata
+- paired-format benchmarking and exact decoded-pixel/metadata comparison
 - focused, mixed, stress, replay, 384 x 384 video, and all-frame mission QA
 
 Still required before producing the 500,000-frame dataset:
 
-- lossless-WebP observations and typed Parquet metadata inside tar shards
 - target-size shard rollover and resumable episode-boundary batching
 - asynchronous frame-ID-keyed GPU readback and a new one-process benchmark
 - capture-only human keyboard collection in the same schema
 - complete action, spatial, contact, duplication, and storage reports
-- a production-format pilot and a small trainer/model smoke test
+- a small trainer/model smoke test
 
 ## Repository and project lineage
 
@@ -236,8 +238,14 @@ The current project revision retains that preflight path and adds:
 - privileged per-frame viewpoint, mission-phase, pitch-band, and verified
   interaction counters
 - per-episode mission forcing for focused tests and inspection
+- selectable `png_jsonl` and `webp_parquet` storage paths
+- native libwebp lossless observation encoding directly into the tar
+- explicit typed PyArrow schemas for frame, transition, and episode Parquet
+  payloads, appended to the tar without copying or re-encoding its observations
+- validation and review support for both image/metadata formats
+- exhaustive PNG-versus-WebP decoded-pixel and normalized-metadata comparison
 
-The checked-in preflight data path is specifically:
+The retained reference/preflight data path is:
 
 ```text
 player camera
@@ -248,14 +256,21 @@ player camera
   -> one directly written tar shard per worker run
 ```
 
-Frame images are appended to the tar as they are produced. Frame, transition,
-and episode records are currently accumulated as JSONL strings in memory and
-added to the same tar when the run finishes. `dataset.json` and `checksums.md5`
-are written beside the shard. The current validator deliberately requires
-exactly one shard, checks its MD5, record counts, frame/transition continuity,
-PNG dimensions, and observation presence, and can pipe those stored PNGs to
-FFmpeg to create review MP4s. The generator refuses to overwrite an output
-directory that already contains `dataset.json`.
+The production path uses the same capture and alignment logic, but sends the
+captured BGRA pixels through native lossless libwebp and writes `.webp` members
+directly into the tar. It stages the three metadata streams beside the tar;
+`Scripts/finalize_production_dataset.py` converts them with explicit PyArrow
+schemas, appends `frames.parquet`, `transitions.parquet`, `episodes.parquet`, and
+`manifest.json`, updates `dataset.json` and the MD5, and removes staging files
+only after success. This split keeps Arrow out of the Unreal runtime while
+avoiding an image-copy or re-encode pass.
+
+`Scripts/review_dataset.py` validates either format, including checksum, record
+counts, frame/transition continuity, image dimensions, and observation presence,
+and derives review MP4s only from the authoritative tar observations. The
+generator refuses to overwrite an output directory that already contains
+`dataset.json`. Production v1 still deliberately supports exactly one shard per
+run.
 
 The generator now supports all three fixed-map curriculum stages from one
 executable:
@@ -268,16 +283,9 @@ executable:
 three stages at both 320 × 320 and 384 × 384, validates every authoritative
 shard, and derives review MP4s from the stored observations.
 
-The next storage task is replacing the preflight PNG/JSONL payload with lossless
-WebP and Parquet metadata while preserving the already-proven frame/action
-alignment and tar-first workflow. That conversion is not present in the current
-implementation.
-
 Still required before production-scale collection:
 
 - asynchronous GPU RGB readback
-- lossless WebP encoding in place of PNG
-- Parquet frame, transition, and episode metadata in place of JSONL
 - target-size multi-shard rollover
 - full elevation, projected-size, occlusion, and action-distribution reporting
 - resumable single-process sequential batch launcher for this PC
@@ -289,7 +297,7 @@ upgrades. It does not use screen recording. A same-GPU concurrency experiment
 was also completed and rejected for this desktop; it did not implement
 asynchronous readback or improve the generator itself.
 
-## Packaged generator preflight usage
+## Packaged generator usage
 
 The packaged folder contains:
 
@@ -298,6 +306,7 @@ he_grenade_game.exe
 Generate_Small_Pilot.bat
 generator-config.json
 Tools/review_dataset.py
+Tools/finalize_production_dataset.py
 ```
 
 Edit `generator-config.json` to select:
@@ -308,11 +317,13 @@ Edit `generator-config.json` to select:
 - worker ID
 - observation rate
 - RGB dimensions
+- storage format and lossless-WebP effort
 - output directory
 - whether `coverage_guided` collection is enabled
 
 Double-click `Generate_Small_Pilot.bat` to run the configured pilot. The default
-configuration produces two deterministic ten-second episodes and then exits.
+configuration produces two deterministic ten-second production-format episodes,
+finalizes Parquet metadata, validates the result, and then exits.
 
 The equivalent direct command is:
 
@@ -322,9 +333,10 @@ he_grenade_game.exe -GenerateDataset
   -RenderOffscreen -unattended -nosound -NoSplash -NoVSync
 ```
 
-Command-line values such as `-Stage=`, `-Episodes=`, `-EpisodeSeconds=`, `-SeedStart=`,
-`-WorkerId=`, `-ObservationRate=`, `-Width=`, `-Height=`, and `-Output=` override
-the JSON configuration.
+Command-line values such as `-Stage=`, `-Episodes=`, `-EpisodeSeconds=`,
+`-SeedStart=`, `-WorkerId=`, `-ObservationRate=`, `-Width=`, `-Height=`,
+`-StorageFormat=`, `-WebPEffort=`, and `-Output=` override the JSON
+configuration.
 
 Focused mission validation can additionally use:
 
@@ -364,16 +376,17 @@ the frame-balanced training collection.
 trajectory visibility and controlled camera motion. Its dataset metadata is
 marked `inspection_only_trajectory_showcase`; it must not be mixed into training.
 
-Validate a completed run with:
+Finalize and validate a production run with:
 
 ```text
+python Tools/finalize_production_dataset.py GeneratedData/small-pilot
 python Tools/review_dataset.py GeneratedData/small-pilot --validate-only
 ```
 
 To derive review videos, install FFmpeg and omit `--validate-only`, optionally
-passing `--ffmpeg="C:\path\to\ffmpeg.exe"`. The converter reads every PNG directly
-from the authoritative shard in frame-index order. It never renders a second
-gameplay pass.
+passing `--ffmpeg="C:\path\to\ffmpeg.exe"`. The converter reads every PNG or WebP
+directly from the authoritative shard in frame-index order. It never renders a
+second gameplay pass.
 
 ## Canonical action interface
 
@@ -1251,13 +1264,17 @@ V1 retains the complete schema with deterministic defaults:
 - crosshair state = Neutral
 - cooldown remaining = 0
 
-## Production storage target — not yet implemented
+## Production storage format
 
-The current preflight already avoids a millions-of-files dataset by writing PNG
-frames and JSONL metadata directly into one tar. The active upgrade keeps that
-tar-first architecture while changing the payload to the production format and
-adding rollover. Until that work lands, PNG/JSONL remains the only implemented
-and validated format.
+The generator supports two selectable formats:
+
+- `png_jsonl`: the retained reference/preflight path
+- `webp_parquet`: native lossless-WebP observations followed by typed Parquet
+  finalization
+
+Set `storage_format` in the generator config or pass
+`-StorageFormat=png_jsonl|webp_parquet`. The production path also accepts
+`webp_lossless_effort` or `-WebPEffort=0..9`; the measured default is `0`.
 
 Target structure:
 
@@ -1270,24 +1287,92 @@ movement_v1/
   ...
 ```
 
-Each approximately 500 MB–1 GB tar shard contains:
+Each completed production-v1 tar contains:
 
 - lossless WebP RGB frames
 - `frames.parquet`
 - `transitions.parquet`
 - `episodes.parquet`
-- shard manifest and checksum
+- `manifest.json`; the shard MD5 is recorded beside it
 
 WebDataset-style tar shards avoid millions of filesystem entries while retaining
 exact frame access. Ordinary MP4 files may be produced separately for human
 review, but are not the authoritative training source because temporal codecs
 complicate exact frame access and introduce inter-frame artifacts.
 
-The production writer and validator must support multiple approximately
-500 MB–1 GB shards, close each shard atomically, record every shard in
-`dataset.json`, and resume only at a clean episode/shard boundary. Review MP4s
-must continue to be derived from the authoritative stored observations, now by
-decoding WebP members rather than reading PNG members.
+After the packaged generator exits successfully, finalize and validate a
+production run:
+
+```powershell
+python Scripts/finalize_production_dataset.py <dataset-directory>
+python Scripts/review_dataset.py <dataset-directory> --validate-only
+```
+
+`Scripts/benchmark_storage_formats.py` runs both formats with identical stage,
+seeds, episodes, duration, resolution, and observation rate. It times capture
+and finalization separately, validates both outputs, and calls
+`Scripts/compare_dataset_formats.py` to compare every normalized metadata record
+and every decoded RGBA pixel.
+
+Target-size 500 MB-1 GB rollover, atomic multi-shard closing, and resumable
+episode-boundary batching remain the next storage increment. Review MP4s already
+decode either PNG or WebP members from the authoritative tar.
+
+### PNG/JSONL versus lossless-WebP/Parquet benchmark
+
+The paired packaged-build benchmark used one process, Movement V1 forced
+semi-Markov play, 32 episodes of 30 seconds, seeds 61001-61032, 384 x 384 RGB at
+20 Hz, and the same worker/configuration for both formats. That produced 19,200
+transitions and 19,232 observations representing 960 simulated seconds.
+
+| Metric | PNG + JSONL | lossless WebP effort 0 + Parquet | Production change |
+| --- | ---: | ---: | ---: |
+| Native capture | 692.947 s | 437.223 s | -36.90% |
+| Parquet finalization | 0 s | 5.371 s | +5.371 s |
+| End-to-end generation | 692.947 s | 442.593 s | **-36.13% (1.566x faster)** |
+| Simulated seconds / wall second | 1.385 | 2.169 | +56.57% |
+| Shard bytes | 2,794,387,968 | 2,002,821,120 | -28.33% |
+| Complete dataset-directory bytes | 2,794,391,532 | 2,002,825,925 | **-28.33%** |
+| Bytes / observation | 145,299 | 104,140 | -28.33% |
+| Validation | 12.719 s | 13.696 s | +0.977 s |
+
+The Parquet members total only 636,972 bytes
+(`frames.parquet` 589,281, `transitions.parquet` 30,122, and
+`episodes.parquet` 17,569), so image encoding dominates both storage and
+generation time. Exhaustive comparison decoded all 19,232 PNG/WebP pairs to
+RGBA and compared every normalized frame, transition, and episode record. They
+were identical; the aggregate decoded-RGBA SHA-256 was
+`dcbc53c837cf15f7397a8603d698e2440bac711433185cfea825b163dadf0218`.
+
+An initial higher-effort lossless-WebP run reached 1,597,987,496 bytes
+(42.81% below PNG) but took 3,703.748 seconds end to end, or 5.35x the PNG time.
+That tradeoff was rejected. Effort 0 is therefore the production default: it is
+about 25.33% larger than that higher-effort WebP output, but 88.05% faster and
+also faster than PNG.
+
+WebP lossless effort changes encoder search time and compressed size, not image
+quality. Effort 0 and the higher-effort result both decode to exactly the same
+integer RGB pixels as PNG. The exhaustive comparison above confirms this for
+every benchmark observation. Effort 0 was selected because it preserves that
+lossless guarantee while improving both generation throughput and storage size
+relative to PNG; higher effort spends much more CPU to find a smaller encoding
+of those same pixels.
+
+### Training-time representation
+
+PNG and WebP are storage encodings, not the representation consumed by the
+model. A training loader reads a WebP member from its tar shard, decodes it to a
+`uint8` RGB array shaped `[height, width, 3]`, converts it to a PyTorch tensor
+shaped `[channels, height, width]`, and then applies the model's selected numeric
+dtype and normalization. Because lossless PNG and lossless WebP decode to the
+same RGB integers, the same loader preprocessing produces identical training
+tensors.
+
+Parquet supplies the aligned frame, action, episode, and privileged-state
+records. A one-step training example therefore pairs the decoded RGB tensor for
+`observation[t]` and the action tensor for `action[t]` with the decoded target
+tensor for `observation[t+1]`. Multi-step examples extend that same aligned
+sequence; the compressed image format is no longer relevant after decoding.
 
 ## Packaged build-first workflow
 
@@ -1305,10 +1390,10 @@ Audited workflow state:
 | Validate preflight alignment and shard integrity | complete | PNG/JSONL validator, checksums, review MP4s, comparison runs, and mission-validation runs |
 | Benchmark safe processes on the desktop GPU | complete; parallel result rejected | three workers on the same RTX 4060 were far slower than one |
 | Freeze production mission behavior and mixture | complete | 55/20/5/5/5/10 final mix; 120 object cells; 135 contact base/675 full cells; 30 ramp and 30 hoop cells; explicit bidirectional paths; five locomotion-facing profiles; six post-success styles; schema-v10 focused, stress, video, and all-frame QA |
-| Implement lossless WebP and Parquet tar payloads | **active next implementation** | no checked-in implementation yet |
+| Implement lossless WebP and Parquet tar payloads | complete production v1 | native libwebp observations, explicit PyArrow schemas, tar append finalization, checksums, validation, review, and exact equivalence tool |
 | Add target-size rollover and resumable sequential batching | pending | current writer and validator require exactly one shard per run |
 | Implement asynchronous frame-ID-keyed GPU readback | pending | current capture blocks in `ReadPixels` |
-| Run the production-format 32-episode pilot | pending | schema-v10 PNG/JSONL mission, post-success, collision-stress, and 60-video validations exist; the WebP/Parquet production-format pilot does not |
+| Run the production-format 32-episode pilot | complete | paired PNG/JSONL and WebP/Parquet run: 19,232 observations, identical seeds/settings, exhaustive decoded-pixel and metadata equivalence |
 | Add complete distribution reports and human capture | pending | mission/mode/target/direction/pitch summaries exist; broader action, spatial, contact-duration, duplicate, and human reports remain |
 | Scale collection | blocked by the preceding production-format gates | use one worker on this PC |
 
@@ -1482,17 +1567,11 @@ or encoder.
 
 ### Active implementation checkpoint
 
-Work has moved from proving the generator to upgrading its authoritative storage
-path. The immediate coding task is:
-
-1. encode every authoritative RGB observation as lossless WebP instead of PNG
-2. replace the three JSONL metadata streams with typed
-   `frames.parquet`, `transitions.parquet`, and `episodes.parquet`
-3. keep the exact `observation[t]`, `action[t]`, `observation[t+1]` alignment and
-   deterministic replay behavior already validated by the preflight
-4. update `dataset.json`, shard manifests, checksums, validation, and MP4 review
-   generation for the new payload
-5. add target-size shard rollover and resumable episode-boundary continuation
+The authoritative storage conversion is complete for one-shard production-v1
+runs: native lossless WebP, typed Parquet, manifest/checksum updates, validation,
+review, benchmarking, and exact cross-format comparison are implemented. The
+next storage task is target-size shard rollover plus resumable
+episode-boundary continuation.
 
 Asynchronous frame-ID-keyed GPU readback is the next capture-throughput upgrade
 around that storage work. The failed three-worker RTX 4060 experiment is not a
@@ -1521,7 +1600,6 @@ episodes during assembly, and trim only at clean sequence boundaries.
 
 Before the 500,000-frame Movement V1 collection:
 
-- finish and validate the active lossless WebP + Parquet tar-shard conversion
 - implement target-size shard rollover and resumable sequential batches
 - implement asynchronous frame-ID-keyed GPU readback and re-benchmark one worker
 - implement human keyboard capture in the same authoritative schema

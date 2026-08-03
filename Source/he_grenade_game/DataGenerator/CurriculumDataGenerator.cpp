@@ -31,6 +31,10 @@
 #include "he_grenade_gameCharacter.h"
 #include "he_grenade_gameGameMode.h"
 
+#if CURRICULUM_WITH_LIBWEBP
+#include <webp/encode.h>
+#endif
+
 namespace
 {
 	constexpr int32 TarBlockSize = 512;
@@ -670,7 +674,7 @@ void ACurriculumDataGenerator::BeginPlay()
 			*LastError);
 		if (bExitOnComplete)
 		{
-			FGenericPlatformMisc::RequestExit(false);
+			FPlatformMisc::RequestExitWithStatus(false, 1);
 		}
 		return;
 	}
@@ -686,7 +690,7 @@ void ACurriculumDataGenerator::BeginPlay()
 			*LastError);
 		if (bExitOnComplete)
 		{
-			FGenericPlatformMisc::RequestExit(false);
+			FPlatformMisc::RequestExitWithStatus(false, 1);
 		}
 		return;
 	}
@@ -712,14 +716,18 @@ void ACurriculumDataGenerator::BeginPlay()
 	UE_LOG(
 		LogTemp,
 		Display,
-		TEXT("Dataset generator configured: stage %s, %d episode(s), %d transitions each, %d Hz, %dx%d, worker %d."),
+		TEXT("Dataset generator configured: stage %s, %d episode(s), %d transitions each, %d Hz, %dx%d, worker %d, storage %s, WebP effort %d."),
 		*GetStageSlug(),
 		EpisodeCount,
 		TransitionsPerEpisode,
 		ObservationRate,
 		CaptureWidth,
 		CaptureHeight,
-		WorkerId);
+		WorkerId,
+		StorageFormat == EStorageFormat::WebPParquet
+			? TEXT("webp_parquet")
+			: TEXT("png_jsonl"),
+		WebPLosslessEffort);
 }
 
 void ACurriculumDataGenerator::Tick(float DeltaSeconds)
@@ -862,6 +870,26 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 				return false;
 			}
 		}
+		FString StorageFormatValue;
+		if (Config->TryGetStringField(TEXT("storage_format"), StorageFormatValue))
+		{
+			StorageFormatValue.ToLowerInline();
+			if (StorageFormatValue == TEXT("png_jsonl"))
+			{
+				StorageFormat = EStorageFormat::PngJsonl;
+			}
+			else if (StorageFormatValue == TEXT("webp_parquet"))
+			{
+				StorageFormat = EStorageFormat::WebPParquet;
+			}
+			else
+			{
+				LastError = FString::Printf(
+					TEXT("Unknown storage format: %s"),
+					*StorageFormatValue);
+				return false;
+			}
+		}
 		if (Config->TryGetNumberField(TEXT("episodes"), NumberValue))
 		{
 			EpisodeCount = FMath::RoundToInt(NumberValue);
@@ -890,6 +918,10 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 		{
 			CaptureHeight = FMath::RoundToInt(NumberValue);
 		}
+		if (Config->TryGetNumberField(TEXT("webp_lossless_effort"), NumberValue))
+		{
+			WebPLosslessEffort = FMath::RoundToInt(NumberValue);
+		}
 		Config->TryGetStringField(TEXT("output"), OutputDirectory);
 		Config->TryGetStringField(TEXT("mission_override"), MissionOverride);
 		Config->TryGetStringField(TEXT("object_view_mode_override"), ObjectViewModeOverride);
@@ -913,6 +945,7 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	FParse::Value(CommandLine, TEXT("ObservationRate="), ObservationRate);
 	FParse::Value(CommandLine, TEXT("Width="), CaptureWidth);
 	FParse::Value(CommandLine, TEXT("Height="), CaptureHeight);
+	FParse::Value(CommandLine, TEXT("WebPEffort="), WebPLosslessEffort);
 	FParse::Value(CommandLine, TEXT("Mission="), MissionOverride);
 	FParse::Value(CommandLine, TEXT("ObjectViewMode="), ObjectViewModeOverride);
 	FParse::Value(CommandLine, TEXT("CoverageTarget="), CoverageTargetOverride);
@@ -943,6 +976,33 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 			return false;
 		}
 	}
+	FString CommandLineStorageFormat;
+	if (FParse::Value(CommandLine, TEXT("StorageFormat="), CommandLineStorageFormat))
+	{
+		CommandLineStorageFormat.ToLowerInline();
+		if (CommandLineStorageFormat == TEXT("png_jsonl"))
+		{
+			StorageFormat = EStorageFormat::PngJsonl;
+		}
+		else if (CommandLineStorageFormat == TEXT("webp_parquet"))
+		{
+			StorageFormat = EStorageFormat::WebPParquet;
+		}
+		else
+		{
+			LastError = FString::Printf(
+				TEXT("Unknown storage format: %s"),
+				*CommandLineStorageFormat);
+			return false;
+		}
+	}
+#if !CURRICULUM_WITH_LIBWEBP
+	if (StorageFormat == EStorageFormat::WebPParquet)
+	{
+		LastError = TEXT("This platform was built without libwebp support.");
+		return false;
+	}
+#endif
 	if (!FParse::Value(CommandLine, TEXT("BuildRevision="), BuildRevision))
 	{
 		BuildRevision = FApp::GetBuildVersion();
@@ -953,6 +1013,7 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	ObservationRate = FMath::Clamp(ObservationRate, 1, 120);
 	CaptureWidth = FMath::Clamp(CaptureWidth, 64, 4096);
 	CaptureHeight = FMath::Clamp(CaptureHeight, 64, 4096);
+	WebPLosslessEffort = FMath::Clamp(WebPLosslessEffort, 0, 9);
 	TransitionsPerEpisode = EpisodeSeconds * ObservationRate;
 	if (FParse::Param(CommandLine, TEXT("NoExitOnComplete")))
 	{
@@ -1626,37 +1687,70 @@ void ACurriculumDataGenerator::FinishRun(
 	bool bWriteSuccess = bSuccess && TarWriter;
 	if (TarWriter)
 	{
-		const FString Manifest = FString::Printf(
-			TEXT("{\n  \"schema_version\": \"%s\",\n")
-			TEXT("  \"curriculum_version\": \"%s\",\n")
-			TEXT("  \"complete\": %s,\n  \"worker_id\": %d,\n")
-			TEXT("  \"episode_count\": %d,\n  \"transition_count\": %d,\n")
-			TEXT("  \"observation_count\": %d,\n  \"image_format\": \"png\",\n")
-			TEXT("  \"metadata_format\": \"jsonl\"\n}\n"),
-			*GetStageSchemaVersion(),
-			*GetStageSlug(),
-			JsonBool(bSuccess),
-			WorkerId,
-			EpisodeIndex + (bEpisodeActive ? 1 : 0),
-			GlobalTransitionCount,
-			GlobalTransitionCount + EpisodeIndex + (bEpisodeActive ? 1 : 0));
+		if (StorageFormat == EStorageFormat::WebPParquet)
+		{
+			bWriteSuccess =
+				FFileHelper::SaveStringToFile(
+					FramesJsonLines,
+					*FPaths::Combine(OutputDirectory, TEXT(".frames.jsonl.staging")),
+					FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)
+				&& FFileHelper::SaveStringToFile(
+					TransitionsJsonLines,
+					*FPaths::Combine(OutputDirectory, TEXT(".transitions.jsonl.staging")),
+					FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)
+				&& FFileHelper::SaveStringToFile(
+					EpisodesJsonLines,
+					*FPaths::Combine(OutputDirectory, TEXT(".episodes.jsonl.staging")),
+					FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)
+				&& TarWriter->Finalize()
+				&& bWriteSuccess;
+		}
+		else
+		{
+			const FString Manifest = FString::Printf(
+				TEXT("{\n  \"schema_version\": \"%s\",\n")
+				TEXT("  \"curriculum_version\": \"%s\",\n")
+				TEXT("  \"complete\": %s,\n  \"worker_id\": %d,\n")
+				TEXT("  \"episode_count\": %d,\n  \"transition_count\": %d,\n")
+				TEXT("  \"observation_count\": %d,\n  \"image_format\": \"png\",\n")
+				TEXT("  \"metadata_format\": \"jsonl\"\n}\n"),
+				*GetStageSchemaVersion(),
+				*GetStageSlug(),
+				JsonBool(bSuccess),
+				WorkerId,
+				EpisodeIndex + (bEpisodeActive ? 1 : 0),
+				GlobalTransitionCount,
+				GlobalTransitionCount + EpisodeIndex + (bEpisodeActive ? 1 : 0));
 
-		bWriteSuccess =
-			TarWriter->AddTextFile(TEXT("metadata/frames.jsonl"), FramesJsonLines)
-			&& TarWriter->AddTextFile(TEXT("metadata/transitions.jsonl"), TransitionsJsonLines)
-			&& TarWriter->AddTextFile(TEXT("metadata/episodes.jsonl"), EpisodesJsonLines)
-			&& TarWriter->AddTextFile(TEXT("manifest.json"), Manifest)
-			&& TarWriter->Finalize()
-			&& bWriteSuccess;
+			bWriteSuccess =
+				TarWriter->AddTextFile(TEXT("metadata/frames.jsonl"), FramesJsonLines)
+				&& TarWriter->AddTextFile(
+					TEXT("metadata/transitions.jsonl"),
+					TransitionsJsonLines)
+				&& TarWriter->AddTextFile(TEXT("metadata/episodes.jsonl"), EpisodesJsonLines)
+				&& TarWriter->AddTextFile(TEXT("manifest.json"), Manifest)
+				&& TarWriter->Finalize()
+				&& bWriteSuccess;
+		}
 		bTarFinalized = true;
 		delete TarWriter;
 		TarWriter = nullptr;
 	}
 
-	const FString EffectiveError =
-		bWriteSuccess ? ErrorMessage
-		: (ErrorMessage.IsEmpty() ? TEXT("Failed while finalizing dataset output.") : ErrorMessage);
-	const FString DatasetJson = BuildDatasetJson(bWriteSuccess, EffectiveError);
+	const bool bNeedsParquetFinalization =
+		bWriteSuccess && StorageFormat == EStorageFormat::WebPParquet;
+	FString EffectiveError = ErrorMessage;
+	if (bNeedsParquetFinalization)
+	{
+		EffectiveError = TEXT("Parquet finalization required.");
+	}
+	else if (!bWriteSuccess && EffectiveError.IsEmpty())
+	{
+		EffectiveError = TEXT("Failed while finalizing dataset output.");
+	}
+	const FString DatasetJson = BuildDatasetJson(
+		bWriteSuccess && !bNeedsParquetFinalization,
+		EffectiveError);
 	FFileHelper::SaveStringToFile(
 		DatasetJson,
 		*FPaths::Combine(OutputDirectory, TEXT("dataset.json")),
@@ -1680,11 +1774,22 @@ void ACurriculumDataGenerator::FinishRun(
 
 	if (bWriteSuccess)
 	{
-		UE_LOG(
-			LogTemp,
-			Display,
-			TEXT("Dataset generation completed. Output: %s"),
-			*OutputDirectory);
+		if (StorageFormat == EStorageFormat::WebPParquet)
+		{
+			UE_LOG(
+				LogTemp,
+				Display,
+				TEXT("Dataset capture completed; Parquet finalization is required. Output: %s"),
+				*OutputDirectory);
+		}
+		else
+		{
+			UE_LOG(
+				LogTemp,
+				Display,
+				TEXT("Dataset generation completed. Output: %s"),
+				*OutputDirectory);
+		}
 	}
 	else
 	{
@@ -1699,7 +1804,7 @@ void ACurriculumDataGenerator::FinishRun(
 	FApp::SetUseFixedTimeStep(false);
 	if (bExitOnComplete)
 	{
-		FGenericPlatformMisc::RequestExit(false);
+		FPlatformMisc::RequestExitWithStatus(false, bWriteSuccess ? 0 : 1);
 	}
 }
 
@@ -1770,11 +1875,62 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		}
 	}
 
-	TArray64<uint8> CompressedPng;
-	FImageUtils::PNGCompressImageArray(CaptureWidth, CaptureHeight, Pixels, CompressedPng);
 	const FString ImageKey = MakeImageKey(ObservationIndex);
-	if (CompressedPng.IsEmpty()
-		|| !TarWriter->AddFile(ImageKey, CompressedPng.GetData(), CompressedPng.Num()))
+	bool bImageWritten = false;
+	if (StorageFormat == EStorageFormat::WebPParquet)
+	{
+#if CURRICULUM_WITH_LIBWEBP
+		WebPConfig Config;
+		WebPPicture Picture;
+		WebPMemoryWriter Writer;
+		const bool bConfigReady =
+			WebPConfigInit(&Config) != 0
+			&& WebPConfigLosslessPreset(&Config, WebPLosslessEffort) != 0;
+		const bool bPictureReady = WebPPictureInit(&Picture) != 0;
+		if (bConfigReady && bPictureReady)
+		{
+			Picture.use_argb = 1;
+			Picture.width = CaptureWidth;
+			Picture.height = CaptureHeight;
+			Picture.writer = WebPMemoryWrite;
+			Picture.custom_ptr = &Writer;
+			WebPMemoryWriterInit(&Writer);
+			const bool bEncoded =
+				WebPPictureImportBGRA(
+					&Picture,
+					reinterpret_cast<const uint8*>(Pixels.GetData()),
+					CaptureWidth * static_cast<int32>(sizeof(FColor)))
+				&& WebPEncode(&Config, &Picture);
+			if (bEncoded && Writer.mem && Writer.size > 0)
+			{
+				bImageWritten = TarWriter->AddFile(
+					ImageKey,
+					Writer.mem,
+					static_cast<int64>(Writer.size));
+			}
+			WebPMemoryWriterClear(&Writer);
+		}
+		if (bPictureReady)
+		{
+			WebPPictureFree(&Picture);
+		}
+#endif
+	}
+	else
+	{
+		TArray64<uint8> CompressedPng;
+		FImageUtils::PNGCompressImageArray(
+			CaptureWidth,
+			CaptureHeight,
+			Pixels,
+			CompressedPng);
+		bImageWritten = !CompressedPng.IsEmpty()
+			&& TarWriter->AddFile(
+				ImageKey,
+				CompressedPng.GetData(),
+				CompressedPng.Num());
+	}
+	if (!bImageWritten)
 	{
 		LastError = FString::Printf(TEXT("Could not add image to shard: %s"), *ImageKey);
 		return false;
@@ -6116,6 +6272,10 @@ FString ACurriculumDataGenerator::GetStageSlug() const
 
 FString ACurriculumDataGenerator::GetStageSchemaVersion() const
 {
+	if (StorageFormat == EStorageFormat::WebPParquet)
+	{
+		return FString::Printf(TEXT("%s-production-1"), *GetStageSlug());
+	}
 	return FString::Printf(TEXT("%s-preflight-10"), *GetStageSlug());
 }
 
@@ -6126,6 +6286,13 @@ FString ACurriculumDataGenerator::MakeEpisodeId() const
 
 FString ACurriculumDataGenerator::MakeImageKey(const int32 ObservationIndex) const
 {
+	if (StorageFormat == EStorageFormat::WebPParquet)
+	{
+		return FString::Printf(
+			TEXT("episodes/%s/frame-%06d.webp"),
+			*MakeEpisodeId(),
+			ObservationIndex);
+	}
 	return FString::Printf(
 		TEXT("episodes/%s/frame-%06d.png"),
 		*MakeEpisodeId(),
@@ -6235,8 +6402,9 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		TEXT("  \"observation_count\": %d,\n")
 		TEXT("  \"rgb_width\": %d,\n")
 		TEXT("  \"rgb_height\": %d,\n")
-		TEXT("  \"rgb_format\": \"lossless_png\",\n")
-		TEXT("  \"metadata_format\": \"jsonl\",\n")
+		TEXT("  \"rgb_format\": \"%s\",\n")
+		TEXT("  \"metadata_format\": \"%s\",\n")
+		TEXT("  \"webp_lossless_effort\": %d,\n")
 		TEXT("  \"shards\": [\"%s\"]\n")
 		TEXT("}\n"),
 		*GetStageSchemaVersion(),
@@ -6404,5 +6572,12 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		GlobalTransitionCount + CompletedEpisodes,
 		CaptureWidth,
 		CaptureHeight,
+		StorageFormat == EStorageFormat::WebPParquet
+			? TEXT("lossless_webp")
+			: TEXT("lossless_png"),
+		StorageFormat == EStorageFormat::WebPParquet
+			? TEXT("parquet_pending")
+			: TEXT("jsonl"),
+		WebPLosslessEffort,
 		*FPaths::GetCleanFilename(ShardPath));
 }
