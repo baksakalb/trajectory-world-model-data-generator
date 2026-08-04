@@ -89,6 +89,28 @@ exposes only Mesa llvmpipe rather than the RTX 4060 and therefore cannot satisfy
 Unreal's Vulkan SM6 profile. RunPod is the remaining authoritative GPU-runtime
 and rendered-shard gate; the allocation policy must not change there.
 
+### Linux qualification state
+
+The local Linux result separates build correctness from GPU-runtime
+qualification:
+
+- **Proved locally:** the UE 5.8 v26 Clang toolchain compiles and links the
+  Linux target; native static `libwebp` and `libsharpyuv` link successfully; a
+  full Development `BuildCookRun` completes; the packaged x86-64 ELF is valid;
+  Ubuntu 22.04 reports no missing shared libraries; and execution reaches
+  Unreal's rendering initialization.
+- **Not proved locally:** rendered frame capture and Linux WebP/Parquet shard
+  validation. WSL2 on this PC exposes only Mesa `llvmpipe`, a CPU software
+  Vulkan device. It does not expose the RTX 4060 as an Unreal-compatible Vulkan
+  SM6 device, so Unreal stops with `VK_ERROR_INCOMPATIBLE_DRIVER` before the
+  dataset generator begins rendering.
+- **Interpretation:** this is a limitation of the local WSL GPU environment,
+  not evidence of a compile, link, packaging, controller, or libwebp defect.
+- **Next gate:** run the unchanged packaged build and centrally prescribed toy
+  plan on one NVIDIA GPU RunPod, validate its lossless-WebP/typed-Parquet shard,
+  reconstruct controller inventory, and test interruption/resume. Production
+  generation remains blocked until that gate passes.
+
 ### First-dataset collection plan
 
 The first production dataset is automated Movement V1. Its accepted-frame target
