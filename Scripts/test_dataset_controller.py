@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dataset_controller as controller
@@ -19,13 +20,14 @@ import dataset_worker as worker
 
 
 def plan_args(
-    root: Path, *, budget: int = 25000, workers: int = 1, seed_start: int = 1000
+    root: Path, *, budget: int = 350000, workers: int = 1, seed_start: int = 1000
 ) -> Namespace:
     return Namespace(
         collection=root,
         frame_budget=budget,
         workers=workers,
         recipes_per_assignment=32,
+        tail_single_recipes=64,
         episode_seconds=10,
         observation_rate=20,
         width=64,
@@ -33,13 +35,14 @@ def plan_args(
         storage_format="webp_parquet",
         webp_effort=0,
         seed_start=seed_start,
+        duration_calibration=controller.DEFAULT_DURATION_CALIBRATION,
         split="train",
         plan_id=None,
     )
 
 
 def create(
-    root: Path, *, budget: int = 25000, workers: int = 1, seed_start: int = 1000
+    root: Path, *, budget: int = 350000, workers: int = 1, seed_start: int = 1000
 ) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         controller.create_plan(
@@ -60,9 +63,9 @@ class ControllerContractTests(unittest.TestCase):
             active_one = [recipe for recipe in recipes_one if recipe["active"]]
             active_four = [recipe for recipe in recipes_four if recipe["active"]]
             self.assertEqual(active_one, active_four)
-            self.assertEqual(len(active_one), sum(controller.MISSION_COUNTS.values()))
+            self.assertGreater(len(active_one), sum(controller.MISSION_COUNTS.values()))
             self.assertEqual(
-                len({(recipe["mission"], recipe["scenario_index"]) for recipe in active_one}),
+                len({(recipe["mission"], recipe["scenario_index"]) for recipe in active_one[: sum(controller.MISSION_COUNTS.values())]}),
                 sum(controller.MISSION_COUNTS.values()),
             )
 
@@ -71,8 +74,8 @@ class ControllerContractTests(unittest.TestCase):
             base = Path(temporary)
             small = base / "small"
             large = base / "large"
-            create(small, budget=25000)
-            create(large, budget=300000)
+            create(small, budget=controller.minimum_feasible_frame_budget() + 1000)
+            create(large, budget=350000)
             fields = (
                 "recipe_index",
                 "episode_index",
@@ -92,16 +95,64 @@ class ControllerContractTests(unittest.TestCase):
 
     def test_infeasible_budget_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            minimum = (
-                controller.MISSION_COUNTS["semi_markov"] * 201
-                + sum(
-                    controller.MISSION_COUNTS[mission]
-                    for mission in controller.GUIDED_MISSIONS
-                )
-                * 17
-            )
+            minimum = controller.minimum_feasible_frame_budget()
             with self.assertRaisesRegex(ValueError, "infeasible"):
                 create(Path(temporary) / "bad", budget=minimum - 1)
+
+    def test_planned_frame_distribution_and_nested_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "collection"
+            create(root, budget=350000)
+            plan = controller.read_json(root / "plan" / "collection-plan.json")
+            recipes = controller.read_jsonl(root / "plan" / "recipes.jsonl")[: plan["base_recipe_count"]]
+            expected = {
+                mission: sum(recipe["expected_credited_frames"] for recipe in recipes if recipe["mission"] == mission)
+                for mission in controller.MISSION_COUNTS
+            }
+            total = sum(expected.values())
+            for mission, target in controller.MISSION_FRAME_SHARES.items():
+                self.assertAlmostEqual(expected[mission] / total, float(target), delta=0.002)
+
+            object_recipes = [recipe for recipe in recipes if recipe["mission"] == "object_view"]
+            modes = {}
+            for recipe in object_recipes:
+                mode = recipe["cell"]["mode"]
+                modes[mode] = modes.get(mode, 0.0) + recipe["expected_credited_frames"]
+            object_frames = sum(modes.values())
+            for mode, target in controller.OBJECT_MODE_SHARES.items():
+                self.assertAlmostEqual(modes[mode] / object_frames, float(target), delta=0.012)
+
+            contact = [recipe for recipe in recipes if recipe["mission"] == "contact_recovery"]
+            facings = {}
+            for recipe in contact:
+                facing = recipe["cell"]["facing"]
+                facings[facing] = facings.get(facing, 0.0) + recipe["expected_credited_frames"]
+            contact_frames = sum(facings.values())
+            for facing, target in controller.FACING_SHARES.items():
+                self.assertAlmostEqual(facings[facing] / contact_frames, float(target), delta=0.012)
+
+    def test_nested_feasibility_and_tail_assignment_boundary(self) -> None:
+        requirements = controller.feasibility_requirements()
+        self.assertEqual(
+            controller.minimum_feasible_frame_budget(),
+            requirements["contact_recovery"]["minimum_total_budget"],
+        )
+        self.assertTrue(requirements["contact_recovery"]["limiting_requirement"].startswith("facing="))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "collection"
+            create(root, budget=350000)
+            plan = controller.read_json(root / "plan" / "collection-plan.json")
+            assignments = [controller.read_json(path) for path in sorted((root / "assignments").glob("*.json"))]
+            for assignment in assignments:
+                phases = {recipe["schedule_phase"] for recipe in assignment["recipes"]}
+                self.assertFalse("tail" in phases and len(phases) > 1)
+            base_end = int(plan["base_recipe_count"]) - 1
+            ending_assignment = next(
+                assignment
+                for assignment in assignments
+                if any(int(recipe["recipe_index"]) == base_end for recipe in assignment["recipes"])
+            )
+            self.assertEqual(len(ending_assignment["recipes"]), 1)
 
     def test_seed_changes_immutable_plan_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -136,6 +187,28 @@ class ControllerContractTests(unittest.TestCase):
             self.assertEqual(inventory["successful_assignment_count"], 1)
             self.assertEqual(inventory["accepted_observation_frames"], 10)
             self.assertEqual(inventory["duplicate_validated_results_ignored"], ["b.json"])
+
+    def test_semantic_failure_frames_are_produced_but_not_credited(self) -> None:
+        assignment = {
+            "plan_id": "plan-test",
+            "assignment_id": "assignment-test",
+            "recipes": [
+                {"recipe_id": "semi", "mission": "semi_markov", "scenario_index": 0},
+                {"recipe_id": "guided-ok", "mission": "ramp_traverse", "scenario_index": 0},
+                {"recipe_id": "guided-fail", "mission": "hoop_pass", "scenario_index": 0},
+            ],
+        }
+        rows = [
+            {"recipe_id": "semi", "observation_count": 201, "mission_success": False},
+            {"recipe_id": "guided-ok", "observation_count": 45, "mission_success": True},
+            {"recipe_id": "guided-fail", "observation_count": 42, "mission_success": False},
+        ]
+        with patch.object(worker, "read_episode_rows", return_value=rows):
+            result = worker.build_validated_result(assignment, "attempt-000", "test", Path("unused"))
+        self.assertEqual(result["produced_observation_frames"], 288)
+        self.assertEqual(result["accepted_observation_frames"], 246)
+        self.assertEqual(result["accepted_frames_by_mission"], {"semi_markov": 201, "ramp_traverse": 45})
+        self.assertEqual(result["semantic_failure_recipe_ids"], ["guided-fail"])
 
     def test_stop_file_prevents_new_assignment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import dataset_controller as controller
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -84,23 +86,31 @@ def build_validated_result(
     episodes = read_episode_rows(output)
     rows_by_recipe = {row.get("recipe_id"): row for row in episodes}
     resolved: list[str] = []
+    successful: list[str] = []
     semantic_failures: list[str] = []
     credited_cells: list[dict[str, Any]] = []
     accepted_frames = 0
+    produced_frames = 0
+    accepted_frames_by_mission: dict[str, int] = {}
     for recipe in assignment["recipes"]:
         recipe_id = recipe["recipe_id"]
         row = rows_by_recipe.get(recipe_id)
         if row is None:
             raise ValueError(f"validated output omitted recipe {recipe_id}")
         resolved.append(recipe_id)
-        accepted_frames += int(row["observation_count"])
+        observation_count = int(row["observation_count"])
+        produced_frames += observation_count
         mission = recipe["mission"]
         semantic_success = mission == "semi_markov" or bool(row["mission_success"])
         if semantic_success:
+            successful.append(recipe_id)
+            accepted_frames += observation_count
+            accepted_frames_by_mission[mission] = accepted_frames_by_mission.get(mission, 0) + observation_count
             credited_cells.append({
                 "mission": mission,
                 "scenario_index": int(recipe["scenario_index"]),
                 "recipe_id": recipe_id,
+                "credited_observation_frames": observation_count,
             })
         else:
             semantic_failures.append(recipe_id)
@@ -115,7 +125,10 @@ def build_validated_result(
         "semantic_result": "success" if not semantic_failures else "resolved_with_failures",
         "output_directory": str(output),
         "accepted_observation_frames": accepted_frames,
+        "produced_observation_frames": produced_frames,
+        "accepted_frames_by_mission": accepted_frames_by_mission,
         "resolved_recipe_ids": resolved,
+        "successful_recipe_ids": successful,
         "semantic_failure_recipe_ids": semantic_failures,
         "credited_cells": credited_cells,
     }
@@ -220,6 +233,27 @@ def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:
     return "validated"
 
 
+def prior_wave_complete(root: Path, assignment: dict[str, Any]) -> bool:
+    """Do not let a fast worker run arbitrarily far beyond slower workers."""
+    if "reserve_activation_for" in assignment:
+        return True
+    wave = int(assignment.get("dispatch_wave", 0))
+    if wave == 0:
+        return True
+    validated = {
+        result.get("assignment_id")
+        for path in (root / "results").glob("*.json")
+        if (result := read_json(path)).get("technical_result") == "validated"
+    }
+    for path in (root / "assignments").glob("*.json"):
+        earlier = read_json(path)
+        if "reserve_activation_for" in earlier:
+            continue
+        if int(earlier.get("dispatch_wave", 0)) < wave and earlier["assignment_id"] not in validated:
+            return False
+    return True
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("collection", type=Path)
@@ -242,12 +276,19 @@ def main() -> int:
         assignment = read_json(assignment_path)
         if int(assignment["logical_worker_id"]) != args.worker_id:
             continue
+        inventory = controller.build_inventory(root)
+        if inventory["complete"]:
+            statuses.append({"assignment_id": assignment["assignment_id"], "status": "budget_complete"})
+            break
+        if not prior_wave_complete(root, assignment):
+            statuses.append({"assignment_id": assignment["assignment_id"], "status": "waiting_for_prior_wave"})
+            break
         status = run_assignment(args, assignment_path)
         statuses.append({"assignment_id": assignment["assignment_id"], "status": status})
         if args.one or args.simulate_interruption or (root / "STOP").exists():
             break
     print(json.dumps({"worker_id": args.worker_id, "executor_id": args.executor_id, "assignments": statuses}, indent=2, sort_keys=True))
-    return 0 if all(item["status"] in {"validated", "already_validated"} for item in statuses) else 1
+    return 0 if all(item["status"] in {"validated", "already_validated", "budget_complete", "waiting_for_prior_wave"} for item in statuses) else 1
 
 
 if __name__ == "__main__":

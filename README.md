@@ -54,12 +54,12 @@ after Movement V1 passes its model-training gates.
 | Controls | ten canonical Boolean bits: W, A, S, D, four arrows, Q, and E |
 | Environment | one fixed, deterministic arena layout for an entire episode |
 | First production source | automated Movement V1 only; human capture is deferred |
-| Production size and mixture | numeric quotas are frozen in an immutable collection plan only after the Windows and Linux controller pilots pass |
+| Production size and mixture | the user chooses credited frame target X; the frozen Movement V1 frame mixture is 55% semi-Markov, 20% object, 15% contact/recovery, 5% ramp, and 5% hoop |
 | Evaluation reserve | assigned before collection through disjoint prescribed recipe identities |
 | Automated behavior | frame-balanced semi-Markov play plus object, contact, ramp, and hoop missions |
 | Replay | exact replay keys, explicit categorical scenario cells, stratified continuous values, and stateless jitter |
 | Production scheduling | one central controller creates a global budget-driven recipe plan before worker assignment; workers do not select production missions independently |
-| Budget semantics | the user requests accepted frames; the planner maximizes breadth first, rejects a budget too small for mandatory discrete coverage, and refines continuous coverage as budget grows |
+| Budget semantics | X counts only semantically credited training observations; diagnostic semantic-failure frames do not consume X, complete discrete coverage is mandatory, and infeasible budgets are rejected before generation |
 | Toy-plan meaning | the complete discrete catalog with minimal repetition and the coarsest progressive continuous coverage; never a reduced object/mission catalog |
 | Distributed execution | one synchronous generator process per GPU; scale with separate RunPod workers rather than multiple processes on one GPU |
 | Work boundary | one assignment block produces one shard; interrupted partial shards are discarded and the assignment is retried |
@@ -85,14 +85,13 @@ and validated on Windows. Linux packaging is the next platform milestone.
 
 ### First-dataset collection plan
 
-The first production dataset is automated Movement V1. Its exact accepted-frame
-target and nested quotas remain intentionally unfrozen until the Linux
-prescribed-generation toy also passes. They will then be recorded in an
-immutable, versioned `collection-plan.json`; the Windows planner and execution
-contract are already validated.
-That plan must allocate semi-Markov, object-view, contact/recovery, ramp, and hoop
-coverage; enumerate the required discrete cells and continuous strata; assign
-disjoint train/evaluation recipe identities; and reserve a bounded set of makeup
+The first production dataset is automated Movement V1. Its accepted-frame target
+X remains a user input, while the mission and nested frame shares are frozen and
+recorded in every immutable, versioned `collection-plan.json`. The Windows
+planner and execution contract are validated; Linux must reproduce them without
+changing the policy. The plan allocates semi-Markov, object-view, contact/recovery, ramp, and hoop
+coverage; enumerates the required discrete cells and continuous strata; assigns
+disjoint train/evaluation recipe identities; and reserves a bounded set of makeup
 recipes for valid semantic failures. A smaller requested dataset reduces
 intentional repetition and continuous refinement, not the supported missions,
 objects, directions, or discrete scenario cells.
@@ -111,6 +110,23 @@ cover both travel directions, center and diagonal/oblique paths, and forward,
 backward, both strafe, and free-attention facing profiles. Continuous geometry
 such as radius, start/end points, offsets, and durations is stratified and
 jittered inside validated safe ranges.
+
+The frozen mission frame shares are 55% semi-Markov, 20% object view, 15%
+contact/recovery, 5% ramp, and 5% hoop. Object targets are equal; object modes
+target 40/35/20/5 for approach/pass-by/partial-orbit/full-orbit; gaze targets
+40/25/20/15; orbit directions are equal. Contact targets, recovery styles, and
+approaches are equal, with 35/15/15/15/20 facing. Ramp and hoop directions are
+equal, paths are 50/25/25, and facing is again 35/15/15/15/20.
+
+Recipe counts are derived from those frame shares using the versioned
+per-scenario duration calibration in
+`Scripts/movement_v1_duration_calibration.json`. The calibration comes from a
+300,177-frame Windows prescribed run and prevents long modes from being
+overrepresented merely because an episode lasts longer. With the complete
+887-cell mandatory floor and current calibration, the smallest plan which can
+also satisfy all frozen aggregate shares is 344,534 credited frames. The
+limiting constraint is mandatory contact-facing coverage. Smaller plans are
+diagnostic only and production plan creation rejects them explicitly.
 
 Mission success does not cut the footage abruptly. After the ordinary objective
 and endpoint hold succeed, the generator preserves the completing action for a
@@ -388,19 +404,24 @@ For centrally prescribed collection, create and verify an immutable plan, then
 run the assignments owned by a logical worker:
 
 ```text
-python Scripts/dataset_controller.py plan <collection-root> --frame-budget <accepted-frames> --workers <count>
+python Scripts/dataset_controller.py plan <collection-root> --frame-budget <credited-frames> --workers <count>
 python Scripts/dataset_controller.py verify-plan <collection-root>
+python Scripts/dataset_controller.py plan-distribution <collection-root>
 python Scripts/dataset_worker.py <collection-root> --executable <he_grenade_game.exe> --worker-id <id>
 python Scripts/dataset_controller.py inventory <collection-root> --write-snapshot
 ```
 
-The planner rejects a frame budget below its conservative mandatory-coverage
-lower bound. The worker passes `-RecipeManifest=<attempt-request.json>` to the
+The planner loads the versioned Windows per-scenario duration calibration by
+default and rejects a frame budget below its computed complete-coverage plus
+nested-share lower bound. `plan-distribution` reports the expected frame mixture
+before any GPU work begins. The worker passes `-RecipeManifest=<attempt-request.json>` to the
 game, finalizes Parquet, validates the shard, and only then publishes an
 immutable validated result. Put a file named `STOP` in the collection root to
 prevent another assignment from starting after the current one. Use
 `activate-reserves` after inventory reconstruction to assign the predefined
-reserves for valid semantic failures.
+reserves for valid semantic failures. `inventory` reconstructs credited frame
+and nested distributions from immutable results; semantic-failure frames appear
+in produced diagnostics but do not consume X.
 
 Use `-EpisodeIndices=0+18+19+30` to regenerate only specific deterministic
 episode indices while preserving their original seeds, IDs, and policy choices.
@@ -942,10 +963,11 @@ catalog, continuous parameter strata, intentional repetition rules, and bounded
 reserve recipes. Numerical targets belong to that plan rather than being
 hard-coded into the orchestration layer.
 
-The primary user inputs are the requested accepted-frame target, worker count,
+The primary user inputs are the requested credited-frame target, worker count,
 train/evaluation allocation, and capture/build configuration. Worker count affects
 only execution partitioning; it must not change the globally selected recipe set.
-The planner calculates the required recipe count, complete base catalog, highest
+The planner calculates the required recipe count from calibrated per-scenario
+durations, complete base catalog, highest
 feasible continuous refinement depth, reserve recipes, assignment sizes, expected
 clean-boundary overage, and recipe-to-worker allocation before execution.
 
@@ -1005,7 +1027,8 @@ records every realized value. It must not sample broadly and repair invalid
 geometry by clamping. A recipe that cannot construct valid geometry is a recorded
 configuration/semantic result.
 
-The controller is the sole assignment authority. It selects the global recipe set
+The controller is the sole assignment authority. It precomputes the global
+mandatory, weighted-refinement, deterministic-tail, and semantic-reserve recipe set
 first, then groups those recipes into assignment blocks and assigns each block to
 a physical worker. It records attempts and heartbeats, imports validated results,
 updates accepted-frame deficits, dispatches predefined reserve recipes, and
@@ -1019,7 +1042,9 @@ The worker finalizes Parquet, performs complete validation, computes the checksu
 publishes the shard, and writes an immutable result. The assignment size is a
 configuration chosen after benchmarking; correctness does not depend on a
 specific megabyte target. There is no in-process multi-shard rollover and no
-partial-shard salvage in the first production design.
+partial-shard salvage in the first production design. The final base window and
+all tail work use single-recipe assignments, so a one-worker stop overshoots X by
+at most one completed recipe. Multiple workers advance in bounded dispatch waves.
 
 The persistent ledger uses ordinary immutable files rather than a distributed
 database:
@@ -1661,10 +1686,10 @@ Audited workflow state:
 | Update README to the controller architecture | complete design checkpoint | documentation is committed before generator/controller implementation |
 | Implement prescribed recipe input on Windows | complete | packaged generator accepts an assignment manifest and consumes exact per-episode mission/scenario/replay identities while retaining automatic mode |
 | Implement controller, worker wrapper, and ledger | complete on Windows | immutable plan/recipe/assignment/claim/attempt/result records; inventory reconstruction; semantic failure resolution; reserve activation; duplicate suppression; whole-shard retry; graceful stop |
-| Run the Windows controller toy pilot | complete | 887/887 catalog cells, 887/887 credited recipes, 54,868 WebP observations, zero semantic failures at 20 Hz; controlled interruption then exact retry; a separate 5 Hz diagnostic resolved failures without blocking and activated 659 reserves idempotently |
-| Freeze numeric production plan | pending | accepted-frame targets and nested quotas are deliberately deferred until the Windows and Linux pilots pass |
+| Run the Windows controller toy pilot | complete | original 887-cell pass plus a 300,177-frame budget run: 887/887 cells, 25 validated assignments, only 177 clean-boundary overshoot, zero semantic failures, zero technical failures, and a real graceful-stop/resume migration |
+| Freeze numeric allocation policy | complete on Windows | user supplies X; calibrated 55/20/15/5/5 mission shares and frozen nested shares; current complete-coverage/share feasibility floor is 344,534 credited frames |
 | Package and validate Linux x86-64 | pending after Windows gate | add Linux libwebp linkage, package the synchronous build, and validate it on RunPod |
-| Add complete distribution reports | pending | mission/mode/target/direction/pitch summaries exist; broader action, spatial, contact-duration, duplicate, and storage reports remain |
+| Add complete distribution reports | partial | controller-native planned and credited mission/target/mode/gaze/direction/path/facing reports are complete; broader action, spatial, contact-duration, duplicate, and storage reports remain |
 | Scale collection | blocked by Linux and reporting gates | RunPod workers will execute centrally prescribed assignment blocks |
 
 The current packaged build accepts the existing automatic arguments plus
@@ -1874,20 +1899,27 @@ accepted-frame balancing, and natural endpoint-tail completion.
 
 The Windows baseline now implements the frozen centralized production
 architecture while retaining the synchronous one-shard generator as the trusted
-capture baseline. The complete 20 Hz prescribed toy validated all 887 discrete
-cells in one shard with 54,868 authoritative observations and zero semantic
-failures. Interruption/retry, deliberate coarse-rate semantic failure, reserve
-activation, graceful stop, duplicate suppression, canonical-prefix stability,
-and inventory reconstruction were tested separately.
+capture baseline. The first complete 20 Hz prescribed toy validated all 887
+discrete cells in one shard with 54,868 authoritative observations and zero
+semantic failures. The budget-controller run then generated 300,177 credited
+64x64 observations across 25 validated assignments with 177 frames of overshoot,
+887/887 credited cells, and zero semantic or technical failures. A graceful stop
+after assignment 23 and immutable resume under corrected near-target assignment
+boundaries preserved all validated work. That run supplied per-scenario duration
+calibration; a feasibility-aware 350,000-frame plan now predicts 350,041 frames
+at 55.010/19.992/14.990/4.998/5.010 mission shares. Interruption/retry,
+deliberate coarse-rate semantic failure, reserve activation, graceful stop,
+duplicate suppression, canonical-prefix stability, and inventory reconstruction
+are all covered.
 
 Immediate implementation order:
 
-1. Commit and push this validated Windows controller checkpoint.
+1. Commit and push this calibrated, feasibility-aware Windows controller checkpoint.
 2. Add Linux libwebp linkage, package Linux x86-64, and reproduce the prescribed
    toy workflow on RunPod persistent storage.
 3. Complete distribution reports and a small trainer/model smoke test.
-4. Freeze the numerical production plan after the Windows and Linux evidence
-   exists, then authorize only the staged data-volume rollout above.
+4. Choose production X at or above the recorded feasibility floor after the
+   Linux evidence exists, then authorize only the staged data-volume rollout above.
 
 Deferred work which is not a first-dataset gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple
