@@ -28,12 +28,21 @@ public class he_grenade_game : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
 
+		string LibWebPRoot = Path.Combine(ModuleDirectory, "..", "..", "ThirdParty", "libwebp");
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			string LibWebPRoot = Path.Combine(ModuleDirectory, "..", "..", "ThirdParty", "libwebp");
 			PublicSystemIncludePaths.Add(Path.Combine(LibWebPRoot, "include"));
 			PublicAdditionalLibraries.Add(Path.Combine(LibWebPRoot, "lib", "Win64", "libwebp.lib"));
 			PublicAdditionalLibraries.Add(Path.Combine(LibWebPRoot, "lib", "Win64", "libsharpyuv.lib"));
+			PublicDefinitions.Add("CURRICULUM_WITH_LIBWEBP=1");
+		}
+		else if (Target.Platform == UnrealTargetPlatform.Linux)
+		{
+			string LinuxLibDir = Path.Combine(LibWebPRoot, "lib", "Linux", "x86_64-unknown-linux-gnu");
+			PublicSystemIncludePaths.Add(Path.Combine(LibWebPRoot, "include"));
+			PublicAdditionalLibraries.Add(Path.Combine(LinuxLibDir, "libwebp.a"));
+			PublicAdditionalLibraries.Add(Path.Combine(LinuxLibDir, "libsharpyuv.a"));
+			PublicSystemLibraries.AddRange(new string[] { "m", "pthread" });
 			PublicDefinitions.Add("CURRICULUM_WITH_LIBWEBP=1");
 		}
 		else

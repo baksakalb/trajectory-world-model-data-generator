@@ -4287,6 +4287,7 @@ void ACurriculumDataGenerator::UpdateObjectGazeTarget(
 		break;
 	}
 	case EObjectGazeIntent::SurveyPoint:
+	{
 		CurrentObjectGazeTarget = Target.LookTarget + PhaseOffset;
 		// Reflect an out-of-bounds survey target back into the arena rather than
 		// clamping many independent samples onto the same boundary coordinate.
@@ -4322,6 +4323,7 @@ void ACurriculumDataGenerator::UpdateObjectGazeTarget(
 				ReflectIntoArena(CurrentObjectGazeTarget.Y);
 		}
 		break;
+	}
 	default:
 		CurrentObjectGazeTarget = Target.LookTarget;
 		break;

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run immutable Windows assignment manifests and publish immutable results."""
+"""Run immutable assignment manifests and publish immutable results."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import platform
 import subprocess
 import sys
 import tarfile
@@ -259,7 +260,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("collection", type=Path)
     result.add_argument("--executable", type=Path, required=True)
     result.add_argument("--worker-id", type=int, required=True)
-    result.add_argument("--executor-id", default=f"windows-{os.getpid()}")
+    result.add_argument("--executor-id", default=f"{platform.system().lower()}-{os.getpid()}")
     result.add_argument("--max-attempts", type=int, default=3)
     result.add_argument("--simulate-interruption", action="store_true")
     result.add_argument("--one", action="store_true", help="process at most one eligible assignment")

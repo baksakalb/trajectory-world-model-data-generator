@@ -165,10 +165,10 @@ void Ahe_grenade_gameGameMode::BuildFixedCurriculumLighting()
 	}
 
 	ASkyAtmosphere* SkyAtmosphere = nullptr;
-	for (TActorIterator<ASkyAtmosphere> It(World); It; ++It)
+	TActorIterator<ASkyAtmosphere> SkyAtmosphereIt(World);
+	if (SkyAtmosphereIt)
 	{
-		SkyAtmosphere = *It;
-		break;
+		SkyAtmosphere = *SkyAtmosphereIt;
 	}
 	if (!SkyAtmosphere)
 	{
@@ -414,20 +414,20 @@ void Ahe_grenade_gameGameMode::BuildFixedCurriculumArena()
 		FVector(3.4f),
 		MagentaHoopMaterial);
 
-	constexpr float RampLengthCm = 500.0f;
-	constexpr float RampWidthCm = 260.0f;
-	constexpr float RampThicknessCm = 36.0f;
-	constexpr float RampPitchDegrees = -18.0f;
-	const float RampPitchRadians = FMath::DegreesToRadians(RampPitchDegrees);
+	constexpr float AuthoredRampLengthCm = 500.0f;
+	constexpr float AuthoredRampWidthCm = 260.0f;
+	constexpr float AuthoredRampThicknessCm = 36.0f;
+	constexpr float AuthoredRampPitchDegrees = -18.0f;
+	const float RampPitchRadians = FMath::DegreesToRadians(AuthoredRampPitchDegrees);
 	const float RampSupportHeightCm =
-		(FMath::Abs(FMath::Sin(RampPitchRadians)) * RampLengthCm * 0.5f)
-		+ (FMath::Abs(FMath::Cos(RampPitchRadians)) * RampThicknessCm * 0.5f);
+		(FMath::Abs(FMath::Sin(RampPitchRadians)) * AuthoredRampLengthCm * 0.5f)
+		+ (FMath::Abs(FMath::Cos(RampPitchRadians)) * AuthoredRampThicknessCm * 0.5f);
 
 	SpawnBox(
 		TEXT("CurriculumObject_Ramp"),
 		FVector(0.0f, 0.0f, RampSupportHeightCm),
-		FRotator(RampPitchDegrees, 0.0f, 0.0f),
-		FVector(RampLengthCm, RampWidthCm, RampThicknessCm),
+		FRotator(AuthoredRampPitchDegrees, 0.0f, 0.0f),
+		FVector(AuthoredRampLengthCm, AuthoredRampWidthCm, AuthoredRampThicknessCm),
 		RedRampMaterial);
 
 	// Single-player inspection spawn, looking from the west side toward the center.

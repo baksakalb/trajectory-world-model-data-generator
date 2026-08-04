@@ -73,7 +73,7 @@ after Movement V1 passes its model-training gates.
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
 | Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
-| Platform order | prove the controller and prescribed pipeline on the working Windows baseline before Linux and RunPod deployment |
+| Platform order | Windows controller validation is complete; Linux x86-64 now builds/packages locally, and RunPod is the authoritative rendered-runtime gate |
 
 Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet production
 path are implemented on Windows. A paired 19,232-observation pilot measures the
@@ -81,7 +81,13 @@ actual storage and generation tradeoff below; the production encoder defaults to
 its fastest lossless effort because higher lossless effort was not useful for
 this collection workload. Central prescribed scheduling, assignment/result
 tracking, whole-shard retry, and reconstructable inventory are now implemented
-and validated on Windows. Linux packaging is the next platform milestone.
+and validated on Windows. The same synchronous generator now cross-compiles and
+packages for Linux x86-64 with native static libwebp. The packaged ELF launches
+under Ubuntu 22.04 in WSL2 and has no missing shared libraries, but local rendered
+qualification stops at Vulkan initialization because this PC's WSL environment
+exposes only Mesa llvmpipe rather than the RTX 4060 and therefore cannot satisfy
+Unreal's Vulkan SM6 profile. RunPod is the remaining authoritative GPU-runtime
+and rendered-shard gate; the allocation policy must not change there.
 
 ### First-dataset collection plan
 
@@ -1688,7 +1694,7 @@ Audited workflow state:
 | Implement controller, worker wrapper, and ledger | complete on Windows | immutable plan/recipe/assignment/claim/attempt/result records; inventory reconstruction; semantic failure resolution; reserve activation; duplicate suppression; whole-shard retry; graceful stop |
 | Run the Windows controller toy pilot | complete | original 887-cell pass plus a 300,177-frame budget run: 887/887 cells, 25 validated assignments, only 177 clean-boundary overshoot, zero semantic failures, zero technical failures, and a real graceful-stop/resume migration |
 | Freeze numeric allocation policy | complete on Windows | user supplies X; calibrated 55/20/15/5/5 mission shares and frozen nested shares; current complete-coverage/share feasibility floor is 344,534 credited frames |
-| Package and validate Linux x86-64 | pending after Windows gate | add Linux libwebp linkage, package the synchronous build, and validate it on RunPod |
+| Package and validate Linux x86-64 | local build/package complete; rendered gate pending | UE 5.8 v26 Clang cross-build and Development BuildCookRun succeed; packaged ELF has no missing WSL libraries; WSL exposes only llvmpipe and fails the required Vulkan SM6 profile, so rendered WebP/Parquet validation moves unchanged to a GPU RunPod |
 | Add complete distribution reports | partial | controller-native planned and credited mission/target/mode/gaze/direction/path/facing reports are complete; broader action, spatial, contact-duration, duplicate, and storage reports remain |
 | Scale collection | blocked by Linux and reporting gates | RunPod workers will execute centrally prescribed assignment blocks |
 
@@ -1914,9 +1920,10 @@ are all covered.
 
 Immediate implementation order:
 
-1. Commit and push this calibrated, feasibility-aware Windows controller checkpoint.
-2. Add Linux libwebp linkage, package Linux x86-64, and reproduce the prescribed
-   toy workflow on RunPod persistent storage.
+1. Upload the packaged Linux x86-64 build and controller scripts to RunPod
+   persistent storage.
+2. Reproduce the prescribed toy workflow on one GPU RunPod without changing the
+   immutable allocation policy, then validate its WebP/Parquet shard and inventory.
 3. Complete distribution reports and a small trainer/model smoke test.
 4. Choose production X at or above the recorded feasibility floor after the
    Linux evidence exists, then authorize only the staged data-volume rollout above.
