@@ -57,9 +57,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Arena")
 	TObjectPtr<UMaterialInterface> RampShapeMaterial;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Arena")
-	TObjectPtr<UMaterialInterface> ArenaWallMaterial;
-
 	/** Retained for source compatibility with the dormant grenade actor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curriculum|Future")
 	TObjectPtr<UMaterialInterface> GrenadeMaterial;

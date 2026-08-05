@@ -58,7 +58,6 @@ Ahe_grenade_gameGameMode::Ahe_grenade_gameGameMode()
 	LoadAsset(SphereShapeMaterial, TEXT("/Game/Materials/MI_Shape_Sphere.MI_Shape_Sphere"));
 	LoadAsset(HoopShapeMaterial, TEXT("/Game/Materials/MI_Shape_Hoop.MI_Shape_Hoop"));
 	LoadAsset(RampShapeMaterial, TEXT("/Game/Materials/MI_LabyrinthPanel.MI_LabyrinthPanel"));
-	LoadAsset(ArenaWallMaterial, TEXT("/Game/Materials/MI_ArenaWallGrid.MI_ArenaWallGrid"));
 	LoadAsset(GrenadeMaterial, TEXT("/Game/Materials/MI_Grenade.MI_Grenade"));
 
 	LoadAsset(

@@ -73,7 +73,7 @@ after Movement V1 passes its model-training gates.
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
 | Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
-| Platform order | Windows controller validation is complete; Linux x86-64 now builds/packages locally, and RunPod is the authoritative rendered-runtime gate |
+| Platform order | Windows controller validation is complete; Linux x86-64 builds/packages locally, and the RunPod Vulkan rendered-runtime gate has passed |
 
 Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet production
 path are implemented on Windows. A paired 19,232-observation pilot measures the
@@ -86,8 +86,9 @@ packages for Linux x86-64 with native static libwebp. The packaged ELF launches
 under Ubuntu 22.04 in WSL2 and has no missing shared libraries, but local rendered
 qualification stops at Vulkan initialization because this PC's WSL environment
 exposes only Mesa llvmpipe rather than the RTX 4060 and therefore cannot satisfy
-Unreal's Vulkan SM6 profile. RunPod is the remaining authoritative GPU-runtime
-and rendered-shard gate; the allocation policy must not change there.
+Unreal's Vulkan SM6 profile. The packaged build has now passed the authoritative
+RunPod GPU-runtime gate; the rendered toy-shard and controller-resume gates
+remain, and the allocation policy must not change there.
 
 ### Linux qualification state
 
@@ -106,10 +107,40 @@ qualification:
   dataset generator begins rendering.
 - **Interpretation:** this is a limitation of the local WSL GPU environment,
   not evidence of a compile, link, packaging, controller, or libwebp defect.
-- **Next gate:** run the unchanged packaged build and centrally prescribed toy
-  plan on one NVIDIA GPU RunPod, validate its lossless-WebP/typed-Parquet shard,
-  reconstruct controller inventory, and test interruption/resume. Production
-  generation remains blocked until that gate passes.
+- **RunPod rendered-runtime gate passed (2026-08-05):** the packaged Linux build
+  initializes Unreal's `VULKAN_SM6` RHI on an NVIDIA RTX A6000 (48 GB, driver
+  580.159.03), loads `Lvl_FirstPerson`, and constructs the fixed Movement V1
+  arena. An unused legacy `MI_ArenaWallGrid` constructor reference was removed
+  after its uncooked parent emitted a fallback warning; the rebuilt package
+  repeats the smoke test without that warning. No dataset-generation arguments
+  were used during either smoke test.
+- **Verified RunPod setup:** pod `movement-v1-linux-graphics` used the
+  `runpod/kasm-docker:cuda11` desktop image with NVIDIA graphics/Vulkan driver
+  capabilities enabled. The allocation exposed approximately 9 vCPUs, 50 GB
+  RAM, a 60 GB container disk, and a persistent 20 GB `/workspace` volume.
+  RunPod's browser terminal remained unavailable, so commands were executed over
+  the SSH gateway with a PTY and mirrored into a local live log. The build and
+  controller payload were uploaded to `/workspace/movement_v1`.
+- **Corrected package verified:** after removing the unused wall-material
+  reference, UE 5.8 Development `BuildCookRun` succeeded again and produced
+  archive SHA-256
+  `A7881C0ED1FBB3923B8769D1AEA585C23534D7EB8DB5CC009F147AF3BE0A0097`.
+  The corrected remote build initialized the RTX A6000 Vulkan SM6 renderer,
+  loaded the map, and built the arena without the legacy ShaderMap warning.
+- **Authoritative gameplay capture verified:** one diagnostic Movement V1
+  episode ran for 10 seconds at 10 observations/s, 640x360, seed `424242`, and
+  worker `98`. Validation reported 1 episode, 100 transitions, and 101
+  observations. `Scripts/review_dataset.py` rendered the review MP4 strictly
+  from the stored RGB observations; desktop/X11 recordings are not accepted as
+  gameplay evidence or training data.
+- **Paused after qualification:** the pod was stopped after the checks. GPU
+  compute billing ended; the retained 20 GB volume was reported at `$0.006/hr`
+  (about `$0.13/day`) so the verified workspace can be resumed. Terminating the
+  pod would remove that retained remote workspace.
+- **Next gate:** run the centrally prescribed toy plan on this validated build,
+  validate its lossless-WebP/typed-Parquet shard, reconstruct controller
+  inventory, and test interruption/resume. Production generation remains
+  blocked until that gate passes.
 
 ### First-dataset collection plan
 
@@ -1716,9 +1747,9 @@ Audited workflow state:
 | Implement controller, worker wrapper, and ledger | complete on Windows | immutable plan/recipe/assignment/claim/attempt/result records; inventory reconstruction; semantic failure resolution; reserve activation; duplicate suppression; whole-shard retry; graceful stop |
 | Run the Windows controller toy pilot | complete | original 887-cell pass plus a 300,177-frame budget run: 887/887 cells, 25 validated assignments, only 177 clean-boundary overshoot, zero semantic failures, zero technical failures, and a real graceful-stop/resume migration |
 | Freeze numeric allocation policy | complete on Windows | user supplies X; calibrated 55/20/15/5/5 mission shares and frozen nested shares; current complete-coverage/share feasibility floor is 344,534 credited frames |
-| Package and validate Linux x86-64 | local build/package complete; rendered gate pending | UE 5.8 v26 Clang cross-build and Development BuildCookRun succeed; packaged ELF has no missing WSL libraries; WSL exposes only llvmpipe and fails the required Vulkan SM6 profile, so rendered WebP/Parquet validation moves unchanged to a GPU RunPod |
+| Package and validate Linux x86-64 | build/package and rendered-runtime gate complete | UE 5.8 v26 Clang cross-build and Development BuildCookRun succeed; the corrected package initializes Vulkan SM6 and captures authoritative RGB observations on an RTX A6000 RunPod; rendered WebP/Parquet toy-shard validation remains |
 | Add complete distribution reports | partial | controller-native planned and credited mission/target/mode/gaze/direction/path/facing reports are complete; broader action, spatial, contact-duration, duplicate, and storage reports remain |
-| Scale collection | blocked by Linux and reporting gates | RunPod workers will execute centrally prescribed assignment blocks |
+| Scale collection | blocked by toy-shard and reporting gates | RunPod workers will execute centrally prescribed assignment blocks after the validated Linux toy workflow and required reports |
 
 The current packaged build accepts the existing automatic arguments plus
 `-RecipeManifest=<assignment.json>`. A prescribed manifest supplies plan,
@@ -1942,9 +1973,9 @@ are all covered.
 
 Immediate implementation order:
 
-1. Upload the packaged Linux x86-64 build and controller scripts to RunPod
-   persistent storage.
-2. Reproduce the prescribed toy workflow on one GPU RunPod without changing the
+1. Restart the stopped, qualified graphics-capable RunPod and verify the retained
+   `/workspace/movement_v1` payload.
+2. Reproduce the prescribed toy workflow on that GPU without changing the
    immutable allocation policy, then validate its WebP/Parquet shard and inventory.
 3. Complete distribution reports and a small trainer/model smoke test.
 4. Choose production X at or above the recorded feasibility floor after the
