@@ -159,6 +159,66 @@ qualification:
   collection metadata and data still require an independent backup or migration
   to portable network/object storage.
 
+### RunPod RTX 4090 and network-volume handoff (2026-08-06)
+
+The earlier A6000 pod was intentionally terminated after its parity result; its
+pod-local 300k collection was deliberately discarded. A 100 GB RunPod network
+volume named `world_model_trajectory` (volume ID `uuhi6dkd8h`) now exists in
+`CA-MTL-3`. Network volumes are data-center-bound. At the time of creation the
+A6000 and 4090 allocations in that data center were out of capacity, so no
+production pod has yet been attached to this volume.
+
+A separate temporary, non-persistent RTX 4090 pod qualified the exact corrected
+Linux package and capture path. It used `runpod/kasm-docker:cuda11`, a 60 GB
+container disk, SSH enabled, Jupyter disabled, and
+`NVIDIA_DRIVER_CAPABILITIES=graphics,compat32,utility`. The host exposed an RTX
+4090 with driver `580.159.04`, `DISPLAY=:1`, and the NVIDIA Vulkan ICD at
+`/etc/vulkan/icd.d/nvidia_icd.json`. Ordinary `vulkaninfo` against the Kasm X11
+display failed with X `BadMatch`; with `DISPLAY` unset it enumerated the RTX 4090
+and NVIDIA Vulkan driver successfully. This X11 diagnostic failure does not
+affect the authoritative offscreen generator path: Unreal selected
+`VULKAN_SM6`, loaded `Lvl_FirstPerson`, and built the fixed Movement V1 arena and
+lighting under `-RenderOffscreen`.
+
+The same pod then completed a bounded production-format capture at 384x384 RGB,
+20 Hz, lossless WebP effort 0: one five-second episode, 100 transitions, and 101
+observations. Parquet finalization completed and
+`Scripts/review_dataset.py --validate-only` passed all 1/100/101 records. The RTX
+4090 is therefore approved as a generator GPU, subject to repeating the same
+short qualification on the eventual network-volume pod before serious
+collection.
+
+File transfer has a strict version and integrity gate. The SSH gateway does not
+provide the SCP subsystem. `runpodctl` 2.8.1 produced full-size but
+checksum-mismatched, gzip-invalid copies of the 488,501,066-byte payload, even
+after overlapping stale send/receive processes were removed and a clean retry
+was performed. After upgrading both sender and receiver to `runpodctl` 2.9.0,
+the transfer passed gzip integrity and matched the authoritative payload SHA-256
+`A7881C0ED1FBB3923B8769D1AEA585C23534D7EB8DB5CC009F147AF3BE0A0097`.
+Never extract or execute a transferred payload before both checks pass. The old
+Kasm system pip was also incomplete; bootstrapping current pip with
+`https://bootstrap.pypa.io/get-pip.py` and then installing
+`Scripts/requirements-production.txt` supplied Pillow 12.1.1 and PyArrow 25.0.0.
+
+The next session must resume in this order:
+
+1. Select a network-volume data center with usable RTX 4090 capacity, deciding
+   explicitly whether to retain/wait on the existing `CA-MTL-3` volume or create
+   the production volume elsewhere.
+2. Deploy one pod with that network volume mounted at `/workspace`, using the
+   qualified Kasm template and exactly one generator process on one GPU.
+3. Confirm GPU identity, NVIDIA graphics capabilities, Vulkan ICD, headless
+   Vulkan enumeration, mount identity, capacity, and write access.
+4. Transfer with `runpodctl` 2.9.0 on both ends; verify exact byte size, SHA-256,
+   and `gzip -t` before extraction.
+5. Install the pinned Python production requirements, verify ELF dependencies,
+   and repeat the Unreal offscreen smoke test.
+6. Generate, finalize, and validate one small production-format shard directly
+   on the network volume; stop/restart the pod and prove the shard persists and
+   revalidates.
+7. Only after those gates pass, create and verify the immutable serious Movement
+   V1 collection plan and authorize the real generation run.
+
 ### First-dataset collection plan
 
 The first production dataset is automated Movement V1. Its accepted-frame target
