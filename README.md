@@ -73,7 +73,7 @@ after Movement V1 passes its model-training gates.
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
 | Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
-| Platform order | Windows controller validation is complete; Linux x86-64 builds/packages locally, and the RunPod Vulkan rendered-runtime gate has passed |
+| Platform order | Windows and Linux controller validation are complete; the same immutable 300k plan passed on Windows and an RTX A6000 RunPod |
 
 Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet production
 path are implemented on Windows. A paired 19,232-observation pilot measures the
@@ -87,8 +87,8 @@ under Ubuntu 22.04 in WSL2 and has no missing shared libraries, but local render
 qualification stops at Vulkan initialization because this PC's WSL environment
 exposes only Mesa llvmpipe rather than the RTX 4060 and therefore cannot satisfy
 Unreal's Vulkan SM6 profile. The packaged build has now passed the authoritative
-RunPod GPU-runtime gate; the rendered toy-shard and controller-resume gates
-remain, and the allocation policy must not change there.
+RunPod GPU-runtime gate and the complete prescribed 300k Linux parity run. The
+allocation policy and plan identity were unchanged between platforms.
 
 ### Linux qualification state
 
@@ -133,21 +133,38 @@ qualification:
   observations. `Scripts/review_dataset.py` rendered the review MP4 strictly
   from the stored RGB observations; desktop/X11 recordings are not accepted as
   gameplay evidence or training data.
-- **Paused after qualification:** the pod was stopped after the checks. GPU
-  compute billing ended; the retained 20 GB volume was reported at `$0.006/hr`
-  (about `$0.13/day`) so the verified workspace can be resumed. Terminating the
-  pod would remove that retained remote workspace.
-- **Next gate:** run the centrally prescribed toy plan on this validated build,
-  validate its lossless-WebP/typed-Parquet shard, reconstruct controller
-  inventory, and test interruption/resume. Production generation remains
-  blocked until that gate passes.
+- **Prescribed Linux 300k parity gate passed (2026-08-06):** the RTX A6000 ran
+  the unchanged immutable Windows plan `plan-c9487d1dfac92531` with one worker,
+  seed start `1000`, 20 Hz capture, 64x64 lossless WebP observations, and typed
+  Parquet metadata. The reconstructed inventory reports `complete: true`,
+  `coverage_complete: true`, 300,015 accepted observations, 3,202 episodes,
+  296,813 transitions, 27 successful assignments, all 887/887 discrete cells,
+  zero semantic failures, and zero technical failures. The 15-frame overshoot
+  is the expected clean recipe-boundary behavior.
+- **Independent Linux revalidation passed:** `verify-plan` reproduced the valid
+  887-cell plan and all 27 published tar shards independently passed checksum,
+  schema, WebP, Parquet, episode, transition, and observation validation. The
+  persistent report is stored as
+  `collections/linux-windows-300k-parity-20260806/verification-20260806.log`
+  under the RunPod `/workspace/movement_v1` payload.
+- **Visual review evidence generated:** two successful Linux episodes were
+  rendered for each of the 21 primary mission subtypes (42 MP4s total), covering
+  eight semi-Markov initial behavior families, four object-view modes, five
+  contact-recovery styles, both ramp directions, and both hoop directions. Each
+  clip is indexed by recipe, seed, complete discrete cell, frame count, and goal
+  in `review-videos/manifest.json`; review MP4s remain derived QA artifacts and
+  are not training inputs.
+- **Retention:** stopping the pod preserves its local `/workspace` volume while
+  storage billing continues; terminating the pod removes that volume. Critical
+  collection metadata and data still require an independent backup or migration
+  to portable network/object storage.
 
 ### First-dataset collection plan
 
 The first production dataset is automated Movement V1. Its accepted-frame target
 X remains a user input, while the mission and nested frame shares are frozen and
 recorded in every immutable, versioned `collection-plan.json`. The Windows
-planner and execution contract are validated; Linux must reproduce them without
+planner and execution contract are validated, and Linux reproduced them without
 changing the policy. The plan allocates semi-Markov, object-view, contact/recovery, ramp, and hoop
 coverage; enumerates the required discrete cells and continuous strata; assigns
 disjoint train/evaluation recipe identities; and reserves a bounded set of makeup
@@ -1747,9 +1764,9 @@ Audited workflow state:
 | Implement controller, worker wrapper, and ledger | complete on Windows | immutable plan/recipe/assignment/claim/attempt/result records; inventory reconstruction; semantic failure resolution; reserve activation; duplicate suppression; whole-shard retry; graceful stop |
 | Run the Windows controller toy pilot | complete | original 887-cell pass plus a 300,177-frame budget run: 887/887 cells, 25 validated assignments, only 177 clean-boundary overshoot, zero semantic failures, zero technical failures, and a real graceful-stop/resume migration |
 | Freeze numeric allocation policy | complete on Windows | user supplies X; calibrated 55/20/15/5/5 mission shares and frozen nested shares; current complete-coverage/share feasibility floor is 344,534 credited frames |
-| Package and validate Linux x86-64 | build/package and rendered-runtime gate complete | UE 5.8 v26 Clang cross-build and Development BuildCookRun succeed; the corrected package initializes Vulkan SM6 and captures authoritative RGB observations on an RTX A6000 RunPod; rendered WebP/Parquet toy-shard validation remains |
+| Package and validate Linux x86-64 | complete | UE 5.8 v26 Clang cross-build and Development BuildCookRun succeed; the corrected package initializes Vulkan SM6 on an RTX A6000; the unchanged 300k plan produced 300,015 observations across 27 independently revalidated WebP/Parquet shards, 887/887 cells, and zero failures |
 | Add complete distribution reports | partial | controller-native planned and credited mission/target/mode/gaze/direction/path/facing reports are complete; broader action, spatial, contact-duration, duplicate, and storage reports remain |
-| Scale collection | blocked by toy-shard and reporting gates | RunPod workers will execute centrally prescribed assignment blocks after the validated Linux toy workflow and required reports |
+| Scale collection | Linux parity gate complete; reporting/trainer gates remain | Windows and Linux both completed the immutable 300k controller plan; larger RunPod rollout remains gated on the remaining reports, trainer smoke test, storage/backup choice, and explicit budget authorization |
 
 The current packaged build accepts the existing automatic arguments plus
 `-RecipeManifest=<assignment.json>`. A prescribed manifest supplies plan,
@@ -1973,13 +1990,15 @@ are all covered.
 
 Immediate implementation order:
 
-1. Restart the stopped, qualified graphics-capable RunPod and verify the retained
-   `/workspace/movement_v1` payload.
-2. Reproduce the prescribed toy workflow on that GPU without changing the
-   immutable allocation policy, then validate its WebP/Parquet shard and inventory.
-3. Complete distribution reports and a small trainer/model smoke test.
-4. Choose production X at or above the recorded feasibility floor after the
-   Linux evidence exists, then authorize only the staged data-volume rollout above.
+1. Back up or migrate the verified Linux collection from pod-local persistent
+   storage to portable network/object storage and retain the immutable plan,
+   manifests, checksums, inventory, and verification report independently.
+2. Complete distribution reports and a small trainer/model smoke test using the
+   independently validated Windows and Linux collections.
+3. Compare platform-level credited distributions and selected same-recipe
+   replays; require semantic parity, not byte-identical cross-platform rendering.
+4. Choose production X at or above the recorded feasibility floor, then
+   authorize only the staged data-volume rollout above.
 
 Deferred work which is not a first-dataset gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple
