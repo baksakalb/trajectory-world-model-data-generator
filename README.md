@@ -162,11 +162,10 @@ qualification:
 ### RunPod RTX 4090 and network-volume handoff (2026-08-06)
 
 The earlier A6000 pod was intentionally terminated after its parity result; its
-pod-local 300k collection was deliberately discarded. A 100 GB RunPod network
-volume named `world_model_trajectory` (volume ID `uuhi6dkd8h`) now exists in
-`CA-MTL-3`. Network volumes are data-center-bound. At the time of creation the
-A6000 and 4090 allocations in that data center were out of capacity, so no
-production pod has yet been attached to this volume.
+pod-local 300k collection was deliberately discarded. The superseded 100 GB
+`CA-MTL-3` network volume was also deleted. The active persistent storage is now
+the 100 GB RunPod network volume `world_model_trajectory`, volume ID
+`gn8lul1yuf`, in `EU-RO-1`.
 
 A separate temporary, non-persistent RTX 4090 pod qualified the exact corrected
 Linux package and capture path. It used `runpod/kasm-docker:cuda11`, a 60 GB
@@ -200,24 +199,46 @@ Kasm system pip was also incomplete; bootstrapping current pip with
 `https://bootstrap.pypa.io/get-pip.py` and then installing
 `Scripts/requirements-production.txt` supplied Pillow 12.1.1 and PyArrow 25.0.0.
 
-The next session must resume in this order:
+The active pod `movement-v1-4090-network` is attached to that network volume at
+`/workspace` and uses the qualified `movement_v1_kasm_cuda11` template with a
+60 GB container disk, SSH enabled, Jupyter disabled, and
+`NVIDIA_DRIVER_CAPABILITIES=graphics,compat32,utility`. Qualification on this
+exact network-volume pod passed: the NVIDIA RTX 4090 and driver were detected;
+headless Vulkan enumerated the NVIDIA device; Unreal selected `VULKAN_SM6`,
+loaded `Lvl_FirstPerson`, and built the fixed Movement V1 arena; the corrected
+488,501,066-byte payload matched SHA-256
+`A7881C0ED1FBB3923B8769D1AEA585C23534D7EB8DB5CC009F147AF3BE0A0097`
+and passed `gzip -t`; ELF dependencies were complete; and the pinned Pillow
+12.1.1 and PyArrow 25.0.0 requirements installed successfully.
 
-1. Select a network-volume data center with usable RTX 4090 capacity, deciding
-   explicitly whether to retain/wait on the existing `CA-MTL-3` volume or create
-   the production volume elsewhere.
-2. Deploy one pod with that network volume mounted at `/workspace`, using the
-   qualified Kasm template and exactly one generator process on one GPU.
-3. Confirm GPU identity, NVIDIA graphics capabilities, Vulkan ICD, headless
-   Vulkan enumeration, mount identity, capacity, and write access.
-4. Transfer with `runpodctl` 2.9.0 on both ends; verify exact byte size, SHA-256,
-   and `gzip -t` before extraction.
-5. Install the pinned Python production requirements, verify ELF dependencies,
-   and repeat the Unreal offscreen smoke test.
-6. Generate, finalize, and validate one small production-format shard directly
-   on the network volume; stop/restart the pod and prove the shard persists and
-   revalidates.
-7. Only after those gates pass, create and verify the immutable serious Movement
-   V1 collection plan and authorize the real generation run.
+A production-format network-volume capture at 384x384 RGB and 20 Hz completed,
+finalized, and validated with 1 episode, 100 transitions, and 101 observations.
+A second one-second Vulkan capture also finalized and validated with 20
+transitions and 21 observations. The first ten authoritative lossless-WebP
+frames from that run were independently transferred and checksum-verified.
+
+### Current collection intent and scope
+
+The active objective is data generation, not model training. The first serious
+run is 500,000 semantically credited Movement V1 observations generated at
+384x384 RGB and 20 Hz directly into `world_model_trajectory`. The central
+controller must create and verify the immutable plan, and exactly one worker on
+the RTX 4090 must execute its assignments. Each assignment is finalized and
+validated as one shard before its result is published; the worker continues
+until the plan completes. Completion ends the worker process; it does not
+terminate the RunPod pod, which remains running and billable until explicitly
+terminated. Training, trainer smoke tests, and model evaluation belong to a
+later phase on a separate training pod which will attach the same network
+volume. They are not gates for starting this collection.
+
+The 100 GB volume is sufficient for the first 500k Movement V1 run, whose
+measured-format estimate is approximately 52 GB. RunPod network volumes may be
+expanded later but not reduced. Before similarly sized V2 and V3 collections,
+increase this volume to at least 200 GB, with 250 GB preferred for build,
+metadata, and operating headroom. Terminating a generator or training pod does
+not delete the independent network volume. A replacement pod must select the
+volume during deployment; network volumes cannot be attached or detached from
+an already deployed pod.
 
 ### First-dataset collection plan
 
@@ -300,13 +321,18 @@ Implemented and validated now:
 - a coverage-complete 20 Hz Windows toy: 887/887 recipes and cells credited,
   zero semantic failures, and 54,868 validated WebP observations
 
-Still required before serious automated Movement V1 production:
+Still required to start the serious automated Movement V1 collection:
 
-- freeze the numerical production plan only after the Windows and Linux gates
-  pass
-- add Linux libwebp support, package Linux x86-64, and validate on RunPod
-- implement complete action, spatial, contact, duplication, and storage reports
-- run a small trainer/model smoke test
+- create the immutable 500,000-credited-observation production plan on the
+  network volume
+- verify its complete 887-cell catalog, disjoint train/evaluation identities,
+  feasibility, and frozen 55/20/15/5/5 planned frame mixture
+- start exactly one prescribed controller worker on the qualified RTX 4090 and
+  allow its per-assignment finalization and validation loop to run to completion
+
+Complete distribution reports, trainer/model smoke tests, and model evaluation
+remain useful downstream acceptance and training work, but they do not block
+data generation.
 
 ## Repository and project lineage
 
@@ -2050,17 +2076,18 @@ are all covered.
 
 Immediate implementation order:
 
-1. Back up or migrate the verified Linux collection from pod-local persistent
-   storage to portable network/object storage and retain the immutable plan,
-   manifests, checksums, inventory, and verification report independently.
-2. Complete distribution reports and a small trainer/model smoke test using the
-   independently validated Windows and Linux collections.
-3. Compare platform-level credited distributions and selected same-recipe
-   replays; require semantic parity, not byte-identical cross-platform rendering.
-4. Choose production X at or above the recorded feasibility floor, then
-   authorize only the staged data-volume rollout above.
+1. Create the immutable 500,000-credited-observation Movement V1 plan directly
+   under the persistent network-volume collection root.
+2. Run `verify-plan` and inspect the planned 887-cell coverage,
+   train/evaluation separation, and 55/20/15/5/5 distribution.
+3. Start exactly one worker on the qualified RTX 4090. Let the existing
+   assignment loop generate, finalize, validate, and publish shards until the
+   controller inventory reports the plan complete.
+4. Retain the plan, manifests, checksums, validated shards, results, and final
+   inventory on the network volume. Terminate the generator pod after collection
+   completion; a later training pod will attach the same volume.
 
-Deferred work which is not a first-dataset gate includes asynchronous GPU
+Deferred work which is not a data-generation gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple
-processes on one GPU, and human keyboard capture. Complete distribution reports
-and the trainer/model smoke test remain required before serious collection.
+processes on one GPU, human keyboard capture, complete downstream distribution
+analysis, and trainer/model smoke tests.
