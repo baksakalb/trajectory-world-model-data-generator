@@ -265,6 +265,19 @@ Autoencoder and world-model training begin only after the complete V1+V2 corpus
 is available and validated. Training belongs to a later training pod attached
 to the same persistent volume and is not a gate for V2 generator development.
 
+### Local unattended Windows host state (2026-08-08)
+
+The dedicated Windows development computer is configured for unattended remote
+work. Its High performance power plan never turns off the display, sleeps, or
+hibernates on AC or battery; hybrid sleep, the screen saver, inactivity locking,
+hibernation, and Fast Startup are disabled. Windows UAC remains enabled
+(`EnableLUA=1`), but administrator elevation is configured without a consent
+prompt (`ConsentPromptBehaviorAdmin=0`, `PromptOnSecureDesktop=0`). A direct
+elevation smoke test completed without interaction. This deliberately reduces
+local security and should be reversed when unattended operation ends; the normal
+administrator defaults are `ConsentPromptBehaviorAdmin=5` and
+`PromptOnSecureDesktop=1`.
+
 ### Movement V1 collection plan and retained controller contract
 
 The first production dataset is automated Movement V1. Its accepted-frame target
@@ -845,6 +858,9 @@ additional HUD mechanics exist in V1.
 
 V2 combines the former preview and throw stages. Q is a level-triggered
 stationary aiming mode and E is a gated edge-triggered throw request.
+The authoritative implementation catalog, mandatory cell enumeration, local
+qualification plan, and 128-example visual audit contract are frozen in
+[`V2.data_generation`](V2.data_generation).
 
 Aim lock and trajectory:
 

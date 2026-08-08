@@ -1,0 +1,982 @@
+# V2 Trajectory-and-Throw Data Generation Contract
+
+Status: frozen implementation contract
+
+Contract version: `v2-data-generation-spec-1`
+
+This file is the catalog-first implementation plan for the fixed-map V2
+trajectory-and-throw collection. It defines what must be implemented, generated,
+validated, reported, and shown to the user before a production plan may be
+created. A behavior may not be silently removed because it is difficult to
+implement. Changes require an explicit versioned amendment to this file.
+
+The current Unreal generator's legacy `trajectory` and `throw` modes are
+implementation references only. They do not satisfy this contract.
+
+## 1. Objective and boundary
+
+Movement V1 is complete and remains unchanged. V2 supplies the visual vocabulary
+that is absent from V1:
+
+- stationary trajectory computation
+- preview appearance, adjustment, stability, and cancellation
+- accepted and rejected throw requests
+- grenade launch, flight, collision, bounce, rolling, and rest
+- persistent resting grenades
+- cooldown and crosshair state
+- movement and camera behavior after a throw
+- natural multi-grenade scenes in long random episodes
+
+The intended first V2 production request is approximately 1,000,000 semantically
+credited observations at 384x384 and 20 Hz. The size is not hard-coded. The V2
+planner accepts any requested X at or above its calibrated complete-coverage
+floor and preserves the frozen frame allocation:
+
+| Source | Credited-frame share |
+| --- | ---: |
+| coherent semi-Markov random play | 55% |
+| prescribed missions | 45% |
+
+Increasing X adds deterministic repetition and progressively refined continuous
+samples. It does not introduce previously unsupported categories or alter the
+55/45 source shares.
+
+The model contract remains visual:
+
+```text
+future RGB/latent observations conditioned on RGB history and ten action bits
+```
+
+Simulator geometry, trajectory points, launch velocity, and collision state are
+privileged validation metadata, not required model inputs or outputs.
+
+## 2. Frozen runtime action contract
+
+### 2.1 Q stationary aim lock
+
+- Q is level-triggered.
+- Q=1 displays exactly one green predicted trajectory.
+- Q=0 hides the trajectory.
+- A Q rising edge immediately removes planar player velocity.
+- Vertical physics remains active; Q must never create hovering or cancel a
+  legitimate vertical fall.
+- W/A/S/D have no locomotion effect while Q is held.
+- Automated production policy normally emits W/A/S/D=0 during Q, except for the
+  explicit conflict cells which teach Q priority.
+- ArrowUp/ArrowDown/ArrowLeft/ArrowRight remain active while Q is held.
+- The predicted trajectory is recomputed at every observation from the current
+  stationary launch position and camera rotation.
+- Movement becomes available only after Q is released.
+- Q never snaps the camera and never teleports the player.
+
+### 2.2 E throw gate
+
+- E is edge-triggered.
+- Only E=0 to E=1 requests a throw.
+- Holding E does not repeat a throw.
+- E must return to zero before another request can exist.
+- A throw is accepted only if Q is held and Q was visible in at least one
+  preceding stored observation.
+- Q and E becoming active together on the first Q observation is rejected.
+- E without Q is rejected.
+- E during cooldown is rejected.
+- Rejected requests are not buffered.
+- An accepted request uses exactly the launch state represented by the visible
+  trajectory at the source observation.
+
+### 2.3 Post-throw Q and movement
+
+- Q may be released immediately after E, retained briefly, or retained through
+  part or all of cooldown according to the recipe.
+- While Q remains held, the player remains stationary and the current green
+  preview updates independently of the already-launched grenade.
+- Releasing Q hides the preview and re-enables movement.
+- No action or mission policy tracks, centers, chases, or deliberately
+  reacquires an airborne grenade with the camera.
+
+### 2.4 Cooldown and overlays
+
+- Cooldown lasts exactly 2.0 simulated seconds.
+- At 20 Hz it spans exactly 40 action transitions.
+- The crosshair is green when a throw is available.
+- The crosshair is red while cooldown is active.
+- The trajectory remains green during cooldown.
+- The crosshair is composited after the trajectory so it remains visible where
+  the two overlap.
+
+### 2.5 Grenades and physics
+
+- Throw speed, gravity, radius, restitution, damping, stop thresholds, and other
+  physics parameters remain fixed across the collection.
+- Hidden episode-level physics randomization is prohibited.
+- Grenades never explode, damage, or break anything in V2.
+- Grenades do not collide with the player or later grenades.
+- Grenades bounce and roll until resting.
+- Resting grenades persist until episode reset and stop ticking once at rest.
+- Grenades do not affect the current Q preview.
+- Episode reset removes every generated grenade.
+
+## 3. Observation and annotation contract
+
+Every ordinary model observation remains RGB. V2 additionally records
+privileged fields for validation, balancing, replay, and optional pixel-loss
+weighting.
+
+Required per-observation additions:
+
+- `aim_lock_active`
+- `trajectory_visible`
+- `trajectory_mask_key`, null when Q is not visible
+- `crosshair_state`: `Ready` or `Cooldown`
+- `cooldown_remaining_steps`
+- grenade states and stable grenade IDs
+- count of flying, resting, visible, and total grenades
+- V2 episode phase
+
+Required per-transition additions:
+
+- requested canonical ten-bit action mask
+- whether planar movement was suppressed by Q
+- Q rising and falling edges
+- E request edge
+- E accepted flag
+- E rejection reason: `none`, `q_not_held`, `q_not_previously_visible`,
+  `cooldown`, or `not_rising_edge`
+- accepted throw grenade ID
+- cooldown before and after the transition
+
+Required per-episode/recipe additions:
+
+- source: `random_play` or `mission`
+- stable behavior or mission cell ID
+- all categorical factors and continuous stratum identities
+- launch position, camera state, and replay keys
+- preview start, accepted throw, first contact, rest, and episode-tail indices
+- requested and realized contact/passage/near-miss outcome
+- semantic success/failure and coverage-credit decision
+
+### 3.1 Exact trajectory-pixel mask
+
+When Q is visible, store one lossless 8-bit grayscale WebP mask at the capture
+resolution:
+
+- zero means no visible trajectory contribution
+- 1-255 preserves the exact antialiased trajectory coverage
+- crosshair-overwritten pixels are removed so the mask corresponds to the final
+  visible RGB trajectory
+- the mask is generated by the same rasterizer and geometry used for RGB
+- it is validated against the final RGB composition
+
+The mask is not a model input and does not create a required segmentation,
+polyline, or simulator-state output. It supports visual QA and optional
+mask-weighted decoded-image loss only. A grenade mask is not required by this
+contract.
+
+## 4. Episode and credit contract
+
+### 4.1 Clean boundaries
+
+- Resets occur only between episodes.
+- No transition sequence crosses an episode boundary.
+- No mid-episode teleport, camera snap, velocity repair, or hidden steering is
+  permitted.
+- Every accepted throw must be followed through grenade rest and a post-rest
+  continuation before the episode may complete.
+
+### 4.2 Random episode duration
+
+- Nominal random duration is stratified from 45 to 75 simulated seconds.
+- Initial position, yaw, and pitch are deterministic stratified samples.
+- Initial planar velocity is zero.
+- Every tenth ordinary random episode uses the canonical reference spawn and
+  orientation for replay comparison.
+- If the most recently thrown grenade is still moving at the nominal boundary,
+  extend the episode until it rests plus the required tail.
+- Boundary extension is capped at 12 simulated seconds. Exceeding the cap is a
+  diagnostic semantic failure rather than silently truncated credited data.
+
+### 4.3 Mission duration
+
+- Mission episodes begin at a recipe-defined valid launch region.
+- They contain at least one Q-off observation before Q activation.
+- Aim acquisition has a 4-second timeout.
+- Flight/rest completion has a 12-second timeout after the accepted throw.
+- Required post-rest continuation is stratified from 1.0 to 2.0 seconds.
+- Overall mission timeout is 20 simulated seconds.
+- Successful mission observations from initial state through the completed tail
+  are credited to the mission source.
+- A semantic failure remains authoritative diagnostic data but receives no
+  intended cell or frame credit and resolves through bounded reserves.
+
+### 4.4 Duplicate-frame control
+
+- An unchanged preview hold is bounded.
+- Completely motionless post-rest footage is bounded by the required tail.
+- Long episodes provide coherent transitions, not arbitrary idle padding.
+- Exact and perceptual near-duplicate rates are reported by phase.
+- Frame quotas may not be satisfied by extending static holds.
+
+## 5. Random-play catalog: 55% of credited frames
+
+Random play reuses the validated V1 semi-Markov movement and camera policy while
+Q is released. Q/E behavior is a coherent state machine, never independent bit
+sampling:
+
+```text
+traverse
+-> request stationary aim
+-> hold/adjust preview
+-> cancel or throw
+-> release/retain Q according to recipe
+-> apply post-throw movement/camera behavior
+-> wait for rest and tail
+-> return to traverse
+```
+
+### 5.1 Random credited-frame phase targets
+
+These shares are inside the 55% random source and are calibrated by realized
+credited frames, not decision counts:
+
+| Random phase group | Random-source share |
+| --- | ---: |
+| ordinary V1-style traversal between aim events | 15% |
+| preview adjustment and cancellation | 20% |
+| valid preview-to-throw sequences | 25% |
+| explicit rejected-request sequences | 5% |
+| post-throw movement/observation through rest | 25% |
+| multi-throw and persistent-grenade sequences | 10% |
+
+Tolerance after calibration and clean episode boundaries is +/-2 percentage
+points per group.
+
+### 5.2 Mandatory random behavior families
+
+Each family has four initial hold bands: `short`, `medium`, `long`, and
+`very_long`. This creates 18 x 4 = 72 mandatory random discrete cells.
+
+| ID | Behavior family | Required behavior |
+| --- | --- | --- |
+| R01 | `movement_interval` | ordinary V1 movement/camera interval between aim events |
+| R02 | `preview_static_cancel` | Q hold with stable camera, then release without E |
+| R03 | `preview_yaw_cancel` | coherent yaw adjustment under Q, then cancel |
+| R04 | `preview_pitch_cancel` | coherent pitch adjustment under Q, then cancel |
+| R05 | `preview_combined_cancel` | pitch+yaw adjustment under Q, then cancel |
+| R06 | `throw_release_immediate` | valid throw and Q release on the next action |
+| R07 | `throw_hold_short` | valid throw and retain Q for 2-10 observations |
+| R08 | `throw_hold_cooldown` | valid throw and retain Q through a substantial cooldown interval |
+| R09 | `reject_e_without_q` | explicit E edge while Q is absent |
+| R10 | `reject_first_frame_qe` | Q and E rise together and throw is rejected |
+| R11 | `reject_e_cooldown` | explicit E edge during cooldown |
+| R12 | `post_throw_stationary` | release Q and remain stationary without grenade tracking |
+| R13 | `post_throw_forward` | release Q and move forward through flight/rest |
+| R14 | `post_throw_backward` | release Q and move backward through flight/rest |
+| R15 | `post_throw_strafe_left` | release Q and strafe left through flight/rest |
+| R16 | `post_throw_strafe_right` | release Q and strafe right through flight/rest |
+| R17 | `post_throw_diagonal` | release Q and use a mirrored diagonal movement profile |
+| R18 | `multi_throw_persistence` | multiple valid throws separated by cooldown with older grenades persisting |
+
+### 5.3 Random decision distributions
+
+- 25-35% of completed aim sequences cancel without throwing.
+- 65-75% of completed aim sequences request a valid throw.
+- Of accepted throws: 60% release Q immediately, 25% retain it for 2-10
+  observations, and 15% retain it through a substantial cooldown interval.
+- Rejected requests are restricted to the explicit R09-R11 families and the 5%
+  rejected-request phase budget.
+- A small controlled subset of Q-visible frames contains W/A/S/D bits so the
+  dataset proves Q priority; these conflicts do not move the player.
+
+Post-Q-release movement distribution across completed throws:
+
+| Movement profile | Share |
+| --- | ---: |
+| stationary | 20% |
+| forward | 20% |
+| backward | 15% |
+| strafe left | 10% |
+| strafe right | 10% |
+| mirrored diagonal | 10% |
+| ordinary semi-Markov continuation | 15% |
+
+Camera behavior is sampled independently from `preserve_aim`,
+`continue_preselected_camera_hold`, and `ordinary_survey`. None may use grenade
+position as a camera target.
+
+## 6. Prescribed mission catalog: 45% of credited frames
+
+Frozen top-level shares:
+
+| Family | ID prefix | Total V2 share | Mandatory cells |
+| --- | --- | ---: | ---: |
+| solid-object interactions | `SO` | 15% | 504 |
+| wall and corner interactions | `WA` | 10% | 192 |
+| floor landing, bounce, and rest | `FL` | 8% | 288 |
+| ramp interactions | `RA` | 6% | 72 |
+| hoop interactions | `HO` | 6% | 56 |
+| total prescribed missions |  | 45% | 1,112 |
+
+With the 72 random cells, the complete V2 catalog contains 1,184 mandatory
+discrete cells. The final feasibility floor is derived only after measured V2
+duration calibration; it is not guessed from cell count.
+
+### 6.1 Shared categorical and continuous vocabulary
+
+Target-centered approach sectors:
+
+```text
+S0 +X
+S1 +X+Y
+S2 +Y
+S3 -X+Y
+S4 -X
+S5 -X-Y
+S6 -Y
+S7 +X-Y
+```
+
+Distance strata use horizontal launch-to-objective distance before safe jitter:
+
+- `near`: 300-600 cm
+- `medium`: 600-1000 cm
+- `far`: 1000-1500 cm
+
+The geometry solver may narrow a range to remain inside the arena and outside
+collision, but it may not relabel a sample into another band. An infeasible cell
+must fail validation and be fixed explicitly.
+
+Arc bands are defined by the predicted path apex relative to launch height:
+
+- `low`: apex rise below 150 cm
+- `medium`: apex rise from 150 through 400 cm
+- `high`: apex rise above 400 cm
+
+Camera pitch remains within the approved gameplay limits. The solver finds a
+valid angle for the requested semantic band; it does not change throw speed or
+gravity.
+
+Shared directness modes:
+
+- `direct`: central surface normal incidence within the recipe tolerance
+- `glance_left`
+- `glance_right`
+- `near_miss`: passes within a bounded object-relative clearance without contact
+
+Every continuous value records its stratum, ordinal, refinement level, and
+stateless jitter key.
+
+### 6.1.1 Visible trajectory-interaction requirement
+
+A trajectory-interaction mission is not satisfied by placing a trajectory and an
+object in the same image. Except for explicitly defined `near_miss`,
+`clean_pass`, and `direct_settle` outcomes, the green predicted trajectory must
+visibly express the requested physical interaction before the throw:
+
+- a visible incoming trajectory segment approaches the requested surface
+- the predicted contact point lies on the requested target region
+- the path changes direction at the contact according to the fixed grenade
+  simulation
+- a visible outgoing trajectory segment continues after contact
+- subsequent requested bounces, rolls, and the final rest portion remain part of
+  the predicted path until the simulated grenade stops
+
+Mission validation therefore requires both world-space semantic correctness and
+screen-space legibility. For the observation selected as the authoritative
+pre-throw preview:
+
+- the target and requested contact region must be inside the captured image
+- the incoming leg must contain a minimum visible projected length
+- the outgoing leg must contain a minimum visible projected length
+- the contact turn must produce a measurable projected direction change unless
+  the recipe explicitly requests a nearly head-on reversal
+- the target may not obscure so much of either leg that a reviewer cannot see
+  the interaction
+- the exact trajectory mask must contain separately identifiable pre-contact and
+  post-contact pixel runs connected at the requested contact neighborhood
+
+The minimum projected lengths, contact-neighborhood radius, and direction-change
+tolerance are calibrated in pixels at 384x384 during focused Windows review and
+then frozen before the toy catalog. A cell whose physics is correct but whose
+interaction is not visually legible is a semantic failure and receives no
+intended mission credit.
+
+Outcome-specific interpretation:
+
+- `direct_center`, `direct_upper`, `direct_lower`, `glance_left`,
+  `glance_right`, `wall_first`, `floor_then_wall`, `wall_then_floor`, ramp
+  contact modes, and `rim_contact` require a visible post-contact trajectory.
+- `one_bounce` and `multi_bounce` require every credited bounce to be visible in
+  the preview, including the outgoing leg after the final counted bounce.
+- `floor_bounce_then_contact`, `floor_then_wall`, `floor_then_ramp`, and
+  `floor_bounce_then_hoop` require both interactions and the trajectory segment
+  connecting them to be visible.
+- `near_miss` requires a visibly bounded closest approach followed by an
+  uninterrupted outgoing path and no contact turn.
+- `clean_pass` requires a visible incoming path, aperture crossing, and outgoing
+  path without a collision turn.
+- `direct_settle` requires the incoming path and terminal floor/rest portion; it
+  does not invent a rebound that the fixed simulation did not produce.
+
+The physical grenade thrown from that preview must subsequently realize the
+same ordered contacts and outgoing motion. Review examples show both the
+pre-throw computed interaction and the realized flight-to-rest outcome.
+
+### 6.2 Solid-object interactions: 504 cells
+
+Targets:
+
+- rectangle
+- pyramid
+- sphere
+
+Interaction modes:
+
+| Mode | Semantic requirement |
+| --- | --- |
+| `direct_center` | first target contact in the central region |
+| `direct_upper` | first target contact in the upper region |
+| `direct_lower` | first target contact in the lower region |
+| `glance_left` | left-offset glancing target contact |
+| `glance_right` | right-offset glancing target contact |
+| `floor_bounce_then_contact` | floor contact precedes target contact |
+| `near_miss` | bounded close pass with no target contact |
+
+Cell construction:
+
+```text
+target(3) x approach_sector(8) x interaction_mode(7) x variation(3)
+= 504 cells
+```
+
+For variation `v=0..2`:
+
+```text
+distance_band = (sector_index + mode_index + v) mod 3
+arc_band      = (2*sector_index + mode_index + v) mod 3
+```
+
+Thus every target/sector/mode base cell receives all three distance bands and all
+three arc bands across its mandatory variations.
+
+Object-specific validation regions:
+
+- rectangle: four sides, top-visible region, lower/middle/upper face bands, and
+  bounded edges
+- pyramid: each sloped face, lower/middle/upper bands, and bounded edges
+- sphere: central, upper, lower, left/right offset, and tangent-like glancing
+  surface-normal regions
+
+Successful non-near-miss recipes require the intended target to be the requested
+contact in the requested order. Near-miss recipes require no target contact and
+must meet both minimum and maximum clearance bounds.
+
+### 6.3 Wall and corner interactions: 192 cells
+
+Walls:
+
+- north
+- south
+- east
+- west
+
+Approach profiles:
+
+- `direct`
+- `glance_left`
+- `glance_right`
+- `near_parallel`
+
+Impact height bands:
+
+- `low`
+- `middle`
+- `high`
+
+Sequences:
+
+- `wall_first`
+- `floor_then_wall`
+- `wall_then_floor`
+- `adjacent_corner`
+
+Cell construction:
+
+```text
+wall(4) x approach_profile(4) x height_band(3) x sequence(4)
+= 192 cells
+```
+
+Validation records intended and realized wall identity, impact point, incoming
+direction, surface normal, contact order, adjacent wall identity when required,
+and final resting wall-distance band.
+
+### 6.4 Floor landing, bounce, and rest: 288 cells
+
+Azimuth sectors:
+
+- the shared eight S0-S7 sectors around the player
+
+Landing distance:
+
+- near
+- medium
+- far
+
+Arc:
+
+- low
+- medium
+- high
+
+Outcome:
+
+- `direct_settle`: floor first, bounded short roll, no material rebound
+- `one_bounce`: exactly one material floor bounce before settling behavior
+- `multi_bounce`: at least two material bounces
+- `long_roll`: bounded low-bounce outcome followed by long horizontal travel
+
+Cell construction:
+
+```text
+azimuth(8) x distance(3) x arc(3) x outcome(4)
+= 288 cells
+```
+
+Validation includes first floor contact, bounce count band, horizontal travel,
+rest position sector/distance, proximity to landmarks, and absence of unintended
+object/wall first contact.
+
+### 6.5 Ramp interactions: 72 cells
+
+Approach:
+
+- `uphill`
+- `downhill`
+- `lateral_left_to_right`
+- `lateral_right_to_left`
+
+Ramp region:
+
+- `lower`
+- `middle`
+- `upper`
+
+Interaction mode:
+
+- `direct_surface`
+- `glancing_surface`
+- `floor_then_ramp`
+- `ramp_then_floor`
+- `cross_over`
+- `near_miss_side`
+
+Cell construction:
+
+```text
+approach(4) x ramp_region(3) x interaction_mode(6)
+= 72 cells
+```
+
+Distance, arc, lateral offset, incoming angle, and final rest side use progressive
+strata assigned by recipe repetition. Validation uses the actual ramp surface
+normal and ordered contacts, not only a bounding-box overlap.
+
+### 6.6 Hoop interactions: 56 cells
+
+Direction:
+
+- `negative_x_to_positive_x`
+- `positive_x_to_negative_x`
+
+Path profile:
+
+- `center`
+- `horizontal_left`
+- `horizontal_right`
+- `vertical_above`
+- `vertical_below`
+- `oblique_left_to_right`
+- `oblique_right_to_left`
+
+Outcome:
+
+- `clean_pass`
+- `rim_contact`
+- `near_miss`
+- `floor_bounce_then_hoop`
+
+Cell construction:
+
+```text
+direction(2) x path_profile(7) x outcome(4)
+= 56 cells
+```
+
+The path profile describes the prescribed approach corridor; the outcome
+determines the final offset/contact. Clean passage is credited by interpolating
+the exact plane crossing and verifying aperture clearance. Rim contact requires
+the hoop as the intended contact. Near-miss requires bounded clearance with no
+aperture crossing or rim contact. Floor-bounce recipes require ordered floor
+contact before the requested hoop outcome.
+
+## 7. Post-throw mission variation
+
+Every mission cell receives progressive post-throw variation without multiplying
+the mandatory discrete catalog:
+
+- Q release: immediate, short retain, substantial cooldown retain
+- movement after release: stationary, forward, backward, strafe left, strafe
+  right, mirrored diagonal, ordinary semi-Markov
+- camera after throw: preserve aim, continue a preselected camera hold, ordinary
+  survey
+- tail style: remain, pass by outcome area, move away, or continue traversal
+
+These dimensions are assigned by stable recipe ordinal so every mission family
+and target eventually receives every profile as X increases. No profile uses the
+grenade location as a camera target.
+
+## 8. Required distribution reports
+
+The controller/reviewer must report planned and realized credited frames for:
+
+- 55/45 source split
+- every mission family and mandatory cell
+- every random phase group and behavior family
+- target, wall, approach sector, distance band, arc band, target region, path,
+  interaction mode, contact sequence, outcome, and rest region
+- Q-visible and Q-hidden frames
+- Q rising/falling edges and hold duration
+- aim-lock movement suppression and conflict combinations
+- accepted and rejected E edges by rejection reason
+- immediate/short/cooldown Q release profiles
+- ready and cooldown crosshair frames
+- grenade counts: total, flying, resting, and visible
+- frames with zero, one, two-to-four, and five-or-more grenades
+- airborne-plus-resting coexistence
+- grenade visible and naturally off-screen frames
+- first-contact identities and bounce-count bands
+- post-throw movement and camera profiles
+- time from Q rise to E, E to first contact, E to rest, and rest to episode end
+- exact and perceptual near-duplicate frames by phase
+- semantic failures, reserve activation, retries, and overshoot
+- train/evaluation replay-identity separation
+
+Initial audit bands, to be frozen numerically after the mixed calibration pilot:
+
+- Q-visible observations: 35-45% of all V2 credited frames
+- at least one live or resting grenade present: 35-50%
+- cooldown observations: 20-30%
+- cancelled previews: 25-35% of completed random aim sequences
+- accepted throws: 65-75% of completed random aim sequences
+
+Failure to hit an audit band is not repaired by inventing runtime recipes. The
+planner or calibrated recipe weights must be revised and versioned.
+
+## 9. Visual audit example contract
+
+When the user asks for examples after generation, deliver one authoritative MP4
+for every audit slot below. Videos are derived only from stored observations.
+Desktop recordings and separately rendered replays are forbidden.
+
+Each example manifest row contains:
+
+- audit slot ID and human-readable title
+- recipe/cell ID, seed, split, and shard
+- all categorical factors and continuous stratum identities
+- observation and action counts
+- Q start/release, E request/accept, first contact, rest, and tail indices
+- requested and realized outcome
+- semantic validation result
+- video filename and source image keys
+
+### 9.1 Random audit slots: 18
+
+Provide one successful example for each R01-R18 behavior family. The selected
+examples collectively cover all four hold bands, all Q-release profiles, all
+post-throw movement profiles, every E rejection reason, all camera behaviors,
+and zero/one/multiple-grenade scenes.
+
+### 9.2 Solid-object audit slots: 24
+
+Provide one example for every:
+
+```text
+target(3) x approach_sector(8) = 24 slots
+```
+
+For target index `t` and sector `s`, select:
+
+```text
+interaction_mode = (s + 2*t) mod 7
+distance_band    = (s + t) mod 3
+arc_band         = (2*s + t) mod 3
+```
+
+The 24 examples therefore show every object from every surrounding sector while
+collectively exposing every interaction, distance, and arc level for each
+target.
+
+### 9.3 Wall audit slots: 16
+
+Provide one example for every:
+
+```text
+wall(4) x approach_profile(4) = 16 slots
+```
+
+For wall index `w` and approach index `a`:
+
+```text
+height_band = (w + 2*a) mod 3
+sequence    = (w + a) mod 4
+```
+
+This exposes every wall, direct/glancing/parallel geometry, all height bands,
+and all contact sequences.
+
+### 9.4 Floor audit slots: 32
+
+Provide one example for every:
+
+```text
+azimuth_sector(8) x outcome(4) = 32 slots
+```
+
+For sector `s` and outcome `o`:
+
+```text
+distance_band = (s + o) mod 3
+arc_band      = (2*s + o) mod 3
+```
+
+### 9.5 Ramp audit slots: 24
+
+Provide one example for every:
+
+```text
+approach(4) x interaction_mode(6) = 24 slots
+```
+
+Select ramp region `(approach_index + mode_index) mod 3`.
+
+### 9.6 Hoop audit slots: 14
+
+Provide one example for every:
+
+```text
+direction(2) x path_profile(7) = 14 slots
+```
+
+Select outcome `(direction_index + path_index) mod 4`. The selected set must be
+augmented if this mapping does not expose all four outcomes for both directions
+after geometry validation.
+
+### 9.7 Audit total and presentation
+
+The initial required audit suite contains:
+
+```text
+18 random
++ 24 solid object
++ 16 wall
++ 32 floor
++ 24 ramp
++ 14 hoop
+= 128 visual examples
+```
+
+Deliver them in indexed folders by family with:
+
+- one `manifest.json`
+- one human-readable `README.md`
+- contact sheets or lightweight thumbnails for rapid scanning
+- the 128 MP4s
+- a coverage report proving that every required primary and secondary level is
+  represented
+
+If a selected audit recipe fails semantically, it cannot stand as the example;
+use the next validated recipe with the same audit-slot identity.
+
+## 10. Implementation plan
+
+### Phase A: freeze schema and compatibility boundary
+
+1. Add combined stage slug `trajectory_throw_v2` and schema version 11.
+2. Retain legacy stage parsing only for explicit comparison runs.
+3. Add V2 recipe fields, phase enums, stable IDs, and replay keys.
+4. Add configuration validation that rejects incompatible legacy behavior in a
+   V2 prescribed run.
+
+Acceptance:
+
+- schema documents and parser tests pass
+- a V1 configuration remains byte/behavior compatible
+- a V2 configuration cannot silently fall back to the legacy Q/E sampler
+
+### Phase B: implement runtime action semantics
+
+1. Implement Q rising/falling detection and planar aim lock.
+2. Suppress W/A/S/D locomotion while Q is held.
+3. Preserve camera actions and vertical physics.
+4. Implement preceding-observation Q gate for E.
+5. Implement stable rejection reasons and exact cooldown timing.
+6. Make interactive and dataset trajectories always green during cooldown.
+7. Verify crosshair overlay ordering.
+
+Acceptance:
+
+- focused transition tests cover every Q/E edge and conflict
+- no hidden camera/position correction exists
+- exact same-seed replay matches action, state, and RGB
+
+### Phase C: implement mask and metadata
+
+1. Refactor trajectory rasterization so RGB and mask share one geometry pass.
+2. Write lossless grayscale mask members only when Q is visible.
+3. Add typed Parquet fields for V2 observation, transition, and episode data.
+4. Extend finalization, checksums, format comparison, and review loading.
+
+Acceptance:
+
+- every non-null mask exists, has exact dimensions, and matches visible RGB
+- no mask exists for Q-hidden observations
+- PNG/JSONL reference and WebP/Parquet production paths remain semantically
+  equivalent
+
+### Phase D: implement mission geometry and outcomes
+
+1. Implement the shared sector, distance, arc, and stateless-jitter samplers.
+2. Implement solid-object recipe configuration and validators.
+3. Implement wall/corner configuration and ordered-contact validators.
+4. Implement floor outcome configuration and bounce/rest validators.
+5. Implement ramp surface-normal and ordered-contact validators.
+6. Implement hoop crossing, rim, near-miss, and bounce-first validators.
+7. Implement post-throw profiles and rest-tail completion.
+
+Acceptance:
+
+- every one of the 1,112 mission cells can be instantiated deterministically
+- focused runs achieve every primary subtype without mid-episode correction
+- infeasible geometry is fixed rather than skipped or relabeled
+
+### Phase E: implement coherent random play
+
+1. Reuse V1 semi-Markov traversal while Q is released.
+2. Implement the aim/cancel/throw/post-throw state machine.
+3. Implement all R01-R18 behavior families and four hold bands.
+4. Implement long 45-75-second sessions and event-boundary extension.
+5. Implement natural multi-grenade persistence without tracking or hidden
+   deletion.
+6. Implement phase counters needed for frame balancing.
+
+Acceptance:
+
+- every random cell replays exactly
+- random play reaches all action-state transitions coherently
+- no camera action is derived from grenade position
+- no accepted throw is truncated before rest and tail
+
+### Phase F: extend central planning and workers
+
+1. Add the frozen 72/1,112 cell catalog to a V2 planner module.
+2. Preserve immutable plan identity, stable prefixes, assignment blocks,
+   whole-shard retry, bounded reserves, and reconstructable inventory.
+3. Allocate 55/45 and nested mission shares from measured duration calibration.
+4. Reject production X below the complete-coverage/distribution floor.
+5. Retain explicit below-floor diagnostic-only plans.
+6. Assign disjoint evaluation recipe identities before generation.
+
+Acceptance:
+
+- unit tests verify catalog counts and every discrete identity
+- larger X extends the same canonical prefix
+- worker count does not change recipe identity or allocation
+- planned shares meet tolerance before execution
+
+### Phase G: validation, reports, and example builder
+
+1. Extend dataset validation for every runtime and mission semantic.
+2. Implement all required distribution reports in Section 8.
+3. Add duplicate-frame, visibility, contact-order, and event-duration reports.
+4. Build deterministic audit-slot selection and 128-example export.
+5. Generate README, manifest, thumbnails/contact sheets, and MP4s strictly from
+   authoritative observations.
+
+Acceptance:
+
+- deliberate corruptions fail the intended validator
+- one command rebuilds inventory and audit selection from immutable records
+- every audit slot is filled only by a semantically successful recipe
+
+### Phase H: Windows qualification and calibration
+
+1. Run focused 384x384 examples for each primary subtype.
+2. Inspect action overlays, trajectory masks, contacts, bounces, and tails.
+3. Run exact replay pairs.
+4. Run the complete low-resolution 1,184-cell toy catalog.
+5. Run a representative mixed 384x384 pilot.
+6. Measure duration by cell, storage rate, duplicate rate, and realized phase
+   distributions.
+7. Freeze `movement_v2_duration_calibration.json`, audit bands, feasibility
+   floor, and any safe-range narrowing through a versioned amendment.
+
+Acceptance:
+
+- zero unexplained technical failures
+- all mandatory cells instantiate and validate
+- all 128 visual audit slots are reviewable
+- planned and realized distributions meet frozen tolerance
+
+### Phase I: packaged parity and production handoff
+
+1. Package the qualified Windows revision for Linux.
+2. Run one focused Linux smoke and deterministic parity subset.
+3. Create the immutable production plan for requested X.
+4. Verify catalog completeness, shares, evaluation separation, storage capacity,
+   and assignment boundaries.
+5. Execute one generator process per GPU through the central ledger.
+6. Finalize, validate, checksum, and publish every shard independently.
+7. Reconstruct final inventory and export the 128-example audit suite.
+
+Production completion requires:
+
+- requested credited-frame target reached at clean boundaries
+- complete 1,184-cell coverage
+- 55/45 and nested frozen distributions within tolerance
+- no unresolved technical assignments
+- semantic failures resolved within bounded reserves
+- exact plan/shard/result checksums
+- complete review manifest and 128 successful examples
+
+## 11. Test plan
+
+Required automated test groups:
+
+- action-bit and Q-priority unit tests
+- preceding-Q and E edge/cooldown unit tests
+- exact 40-transition cooldown tests
+- aim-lock ground/ramp/vertical-motion tests
+- trajectory RGB/mask compositor tests
+- grenade fixed-physics and preview-at-throw parity tests
+- every catalog enumeration/count test
+- every cell-ID stability test
+- continuous stratum and jitter replay tests
+- mission geometry feasibility tests
+- contact-order and near-miss validator tests
+- rest/tail and timeout tests
+- long random-session boundary-extension tests
+- no-tracking policy tests
+- controller prefix/worker independence tests
+- diagnostic-plan and reserve tests
+- cross-format decoded-pixel/metadata comparison
+- corrupted-shard negative validation tests
+- audit-slot coverage and export tests
+
+## 12. Definition of ready to code
+
+Implementation may begin when this file is accepted as the V2 contract. Coding
+must proceed phase by phase, with focused evidence retained for each phase. A
+later implementation discovery may narrow a continuous safe range, but it may
+not remove a categorical level, change a share, change an action semantic, or
+reduce the 128-example audit obligation without an explicit user-approved
+versioned amendment.
