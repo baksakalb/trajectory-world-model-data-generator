@@ -442,7 +442,8 @@ def create_plan(args: argparse.Namespace) -> None:
     calibration_identity = stable_id("calibration", calibration)
     requirements = feasibility_requirements(calibration)
     minimum_frames = minimum_feasible_frame_budget(calibration)
-    if args.frame_budget < minimum_frames:
+    infeasible_budget = args.frame_budget < minimum_frames
+    if infeasible_budget and not getattr(args, "allow_infeasible_diagnostic", False):
         raise ValueError(
             f"frame budget {args.frame_budget} is infeasible: complete discrete coverage "
             f"and the frozen nested frame shares require at least {minimum_frames} credited observations"
@@ -556,6 +557,8 @@ def create_plan(args: argparse.Namespace) -> None:
         "reserve_recipe_count": len(reserves),
         "target_accepted_frames": args.frame_budget,
         "minimum_feasible_accepted_frames": minimum_frames,
+        "diagnostic_only": bool(infeasible_budget),
+        "distribution_feasible": not infeasible_budget,
         "feasibility_requirements": requirements,
         "expected_base_credited_frames": float(base_expected),
         "expected_base_frames_by_mission": {mission: float(value) for mission, value in expected_base_by_mission.items()},
@@ -563,7 +566,11 @@ def create_plan(args: argparse.Namespace) -> None:
         "object_mode_shares": {name: float(share) for name, share in OBJECT_MODE_SHARES.items()},
         "object_gaze_shares": {name: float(share) for name, share in OBJECT_GAZE_SHARES.items()},
         "facing_shares": {name: float(share) for name, share in FACING_SHARES.items()},
-        "budget_completion_policy": "count only semantically credited observations; require complete discrete coverage; stop before new work once target is reached",
+        "budget_completion_policy": (
+            "diagnostic only; count semantically credited observations; stop before new work once target is reached; complete discrete coverage is not required"
+            if infeasible_budget else
+            "count only semantically credited observations; require complete discrete coverage; stop before new work once target is reached"
+        ),
         "candidate_exhaustion_policy": "insufficient_capacity; never invent runtime recipes",
         "worker_count": args.workers,
         "recipes_per_assignment": args.recipes_per_assignment,
@@ -742,7 +749,9 @@ def build_inventory(root: Path) -> dict[str, Any]:
         "candidate_capacity_exhausted": candidate_exhausted,
         "insufficient_capacity": candidate_exhausted and (accepted_frames < plan["target_accepted_frames"] or bool(missing_cells)),
         "duplicate_validated_results_ignored": duplicate_results,
-        "complete": accepted_frames >= plan["target_accepted_frames"] and not missing_cells,
+        "complete": accepted_frames >= plan["target_accepted_frames"] and (
+            bool(plan.get("diagnostic_only")) or not missing_cells
+        ),
     }
     return inventory
 
@@ -849,6 +858,11 @@ def parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="create an immutable collection plan")
     plan.add_argument("collection", type=Path)
     plan.add_argument("--frame-budget", type=int, required=True)
+    plan.add_argument(
+        "--allow-infeasible-diagnostic",
+        action="store_true",
+        help="allow a below-floor diagnostic plan that stops at its frame budget without claiming complete coverage",
+    )
     plan.add_argument("--workers", type=int, default=1)
     plan.add_argument("--recipes-per-assignment", type=int, default=32)
     plan.add_argument("--tail-single-recipes", type=int, default=64)

@@ -20,7 +20,12 @@ import dataset_worker as worker
 
 
 def plan_args(
-    root: Path, *, budget: int = 350000, workers: int = 1, seed_start: int = 1000
+    root: Path,
+    *,
+    budget: int = 350000,
+    workers: int = 1,
+    seed_start: int = 1000,
+    allow_infeasible_diagnostic: bool = False,
 ) -> Namespace:
     return Namespace(
         collection=root,
@@ -38,6 +43,7 @@ def plan_args(
         duration_calibration=controller.DEFAULT_DURATION_CALIBRATION,
         split="train",
         plan_id=None,
+        allow_infeasible_diagnostic=allow_infeasible_diagnostic,
     )
 
 
@@ -98,6 +104,42 @@ class ControllerContractTests(unittest.TestCase):
             minimum = controller.minimum_feasible_frame_budget()
             with self.assertRaisesRegex(ValueError, "infeasible"):
                 create(Path(temporary) / "bad", budget=minimum - 1)
+
+    def test_infeasible_diagnostic_plan_is_explicit_and_budget_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "diagnostic"
+            minimum = controller.minimum_feasible_frame_budget()
+            args = plan_args(
+                root,
+                budget=minimum - 1,
+                allow_infeasible_diagnostic=True,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                controller.create_plan(args)
+
+            plan = controller.read_json(root / "plan" / "collection-plan.json")
+            self.assertTrue(plan["diagnostic_only"])
+            self.assertFalse(plan["distribution_feasible"])
+            self.assertIn("diagnostic only", plan["budget_completion_policy"])
+
+            assignment = controller.read_json(
+                sorted((root / "assignments").glob("*.json"))[0]
+            )
+            controller.write_new_json(
+                root / "results" / "diagnostic.json",
+                {
+                    "technical_result": "validated",
+                    "assignment_id": assignment["assignment_id"],
+                    "accepted_observation_frames": minimum - 1,
+                    "resolved_recipe_ids": [],
+                    "semantic_failure_recipe_ids": [],
+                    "credited_cells": [],
+                },
+            )
+            inventory = controller.build_inventory(root)
+            self.assertTrue(inventory["budget_reached"])
+            self.assertFalse(inventory["coverage_complete"])
+            self.assertTrue(inventory["complete"])
 
     def test_planned_frame_distribution_and_nested_weights(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
