@@ -33,44 +33,59 @@ during automated collection. Position, velocity, contact, mission, visibility,
 and other privileged fields are recorded for validation and balancing; they are
 not automatically part of the model input.
 
-The curriculum is intentionally staged:
+The data curriculum now has two fixed-map production stages:
 
 1. Movement V1 learns player translation, camera motion, collision, ramp
-   traversal, and hoop passage.
-2. Held-trajectory V2 adds the visible held-grenade trajectory controlled by Q.
-3. Persistent harmless-throw V3 adds edge-triggered E throws, grenade flight,
-   rest, and cooldown without destruction.
+   traversal, and hoop passage. Its 500,000-frame production collection is
+   complete and remains frozen as generated.
+2. Trajectory-and-throw V2 combines held trajectory computation, stationary
+   aiming, edge-triggered throws, grenade flight, bounce, rest, persistence,
+   and cooldown in one collection.
 
-The serious first collection is Movement V1. V2 and V3 reuse the same fixed
-world, action/state/RGB alignment, collection framework, and storage contract
-after Movement V1 passes its model-training gates.
+The nominal V2 planning reference is one million semantically credited
+observations, but it is not a hard-coded dataset size. As in V1, the controller
+accepts a requested frame target X above the calibrated complete-coverage floor
+and expands the immutable recipe schedule while preserving the frozen top-level
+frame mixture. Map generalization remains a later curriculum after the fixed-map
+visual vocabulary is collected and learned.
+
+Representation training begins only after V2 collection and validation. One
+autoencoder is trained on the combined V1+V2 visual corpus so its frozen latent
+space already represents movement, the thin trajectory overlay, airborne and
+resting grenades, and cooldown state. World-model training may still progress
+through curriculum filters over that common latent representation.
 
 ### Decisions that are frozen
 
 | Topic | Final project decision |
 | --- | --- |
 | Initial observation | 384 x 384 RGB at 20 Hz |
-| Physics | fixed-step simulation; grenade physics uses 120 Hz in V2/V3 |
+| Physics | fixed-step simulation; grenade physics uses 120 Hz in V2 |
 | Controls | ten canonical Boolean bits: W, A, S, D, four arrows, Q, and E |
 | Environment | one fixed, deterministic arena layout for an entire episode |
-| First production source | automated Movement V1 only; human capture is deferred |
-| Production size and mixture | the user chooses credited frame target X; the frozen Movement V1 frame mixture is 55% semi-Markov, 20% object, 15% contact/recovery, 5% ramp, and 5% hoop |
+| Completed production source | automated Movement V1, 500,000 frames; human capture remains deferred |
+| V2 production size | user-selected credited frame target X above its calibrated feasibility floor; one million frames is the current planning reference, not a hard-coded requirement |
+| V2 production mixture | 55% coherent semi-Markov random play and 45% prescribed trajectory/throw missions, balanced by credited observations rather than episode count |
 | Evaluation reserve | assigned before collection through disjoint prescribed recipe identities |
 | Automated behavior | frame-balanced semi-Markov play plus object, contact, ramp, and hoop missions |
 | Replay | exact replay keys, explicit categorical scenario cells, stratified continuous values, and stateless jitter |
 | Production scheduling | one central controller creates a global budget-driven recipe plan before worker assignment; workers do not select production missions independently |
-| Budget semantics | X counts only semantically credited training observations; diagnostic semantic-failure frames do not consume X, complete discrete coverage is mandatory, and infeasible budgets are rejected before generation |
+| Budget semantics | X counts only semantically credited training observations; production plans require complete discrete coverage and reject infeasible budgets, while an explicit below-floor diagnostic plan is labeled diagnostic-only and never claims distribution or coverage completeness |
 | Toy-plan meaning | the complete discrete catalog with minimal repetition and the coarsest progressive continuous coverage; never a reduced object/mission catalog |
 | Distributed execution | one synchronous generator process per GPU; scale with separate RunPod workers rather than multiple processes on one GPU |
 | Work boundary | one assignment block produces one shard; interrupted partial shards are discarded and the assignment is retried |
 | Controller ledger | immutable plans, recipes, assignments, attempts, and validated results on persistent storage; derived progress can be rebuilt |
 | Guided movement | canonical action bits only after spawn; no mid-episode teleport, camera snap, velocity correction, or hidden steering |
+| V2 aim lock | Q is an observed stationary-aim action: its rising edge stops planar movement, W/A/S/D cannot move the player while held, arrow-key camera aiming remains active, and movement resumes only after Q is released |
+| V2 throw gate | E is accepted only on a rising edge while Q has already been visible in at least one preceding observation; simultaneous first-frame Q+E and all requests during cooldown are rejected and never buffered |
+| V2 camera policy | no grenade tracking, camera snap, or hidden follow behavior; after a throw the camera continues its held aim or ordinary action policy and the grenade remains visible only when natural geometry keeps it in frame |
 | Object attention | movement path and camera gaze are independent; orbiting never requires keeping the object centered or visible |
 | Mission ending | success is latched, followed by 0.75-1.50 seconds of coherent, varied continuation |
 | Ordinary collision | useful contact remains, but continuous contact is bounded and followed by a world-space escape |
 | Balancing | successful pre-success observation frames, not episode counts |
 | Failed missions | a valid semantic failure resolves its recipe, remains diagnostic, receives no intended coverage credit, and never causes an infinite retry loop |
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
+| Trajectory supervision | RGB remains the model target; an exact privileged trajectory-pixel mask may weight reconstruction/evaluation loss but is never a model input or a required polyline/simulator-state prediction target |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
 | Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
 | Platform order | Windows and Linux controller validation are complete; the same immutable 300k plan passed on Windows and an RTX A6000 RunPod |
@@ -219,28 +234,38 @@ frames from that run were independently transferred and checksum-verified.
 
 ### Current collection intent and scope
 
-The active objective is data generation, not model training. The first serious
-run is 500,000 semantically credited Movement V1 observations generated at
-384x384 RGB and 20 Hz directly into `world_model_trajectory`. The central
-controller must create and verify the immutable plan, and exactly one worker on
-the RTX 4090 must execute its assignments. Each assignment is finalized and
+The active objective remains data generation, not model training. The
+500,000-frame Movement V1 production collection is complete and is not to be
+regenerated or changed. The next production source is the combined
+trajectory-and-throw V2 collection at 384x384 RGB and 20 Hz. Its current planning
+reference is one million credited observations, but the V2 controller must
+retain V1's budget semantics: the user supplies X, the planner rejects a
+production X below the calibrated complete-coverage floor, and larger values
+extend the same canonical recipe schedule and preserve 55% random play / 45%
+prescribed missions.
+
+Development, focused capture, visual review, toy coverage, replay validation,
+and duration calibration happen on the Windows development computer. Only after
+those gates pass is one immutable V2 plan created for the remote production run.
+Exactly one generator process runs per GPU. Each assignment is finalized and
 validated as one shard before its result is published; the worker continues
-until the plan completes. Completion ends the worker process; it does not
-terminate the RunPod pod, which remains running and billable until explicitly
-terminated. Training, trainer smoke tests, and model evaluation belong to a
-later phase on a separate training pod which will attach the same network
-volume. They are not gates for starting this collection.
+until the logical collection completes. One production run means one immutable
+controller ledger and collection identity, not one monolithic shard.
 
-The 100 GB volume is sufficient for the first 500k Movement V1 run, whose
-measured-format estimate is approximately 52 GB. RunPod network volumes may be
-expanded later but not reduced. Before similarly sized V2 and V3 collections,
-increase this volume to at least 200 GB, with 250 GB preferred for build,
-metadata, and operating headroom. Terminating a generator or training pod does
-not delete the independent network volume. A replacement pod must select the
-volume during deployment; network volumes cannot be attached or detached from
-an already deployed pod.
+At the measured V1 format rate, one million additional 384x384 observations are
+roughly 104 GB before build, ledger, retry, and operating headroom. The existing
+100 GB volume is therefore too small for the intended V2 run. Increase the
+network volume to at least 200 GB, with 250 GB preferred, after a representative
+V2 pilot confirms its actual compression rate. RunPod network volumes may be
+expanded but not reduced. Terminating a generator or training pod does not
+delete the independent network volume; a replacement pod must select the volume
+during deployment.
 
-### First-dataset collection plan
+Autoencoder and world-model training begin only after the complete V1+V2 corpus
+is available and validated. Training belongs to a later training pod attached
+to the same persistent volume and is not a gate for V2 generator development.
+
+### Movement V1 collection plan and retained controller contract
 
 The first production dataset is automated Movement V1. Its accepted-frame target
 X remains a user input, while the mission and nested frame shares are frozen and
@@ -282,8 +307,12 @@ per-scenario duration calibration in
 overrepresented merely because an episode lasts longer. With the complete
 887-cell mandatory floor and current calibration, the smallest plan which can
 also satisfy all frozen aggregate shares is 344,534 credited frames. The
-limiting constraint is mandatory contact-facing coverage. Smaller plans are
-diagnostic only and production plan creation rejects them explicitly.
+limiting constraint is mandatory contact-facing coverage. Smaller production
+plans are rejected explicitly. Local below-floor smoke and controller tests may
+opt into `--allow-infeasible-diagnostic`; the resulting plan records
+`diagnostic_only: true` and `distribution_feasible: false`, may stop at its
+requested frame budget without complete discrete coverage, and cannot be
+represented as a production-complete coverage run.
 
 Mission success does not cut the footage abruptly. After the ordinary objective
 and endpoint hold succeed, the generator preserves the completing action for a
@@ -305,7 +334,7 @@ collection is accepted.
 
 Implemented and validated now:
 
-- the fixed three-stage environment and canonical controls
+- the fixed-map environment, canonical controls, and legacy three-mode runtime
 - fixed-step action/state/RGB alignment and exact replay
 - the finalized schema-v10 automated mission and natural-play policy
 - post-success continuation and bounded natural-play collision escape
@@ -321,18 +350,13 @@ Implemented and validated now:
 - a coverage-complete 20 Hz Windows toy: 887/887 recipes and cells credited,
   zero semantic failures, and 54,868 validated WebP observations
 
-Still required to start the serious automated Movement V1 collection:
-
-- create the immutable 500,000-credited-observation production plan on the
-  network volume
-- verify its complete 887-cell catalog, disjoint train/evaluation identities,
-  feasibility, and frozen 55/20/15/5/5 planned frame mixture
-- start exactly one prescribed controller worker on the qualified RTX 4090 and
-  allow its per-assignment finalization and validation loop to run to completion
-
-Complete distribution reports, trainer/model smoke tests, and model evaluation
-remain useful downstream acceptance and training work, but they do not block
-data generation.
+The 500,000-frame Movement V1 production collection has since been generated and
+is retained unchanged. Its planner, immutable ledger, retry behavior, and
+validation architecture are the baseline to generalize for V2. The V2 mission
+catalog, duration calibration, semantic validators, and frame-distribution
+reports remain implementation work. Trainer/model smoke tests and model
+evaluation follow the complete V1+V2 collection rather than gating V2 data
+generation.
 
 ## Repository and project lineage
 
@@ -473,22 +497,24 @@ generator refuses to overwrite an output directory that already contains
 `dataset.json`. Production v1 still deliberately supports exactly one shard per
 run.
 
-The generator now supports all three fixed-map curriculum stages from one
-executable:
+The current pre-redesign generator still exposes the former three-stage command
+surface from one executable:
 
 - `-Stage=movement` for V1
-- `-Stage=trajectory` for V2
-- `-Stage=throw` for V3
+- `-Stage=trajectory` for the legacy preview-only stage
+- `-Stage=throw` for the legacy unrestricted throw stage
 
-`Generate_Curriculum_Comparison.bat` runs identical 12-second seeds for all
-three stages at both 320 × 320 and 384 × 384, validates every authoritative
-shard, and derives review MP4s from the stored observations.
+`Generate_Curriculum_Comparison.bat` runs identical 12-second seeds for these
+legacy comparison modes at both 320 × 320 and 384 × 384. They remain useful
+rendering references but do not implement the accepted combined V2 action gate,
+mission catalog, or production policy and must not be used for the V2 production
+collection without revision.
 
-Still required before production-scale collection:
-
-- Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation
-- full elevation, projected-size, occlusion, action, collision-duration, and
-  duplication reporting
+Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation are complete
+for the current capture/controller baseline. Before V2 production, the combined
+stage must pass the new Windows mission, replay, mask, action-gate, cooldown,
+trajectory/contact, visibility, and duplicate-frame reports, followed by one
+packaged Linux smoke and parity gate.
 
 The current baseline deliberately proves the gameplay loop, synchronization,
 direct sharding, replay, and inspection workflow before distributed orchestration.
@@ -815,57 +841,117 @@ Forced to zero:
 No trajectory, grenade, cooldown, inventory, damage, break, jump, crouch, or
 additional HUD mechanics exist in V1.
 
-### V2: held trajectory preview
+### V2: stationary trajectory computation and persistent harmless throws
 
-V1 behavior remains unchanged and Q is introduced as a level-triggered action:
+V2 combines the former preview and throw stages. Q is a level-triggered
+stationary aiming mode and E is a gated edge-triggered throw request.
 
-- Q = 1 shows exactly one green trajectory.
-- Q = 0 hides the trajectory.
-- Q may be combined with every movement and camera action.
-- The trajectory is recomputed from the current state every observation step.
-- The predicted path continues until the simulated grenade reaches rest.
-- E remains forced to zero.
-- No physical grenade is spawned.
-- No red line, explosion marker, fuse, charge, or damage state is shown.
+Aim lock and trajectory:
 
-Q should be visible in approximately 40–50% of V2 training frames so it is not a
-sparse whole-frame prediction target.
+- Q = 1 shows exactly one green trajectory; Q = 0 hides it.
+- The Q rising edge immediately stops planar player motion. This is an explicit,
+  recorded action consequence rather than an unrecorded mission correction.
+- W/A/S/D have no locomotion effect while Q remains held. Automated policies
+  ordinarily emit those bits as zero during aim lock.
+- ArrowUp/ArrowDown/ArrowLeft/ArrowRight remain active, allowing the stationary
+  player to aim and recompute different trajectories.
+- The trajectory is recomputed from the current camera and launch state every
+  observation and continues until the simulated grenade reaches rest.
+- Movement becomes available only after Q is released.
+- The trajectory is always green, including during cooldown. It never becomes a
+  red availability indicator.
 
-### V3: persistent harmless grenades
+Throw gate:
 
-V1 and V2 remain unchanged and E is introduced:
+- E is edge-triggered: only a 0-to-1 transition requests a throw, holding E does
+  not repeat, and E must be released before another request.
+- E is accepted only while Q is held and Q was already visible in at least one
+  preceding observation. A simultaneous first Q+E observation is rejected.
+- Requests without Q or during cooldown are ignored and never buffered.
+- An accepted throw uses exactly the launch state represented by the trajectory
+  visible for that throw.
+- If Q remains held after E, the player remains locked and the current green
+  preview continues to update independently of the already-launched grenade.
+- Releasing Q after the throw hides the preview and permits movement.
 
-- E is edge-triggered.
-- E = 0 to E = 1 requests one throw.
-- Holding E does not repeatedly throw.
-- E must be released before another request.
-- Requests during cooldown are ignored and not buffered.
-- An accepted throw uses the same launch state and trajectory as Q.
-
-Cooldown:
+Cooldown and crosshair:
 
 - green crosshair: throw available
 - red crosshair: cooldown active
 - cooldown duration: exactly 2.0 simulated seconds
 - at 20 Hz: exactly 40 transitions
-- Q remains available and green during cooldown
+- the crosshair is rasterized after the trajectory and therefore remains visible
+  even when the path crosses the image center
 
 Grenades:
 
-- no inventory
-- no arbitrary grenade count
-- creation is limited only by cooldown
+- no inventory and no arbitrary configured count; creation is limited by the
+  throw gate and cooldown
 - never explode, damage, or break anything
 - bounce and roll until resting
-- remain visible at rest until episode reset
-- stop ticking once resting
-- do not collide with the player or later grenades in V3
-- do not affect Q preview
+- remain visible at rest until episode reset and stop ticking once resting
+- do not collide with the player or later grenades
+- do not affect the currently computed Q preview
 - are all removed at episode reset
 
-### V4: map generalization
+V2 collection uses the same variable-budget controller principle as V1. For any
+production frame target X at or above the calibrated feasibility floor, exactly
+55% of credited observations target coherent semi-Markov random play and 45%
+target prescribed missions. Increasing X adds repetition and progressively
+refined continuous samples without changing the mandatory catalog or top-level
+shares. One million frames is the current planning reference, not a hard-coded
+limit.
 
-Begins only after V1–V3 are learned on the fixed map:
+Random play reuses the validated V1 movement/camera policy while Q is released.
+It periodically enters a coherent sequence rather than independently sampling Q
+and E:
+
+```text
+ordinary traversal
+-> stop and press Q
+-> adjust or hold the trajectory while stationary
+-> either release Q without throwing, or press E after a visible preview
+-> release Q immediately or after a short additional hold
+-> resume ordinary traversal
+```
+
+The random source includes preview-only holds, accepted throws, occasional
+explicitly rejected cooldown requests, repeated throws separated by cooldown,
+and natural accumulation of resting grenades. It never snaps the camera to,
+centers, or deliberately tracks an airborne grenade. After a throw, the camera
+continues its existing aim briefly or returns to ordinary semi-Markov behavior;
+the projectile remains on screen only when the ordinary view geometry produces
+that result.
+
+The prescribed 45% mission source guarantees trajectory/throw interactions that
+random play would underproduce. Its required families are:
+
+- solid-object interactions with the rectangle, pyramid, and sphere
+- direct and glancing impacts with each of the four uniquely colored walls
+- near, medium, and far floor landings, bounces, and resting regions
+- ramp interaction from uphill, downhill, and both lateral approaches
+- clean hoop passage, rim contact, and intentional near-miss from both sides
+
+Within each family, recipes cover stratified launch distance, approach azimuth,
+pitch/height band, direct versus glancing geometry, first-contact type, bounce
+sequence, and final resting region. The catalog uses explicit categorical cells,
+pairwise coverage, stratified continuous samples, and stateless jitter rather
+than the full Cartesian product. The precise nested shares inside the 45% remain
+to be frozen after focused Windows examples establish valid geometry and a
+duration-calibration pilot measures frame cost. Mission success never requires
+tracking the grenade with the camera.
+
+The generator may also store an exact one-channel mask of the pixels used to
+rasterize the green trajectory. This mask is privileged training/evaluation
+metadata only. The autoencoder and world model still receive RGB plus the
+canonical action bits and predict visual observations; neither is required to
+predict polylines, simulator points, launch velocity, or another engineered
+physics target. The mask may later weight ordinary decoded-image loss so the
+thin trajectory is not overwhelmed by background pixels.
+
+### Later: map generalization
+
+Begins only after V1 and the combined V2 are learned on the fixed map:
 
 1. Rearrange known objects inside the same square arena.
 2. Generate layouts from deterministic recorded seeds.
@@ -882,7 +968,7 @@ Initial target:
 
 | Layer | Rate | Meaning |
 | --- | ---: | --- |
-| Grenade physics in V2/V3 | 120 Hz | Six substeps per observation |
+| Grenade physics in V2 | 120 Hz | Six substeps per observation |
 | Actions and RGB | 20 Hz | One transition every 50 ms |
 | Wall-clock generation | Uncapped | Run as fast as rendering/output allow |
 
@@ -1000,10 +1086,12 @@ patterns above. Every asymmetric strafe, diagonal, or yaw script has a
 per-episode mirrored form; left and right are not fixed by script type. The
 mutable semi-Markov stream is initialized from a mixed replay key rather than
 directly from consecutive integer seeds. The remaining decisions use the
-weighted action and hold samplers. Q is independently present on approximately 45% of semi-Markov V2/V3
-action holds; guided V2/V3 missions alternate Q in half-second blocks. V3 E
-requests remain edge-triggered and are scheduled every 30–70 observation steps
-after an initial 8–24-step offset.
+weighted action and hold samplers. In the legacy preview/throw implementation,
+Q is independently present on approximately 45% of action holds, guided missions
+alternate Q in half-second blocks, and E is scheduled every 30–70 observations.
+This behavior is retained only as an implementation baseline. Combined V2
+replaces independent Q/E sampling with the coherent stationary aim sequence
+specified in the curriculum section.
 
 Ordinary semi-Markov contact is allowed briefly because useful sliding,
 glancing, and collision footage must remain in the dataset. At the start of each
@@ -1971,28 +2059,31 @@ Automatic reports must include:
 - shard sizes and checksums
 - replay-test results
 
-Data-volume rollout:
+V2 development and rollout:
 
-1. Run the coverage-complete prescribed-controller toy plan on the working
-   Windows baseline; it uses every discrete cell with minimal repetition and
-   coarsest progressive continuous refinement.
-2. Reproduce that toy plan with the packaged Linux build on RunPod.
-3. Generate approximately 10,000 frames for trainer, schema, controller,
-   interruption, and report smoke tests.
-4. Implement coverage, pitch, action, collision, duplicate-frame, controller,
-   attempt, and storage reports.
-5. Freeze the serious Movement V1 accepted-frame target in the immutable
-   production collection plan.
-6. Reserve the chosen held-out share using disjoint prescribed recipe identities.
-7. Train and inspect multi-step rollouts before extending Movement V1 toward one
-   million frames.
-8. Add V2 trajectory data and then V3 throw data only after the preceding
-   curriculum gate passes.
+1. Preserve the completed 500,000-frame Movement V1 collection unchanged.
+2. Implement combined V2 aim lock, Q-before-E gating, always-green trajectory,
+   cooldown crosshair, and exact trajectory-pixel mask output.
+3. Implement the frame-balanced 55% random / 45% mission planner, prescribed
+   geometry catalog, semantic validators, and V2 distribution reports.
+4. Generate focused 384x384 Windows examples for every primary subtype and
+   visually audit at least two successful examples per subtype.
+5. Run deterministic replay pairs and compare every action, state, RGB, mask,
+   throw decision, cooldown transition, and grenade record.
+6. Run the complete low-resolution V2 toy catalog on Windows with minimal
+   repetition and coarsest continuous refinement.
+7. Run a representative mixed 384x384 Windows pilot, derive review videos only
+   from stored observations, and measure actual V2 compression and duration.
+8. Freeze nested mission shares, duration calibration, the complete-coverage
+   feasibility floor, and disjoint train/evaluation identities.
+9. Create and verify one immutable V2 production plan for the requested X. The
+   current planning reference is one million credited observations.
+10. Package and execute that logical collection on the qualified RunPod GPU as
+    independently finalized, validated, retryable shards.
 
-At 20 Hz, 500,000 frames would represent approximately 6.94 simulated hours, but
-that value is now a planning reference rather than a frozen production target.
-The measured WebP/Parquet benchmark below, not the older PNG estimate, must be
-used when sizing the eventual RunPod plan and persistent storage.
+At 20 Hz, one million frames represent approximately 13.89 simulated hours. The
+measured V2 WebP/Parquet pilot, not the older V1 estimate alone, must be used when
+sizing the production volume and run.
 
 The working training budget is approximately USD 100 using RunPod for storage
 and training. This rules out retaining thousands of hours or multi-terabyte
@@ -2011,31 +2102,26 @@ V1:
 - collision/contact accuracy
 - visual rollout drift
 
-V2:
+Combined V2:
 
-- trajectory-mask overlap
-- endpoint error
-- curve-distance error
-- correct Q appearance/disappearance timing
-
-V3:
-
-- accepted versus ignored E behavior
-- exact red-to-green cooldown transition
-- projectile position/velocity error
-- Q preview versus thrown-path agreement
-- resting-location error
-- resting-grenade persistence
+- correct Q appearance/disappearance and stationary aim-lock timing
+- no planar movement while Q is held and movement restoration after release
+- trajectory-mask overlap, endpoint error, and curve-distance error
+- accepted versus ignored E behavior, including preceding-Q and cooldown gates
+- exact green/red crosshair transition with an always-green trajectory
+- preview-at-throw versus realized grenade-path agreement
+- projectile visual position and motion error without a tracking-camera policy
+- bounce, contact, resting-location, and resting-grenade persistence accuracy
 
 Progression is based on multi-step rollout quality, not only one-frame pixel loss.
 
 ## Current agreed plan and immediate next work
 
-The curriculum order remains:
+The curriculum order is now:
 
-1. Movement V1
-2. held trajectory V2
-3. persistent harmless throw V3
+1. completed Movement V1
+2. combined stationary trajectory-and-throw V2
+3. later map generalization after fixed-map representation and dynamics gates
 
 The current arena, lighting, object colors, compact crosshair, smoothed
 trajectory, fixed 20 Hz observation rate, and authoritative frame-first
@@ -2076,18 +2162,24 @@ are all covered.
 
 Immediate implementation order:
 
-1. Create the immutable 500,000-credited-observation Movement V1 plan directly
-   under the persistent network-volume collection root.
-2. Run `verify-plan` and inspect the planned 887-cell coverage,
-   train/evaluation separation, and 55/20/15/5/5 distribution.
-3. Start exactly one worker on the qualified RTX 4090. Let the existing
-   assignment loop generate, finalize, validate, and publish shards until the
-   controller inventory reports the plan complete.
-4. Retain the plan, manifests, checksums, validated shards, results, and final
-   inventory on the network volume. Terminate the generator pod after collection
-   completion; a later training pod will attach the same volume.
+1. Leave the completed 500,000-frame V1 collection and schema-v10 controller
+   evidence unchanged.
+2. Implement the combined V2 runtime action contract and exact trajectory mask.
+3. Design and implement the deterministic V2 random-play state machine,
+   prescribed mission catalog, scenario geometry, and semantic outcomes.
+4. Extend the central planner so any feasible requested X preserves 55% random
+   play / 45% missions, stable recipe prefixes, disjoint evaluation identities,
+   bounded reserves, and whole-shard retry.
+5. Complete focused Windows visual review, deterministic replay, the complete
+   toy catalog, and a mixed 384x384 duration/storage calibration pilot.
+6. Freeze the nested 45% mission shares and V2 feasibility floor from evidence,
+   then create and verify the intended production plan (currently expected to
+   target approximately one million credited observations).
+7. Run one packaged Linux parity smoke and execute the immutable collection on
+   the qualified RunPod GPU. Retain its plan, manifests, checksums, validated
+   shards, results, and final inventory for later representation training.
 
-Deferred work which is not a data-generation gate includes asynchronous GPU
+Deferred work which is not a V2 data-generation gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple
-processes on one GPU, human keyboard capture, complete downstream distribution
-analysis, and trainer/model smoke tests.
+processes on one GPU, human keyboard capture, explicit polyline/simulator-state
+prediction heads, and trainer/model smoke tests.
