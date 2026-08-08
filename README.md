@@ -85,7 +85,7 @@ through curriculum filters over that common latent representation.
 | Balancing | successful pre-success observation frames, not episode counts |
 | Failed missions | a valid semantic failure resolves its recipe, remains diagnostic, receives no intended coverage credit, and never causes an infinite retry loop |
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
-| Trajectory supervision | RGB remains the model target; an exact privileged trajectory-pixel mask may weight reconstruction/evaluation loss but is never a model input or a required polyline/simulator-state prediction target |
+| Trajectory supervision | RGB frames are the sole visual target; no trajectory mask, polyline, simulator-point series, launch velocity, or engineered trajectory target is stored |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
 | Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
 | Platform order | Windows and Linux controller validation are complete; the same immutable 300k plan passed on Windows and an RTX A6000 RunPod |
@@ -525,7 +525,7 @@ collection without revision.
 
 Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation are complete
 for the current capture/controller baseline. Before V2 production, the combined
-stage must pass the new Windows mission, replay, mask, action-gate, cooldown,
+stage must pass the new Windows mission, replay, action-gate, cooldown,
 trajectory/contact, visibility, and duplicate-frame reports, followed by one
 packaged Linux smoke and parity gate.
 
@@ -952,18 +952,22 @@ Within each family, recipes cover stratified launch distance, approach azimuth,
 pitch/height band, direct versus glancing geometry, first-contact type, bounce
 sequence, and final resting region. The catalog uses explicit categorical cells,
 pairwise coverage, stratified continuous samples, and stateless jitter rather
-than the full Cartesian product. The precise nested shares inside the 45% remain
-to be frozen after focused Windows examples establish valid geometry and a
-duration-calibration pilot measures frame cost. Mission success never requires
+than the full Cartesian product. The frozen total-V2 shares are 15% solid-object
+interactions, 10% wall/corner interactions, 8% floor landing/bounce/rest, 6%
+ramp interactions, and 6% hoop interactions. Focused Windows examples and the
+duration-calibration pilot freeze safe continuous ranges, duration estimates,
+and the complete-coverage feasibility floor; they do not silently remove a
+mission category or change these shares. Mission success never requires
 tracking the grenade with the camera.
 
-The generator may also store an exact one-channel mask of the pixels used to
-rasterize the green trajectory. This mask is privileged training/evaluation
-metadata only. The autoencoder and world model still receive RGB plus the
-canonical action bits and predict visual observations; neither is required to
-predict polylines, simulator points, launch velocity, or another engineered
-physics target. The mask may later weight ordinary decoded-image loss so the
-thin trajectory is not overwhelmed by background pixels.
+The final composited RGB observations are the complete visual learning target.
+The dataset does not store a trajectory mask, polyline, simulator-point series,
+separate trajectory layer, launch velocity, grenade mask, or other engineered
+trajectory target. A later auxiliary trajectory-sensitive loss, if useful,
+compares the predicted and real decoded RGB frames in image space and derives
+any pixel weighting from those frames at training time. The autoencoder and
+world model therefore continue to learn visual observations rather than an
+additional simulator representation.
 
 ### Later: map generalization
 
@@ -2079,13 +2083,13 @@ V2 development and rollout:
 
 1. Preserve the completed 500,000-frame Movement V1 collection unchanged.
 2. Implement combined V2 aim lock, Q-before-E gating, always-green trajectory,
-   cooldown crosshair, and exact trajectory-pixel mask output.
+   and cooldown crosshair using final RGB as the sole visual output.
 3. Implement the frame-balanced 55% random / 45% mission planner, prescribed
    geometry catalog, semantic validators, and V2 distribution reports.
 4. Generate focused 384x384 Windows examples for every primary subtype and
    visually audit at least two successful examples per subtype.
-5. Run deterministic replay pairs and compare every action, state, RGB, mask,
-   throw decision, cooldown transition, and grenade record.
+5. Run deterministic replay pairs and compare every action, state, RGB, throw
+   decision, cooldown transition, and grenade record.
 6. Run the complete low-resolution V2 toy catalog on Windows with minimal
    repetition and coarsest continuous refinement.
 7. Run a representative mixed 384x384 Windows pilot, derive review videos only
@@ -2122,7 +2126,8 @@ Combined V2:
 
 - correct Q appearance/disappearance and stationary aim-lock timing
 - no planar movement while Q is held and movement restoration after release
-- trajectory-mask overlap, endpoint error, and curve-distance error
+- trajectory-sensitive image-space error derived only from predicted and real
+  RGB frames
 - accepted versus ignored E behavior, including preceding-Q and cooldown gates
 - exact green/red crosshair transition with an always-green trajectory
 - preview-at-throw versus realized grenade-path agreement
@@ -2180,7 +2185,8 @@ Immediate implementation order:
 
 1. Leave the completed 500,000-frame V1 collection and schema-v10 controller
    evidence unchanged.
-2. Implement the combined V2 runtime action contract and exact trajectory mask.
+2. Implement the combined V2 runtime action contract with final RGB as the sole
+   stored visual target.
 3. Design and implement the deterministic V2 random-play state machine,
    prescribed mission catalog, scenario geometry, and semantic outcomes.
 4. Extend the central planner so any feasible requested X preserves 55% random
