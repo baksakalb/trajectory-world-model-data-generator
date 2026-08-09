@@ -1,0 +1,42 @@
+{
+  "calibration_version": "v2-local-qualified-3a4fd61cf86f9e06",
+  "expected_credited_frames_by_family": {
+    "floor_bounce_rest": 90,
+    "hoop": 116,
+    "ramp": 105,
+    "random_play": 901,
+    "solid_object": 110,
+    "wall_corner": 108
+  },
+  "expected_credited_frames_by_sequence_grenade_count": {
+    "2": 233,
+    "3": 330,
+    "4": 437,
+    "5": 1501
+  },
+  "notes": "Conservative minimum accepted observation counts; qualified only after complete base-cell and sequence-template evidence.",
+  "observation_rate_hz": 20,
+  "qualification_evidence": {
+    "accepted_base_cell_count": 1184,
+    "accepted_episode_count": 1205,
+    "accepted_sequence_template_count": 21,
+    "required_base_cell_count": 1184,
+    "required_sequence_template_count": 21,
+    "sample_count_by_family": {
+      "floor_bounce_rest": 288,
+      "hoop": 56,
+      "ramp": 72,
+      "random_play": 72,
+      "solid_object": 504,
+      "wall_corner": 192
+    },
+    "sample_count_by_sequence_grenade_count": {
+      "2": 13,
+      "3": 6,
+      "4": 1,
+      "5": 1
+    }
+  },
+  "qualified": true,
+  "schema_version": 2
+}

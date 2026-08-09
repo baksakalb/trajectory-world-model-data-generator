@@ -693,6 +693,72 @@ def validate_final_agent_mission(
                 )
 
 
+def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
+    """Independently derive one throw's physical outcome from recorded evidence."""
+    family = str(throw.get("intended_family", ""))
+    outcome = str(throw.get("intended_outcome", ""))
+    target = str(throw.get("intended_target", ""))
+    contacts = [str(value) for value in (throw.get("realized_contact_order") or [])]
+    target_index = contacts.index(target) if target in contacts else -1
+    floor_index = contacts.index("CurriculumFloor") if "CurriculumFloor" in contacts else -1
+    if family == "random_play":
+        return True
+    if family == "solid_object":
+        if outcome == "near_miss":
+            return target_index < 0
+        if outcome == "floor_bounce_then_contact":
+            return 0 <= floor_index < target_index
+        return target_index == 0
+    if family == "wall_corner":
+        sequence = str(throw.get("intended_contact_sequence", ""))
+        if sequence == "floor_then_wall":
+            return 0 <= floor_index < target_index
+        if sequence == "wall_then_floor":
+            return 0 <= target_index < floor_index
+        if sequence == "adjacent_corner":
+            return target_index >= 0 and any(
+                item.startswith("CurriculumWall_") and item != target
+                for item in contacts
+            )
+        return target_index == 0
+    if family == "floor_bounce_rest":
+        bounces = int(throw.get("bounce_count", 0))
+        travel = float(throw.get("post_contact_travel_cm", 0.0))
+        if floor_index < 0:
+            return False
+        if outcome == "direct_settle":
+            return bounces <= 1 and travel < 100.0
+        if outcome == "one_bounce":
+            return bounces == 2
+        if outcome == "multi_bounce":
+            return bounces >= 3
+        if outcome == "long_roll":
+            return travel >= 250.0
+        return False
+    if family == "ramp":
+        if outcome in {"near_miss_side", "cross_over"}:
+            return target_index < 0
+        if outcome == "floor_then_ramp":
+            return 0 <= floor_index < target_index
+        if outcome == "ramp_then_floor":
+            return 0 <= target_index < floor_index
+        return target_index == 0
+    if family == "hoop":
+        pass_frame = throw.get("hoop_pass_frame")
+        if outcome == "near_miss":
+            return target_index < 0 and pass_frame is None
+        if outcome == "rim_contact":
+            return target_index >= 0
+        if outcome == "floor_bounce_then_hoop":
+            return (
+                floor_index >= 0
+                and pass_frame is not None
+                and int(throw["first_contact_frame"]) < int(pass_frame)
+            )
+        return pass_frame is not None
+    return False
+
+
 def validate_v2_runtime_contract(
     dataset: dict[str, Any],
     episode_id: str,
@@ -830,6 +896,134 @@ def validate_v2_runtime_contract(
             )
 
     collection_policy = str(dataset.get("collection_policy", ""))
+    if collection_policy == "training_v2_immutable_local_recipes_v1":
+        if episode is None:
+            raise DatasetValidationError(
+                f"{episode_id}: production V2 validation lacks an episode record."
+            )
+        required = (
+            "v2_contract_version",
+            "v2_source",
+            "v2_cell_id",
+            "v2_replay_identity",
+            "v2_aim_acquisition_profile",
+            "v2_q_retention_profile",
+            "v2_post_throw_movement_profile",
+            "v2_post_throw_camera_profile",
+        )
+        missing = [field for field in required if not episode.get(field)]
+        if missing:
+            raise DatasetValidationError(
+                f"{episode_id}: production V2 metadata is missing {', '.join(missing)}."
+            )
+        expected_throw_count = int(episode.get("v2_expected_throw_count", 0))
+        accepted_throw_count = int(episode.get("v2_accepted_throw_count", 0))
+        throw_rows = episode.get("v2_throws") or []
+        accepted_transitions = [item for item in transitions if item["e_accepted"]]
+        if accepted_throw_count != expected_throw_count:
+            raise DatasetValidationError(
+                f"{episode_id}: expected/accepted throw counts differ."
+            )
+        if len(throw_rows) != accepted_throw_count or len(accepted_transitions) != accepted_throw_count:
+            raise DatasetValidationError(
+                f"{episode_id}: per-throw rows do not match accepted E edges."
+            )
+        cell_id = str(episode.get("v2_cell_id", ""))
+        e_requests = [item for item in transitions if item.get("e_request_edge")]
+        rejection_reasons = [str(item.get("e_rejection_reason", "")) for item in e_requests]
+        if expected_throw_count == 0:
+            if cell_id.startswith("R01-"):
+                if e_requests or not any(int(item["action_mask"]) & 0x0F for item in transitions):
+                    raise DatasetValidationError(
+                        f"{episode_id}: R01 did not realize movement-only behavior."
+                    )
+            elif cell_id.startswith(("R02-", "R03-", "R04-", "R05-")):
+                if e_requests or not any(item.get("q_rising_edge") for item in transitions) or not any(item.get("q_falling_edge") for item in transitions):
+                    raise DatasetValidationError(
+                        f"{episode_id}: cancel family did not realize Q acquire/cancel."
+                    )
+            elif cell_id.startswith("R09-") and "q_not_held" not in rejection_reasons:
+                raise DatasetValidationError(
+                    f"{episode_id}: R09 lacks its q_not_held rejection."
+                )
+            elif cell_id.startswith("R10-") and "q_not_previously_visible" not in rejection_reasons:
+                raise DatasetValidationError(
+                    f"{episode_id}: R10 lacks its first-frame Q+E rejection."
+                )
+        if (cell_id.startswith("R11-") or episode.get("v2_sequence_template_id") == "SQ17"):
+            if "cooldown" not in rejection_reasons:
+                raise DatasetValidationError(
+                    f"{episode_id}: cooldown-recovery recipe lacks a cooldown rejection."
+                )
+        planned_credit = int(episode.get("planned_credited_frames", 0))
+        if planned_credit <= 0:
+            raise DatasetValidationError(
+                f"{episode_id}: invalid planned credited-frame cap."
+            )
+        if bool(episode.get("accepted_for_balancing")) != bool(episode.get("mission_success")):
+            raise DatasetValidationError(
+                f"{episode_id}: V2 semantic success and credit decision differ."
+            )
+
+        for index, (throw, transition) in enumerate(zip(throw_rows, accepted_transitions)):
+            throw_frame = int(throw["authoritative_pre_throw_frame"])
+            if throw_frame != int(transition["source_frame_index"]):
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} pre-throw frame is inconsistent."
+                )
+            if int(throw["accepted_grenade_id"]) != int(transition["accepted_throw_grenade_id"]):
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} grenade identity is inconsistent."
+                )
+            if int(throw["preview_start_frame"]) >= throw_frame:
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} lacks a preceding preview."
+                )
+            rest_frame = throw.get("rest_frame")
+            if rest_frame is None or int(rest_frame) > len(frames) - 1:
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} was not followed through rest."
+                )
+            if int(throw.get("post_rest_tail_steps", 0)) < int(dataset.get("observation_rate_hz", 20)):
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} has less than the one-second post-rest tail."
+                )
+            if not bool(throw.get("preview_to_realized_flight_parity")):
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} failed preview/flight parity."
+                )
+            realized_success = v2_realized_throw_success(throw)
+            if bool(throw.get("semantic_success")) != realized_success:
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} semantic flag disagrees with realized physics."
+                )
+            if bool(throw.get("credited")) != bool(episode.get("accepted_for_balancing")):
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} credit flag disagrees with its episode."
+                )
+            if bool(episode.get("accepted_for_balancing")) and not realized_success:
+                raise DatasetValidationError(
+                    f"{episode_id}: throw {index} was credited without realizing its outcome."
+                )
+            if bool(throw.get("trajectory_difference_required")) and index > 0:
+                if not bool(throw.get("trajectory_difference_pass")):
+                    raise DatasetValidationError(
+                        f"{episode_id}: re-aimed throw {index} collapsed to the prior preview."
+                    )
+            if index > 0:
+                prior_id = int(throw_rows[index - 1]["accepted_grenade_id"])
+                source_grenades = frames[throw_frame].get("grenades") or []
+                if prior_id not in {int(item["id"]) for item in source_grenades}:
+                    raise DatasetValidationError(
+                        f"{episode_id}: older grenade disappeared before throw {index}."
+                    )
+        if episode.get("v2_sequence_template_id"):
+            indices = [int(item["sequence_step_index"]) for item in throw_rows]
+            if indices != list(range(len(throw_rows))):
+                raise DatasetValidationError(
+                    f"{episode_id}: sequence step indices are not contiguous."
+                )
+        return
     if collection_policy.startswith("diagnostic_v2_"):
         if episode is None:
             raise DatasetValidationError(

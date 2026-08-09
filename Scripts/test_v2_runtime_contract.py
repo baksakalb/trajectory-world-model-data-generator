@@ -6,7 +6,11 @@ from __future__ import annotations
 import copy
 import unittest
 
-from Scripts.review_dataset import DatasetValidationError, validate_v2_runtime_contract
+from Scripts.review_dataset import (
+    DatasetValidationError,
+    v2_realized_throw_success,
+    validate_v2_runtime_contract,
+)
 
 
 def frame(
@@ -36,6 +40,39 @@ def frame(
 
 
 class V2RuntimeContractTests(unittest.TestCase):
+
+    def test_realized_outcomes_are_derived_from_evidence(self) -> None:
+        direct = {
+            "intended_family": "solid_object",
+            "intended_outcome": "direct_center",
+            "intended_target": "CurriculumObject_Rectangle",
+            "realized_contact_order": ["CurriculumObject_Rectangle", "CurriculumFloor"],
+        }
+        self.assertTrue(v2_realized_throw_success(direct))
+        wrong_target = {**direct, "realized_contact_order": ["CurriculumFloor"]}
+        self.assertFalse(v2_realized_throw_success(wrong_target))
+
+        floor = {
+            "intended_family": "floor_bounce_rest",
+            "intended_outcome": "one_bounce",
+            "intended_target": "CurriculumFloor",
+            "realized_contact_order": ["CurriculumFloor"],
+            "bounce_count": 2,
+            "post_contact_travel_cm": 120.0,
+        }
+        self.assertTrue(v2_realized_throw_success(floor))
+        self.assertFalse(v2_realized_throw_success({**floor, "bounce_count": 8}))
+
+        hoop = {
+            "intended_family": "hoop",
+            "intended_outcome": "clean_pass",
+            "intended_target": "CurriculumObject_Hoop",
+            "realized_contact_order": ["CurriculumFloor"],
+            "hoop_pass_frame": 24,
+        }
+        self.assertTrue(v2_realized_throw_success(hoop))
+        self.assertFalse(v2_realized_throw_success({**hoop, "hoop_pass_frame": None}))
+
     def setUp(self) -> None:
         self.dataset = {
             "schema_version": "trajectory_throw_v2-preflight-11",

@@ -88,7 +88,7 @@ through curriculum filters over that common latent representation.
 | Trajectory supervision | RGB frames are the sole visual target; no trajectory mask, polyline, simulator-point series, launch velocity, or engineered trajectory target is stored |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
 | Production storage | lossless WebP plus typed Parquet metadata inside independently validated tar shards |
-| Platform order | Windows and Linux controller validation are complete; the same immutable 300k plan passed on Windows and an RTX A6000 RunPod |
+| Platform order | historical Movement V1 parity passed on Windows and Linux; combined V2 qualification and production execution are local Windows workflows |
 
 Both the PNG/JSONL reference path and the lossless-WebP/typed-Parquet production
 path are implemented on Windows. A paired 19,232-observation pilot measures the
@@ -565,11 +565,11 @@ rendering references but do not implement the accepted combined V2 action gate,
 mission catalog, or production policy and must not be used for the V2 production
 collection without revision.
 
-Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation are complete
-for the current capture/controller baseline. Before V2 production, the combined
-stage must pass the new Windows mission, replay, action-gate, cooldown,
-trajectory/contact, visibility, and duplicate-frame reports, followed by one
-packaged Linux smoke and parity gate.
+Linux libwebp linkage, Linux x86-64 packaging, and RunPod validation remain
+historical Movement V1 capture/controller evidence. They are not a combined-V2
+gate. Combined V2 has passed its Windows mission, replay, action-gate, cooldown,
+trajectory/contact, visibility, duplicate-frame, full-catalog, sequence, and
+384x384 visual gates locally, and its production workers are executed locally.
 
 The current baseline deliberately proves the gameplay loop, synchronization,
 direct sharding, replay, and inspection workflow before distributed orchestration.
@@ -952,19 +952,33 @@ Grenades:
 - do not affect the currently computed Q preview
 - are all removed at episode reset
 
-#### Current V2 implementation checkpoint (schema 11)
+#### Current V2 implementation checkpoint (schema 11 plus temporal contract 2)
 
-The combined runtime and storage boundary is implemented as
-`trajectory_throw_v2-preflight-11`. The implementation includes Q-priority
-stationary aim, Q-before-E and E-rising-edge gating, exact two-second cooldown,
-accepted-grenade identity, rejection reasons, persistent harmless grenades,
-always-green trajectory rendering, cooldown-only crosshair color, schema-11
-frame/transition metadata, typed WebP/Parquet finalization, and strict review
-validation. C++ automation covers the pure action contract and Python tests
-cover valid, rejected, corrupted, and persistent-Q records.
+The combined runtime, storage, planner, and local worker boundary is implemented
+as plan version `trajectory-throw-v2-local-2` with runtime contract
+`v2-data-generation-spec-2+temporal-2`. It includes Q-priority stationary aim,
+Q-before-E and E-rising-edge gating, exact two-second cooldown, accepted-grenade
+identity, rejection reasons, persistent harmless grenades, always-green
+trajectory rendering, cooldown-only crosshair color, typed WebP/Parquet
+finalization, and strict action/outcome validation.
 
-Two deterministic diagnostic policies are available while the production
-catalog and coherent random state machine are still being implemented:
+The deterministic catalog contains 72 coherent R01-R18 random-play cells and
+1,112 mission cells: 504 solid-object, 192 wall/corner, 288 floor, 72 ramp, and
+56 hoop. A bounded 21-template temporal overlay adds two- through five-grenade
+sequences, re-aiming, cancellation/reacquisition, cooldown rejection recovery,
+natural relocation, mixed targets, and older-grenade persistence without
+Cartesian expansion. Recipes carry stable catalog, sequence, replay, continuous
+stratum, refinement, repetition, and train/evaluation identities.
+
+The V2 controller produces source-fingerprinted immutable plans, assignments,
+attempt claims, independently validated results, bounded reserves, and
+reconstructable inventories. Production allocation is exact in 100-frame
+quanta at 55% random play and 15/10/8/6/6% mission families. A production plan
+is refused until conservative duration evidence qualifies all 1,184 base cells
+and all 21 templates, and X below the resulting feasibility floor is rejected.
+
+Two deterministic diagnostic policies remain available for focused contract
+evidence:
 
 - `-V2RuntimeSmoke` exercises Q priority, a valid throw, held-E rejection,
   E-without-Q rejection, simultaneous first-Q+E rejection, and cooldown
@@ -977,18 +991,16 @@ catalog and coherent random state machine are still being implemented:
   tail. It requires at least four episode seconds.
 
 Both policies are deliberately marked diagnostic and receive no production
-coverage credit. Combined V2 refuses to fall back to the legacy independent
-Q/E sampler: until the full policy is present, a run must explicitly select one
-of these diagnostic flags. The frozen 55/45 controller, all R01-R18 random
-families, the 1,112 prescribed mission cells, duration extension, production
-qualification, and remote controller remain subsequent implementation phases.
+coverage credit. Production V2 never falls back to the legacy independent Q/E
+sampler. Diagnostic captures must be regenerated after a contract change rather
+than having their generated metadata patched.
 
-The checkpoint has passed an Unreal Editor Development build, the
-`HEGrenadeGame.DataGenerator.V2.ActionSemantics` automation test, Python
-contract/controller tests, PNG/JSONL capture and validation, and native
-WebP-to-typed-Parquet finalization. Representative local evidence includes an
-80-transition runtime smoke, a 20-transition production-format smoke, and a
-160-transition/161-observation 384x384 persistent-Q R08 review episode.
+Unreal automation covers the action contract, and Python tests cover the frozen
+catalog, sequence materialization, stable prefixes, worker independence,
+train/evaluation separation, qualification gating, semantic evidence,
+calibration, and deterministic audit selection. The packaged executable remains
+the authority for qualification; review MP4s are decoded only from stored
+observations.
 
 V2 collection uses the same variable-budget controller principle as V1. For any
 production frame target X at or above the calibrated feasibility floor, exactly
@@ -2054,6 +2066,98 @@ finalization, validation, and immutable result publication. The central
 controller—not each generator process—owns global assignment and coverage
 accounting.
 
+### Combined V2 local qualification workflow
+
+The V2 entry point is `Scripts/v2_dataset_controller.py`. Catalog qualification
+is deliberately separate from production planning, so it does not select X. A
+single complete plan is supported; the definitive local run split long random
+episodes from the mission/sequence plan so both could be monitored and resumed
+independently:
+
+```powershell
+python Scripts/dataset_worker.py Artifacts/V2MissionSequenceDefinitive/plan `
+  --executable Saved/PackagedV2Local/Windows/he_grenade_game.exe `
+  --worker-id 0 --executor-id local-windows-mission-sequence-definitive
+python Scripts/dataset_worker.py Artifacts/V2RandomDefinitive/plan `
+  --executable Saved/PackagedV2Local/Windows/he_grenade_game.exe `
+  --worker-id 0 --executor-id local-windows-random-definitive
+python Scripts/v2_dataset_controller.py inventory `
+  Artifacts/V2MissionSequenceDefinitive/plan --write-snapshot
+python Scripts/v2_dataset_controller.py inventory `
+  Artifacts/V2RandomDefinitive/plan --write-snapshot
+python Scripts/v2_calibration.py `
+  Artifacts/V2DefinitiveCalibration/calibration.json `
+  Artifacts/V2MissionSequenceDefinitive/plan `
+  Artifacts/V2RandomDefinitive/plan
+```
+
+One synchronous packaged generator process runs per local GPU. Logical worker
+partitions may be executed sequentially on one GPU; they do not change recipe
+identity. A failed or interrupted assignment is retried as a new immutable
+attempt, and only a structurally validated, semantically resolved result enters
+inventory or calibration evidence. The first worker also freezes
+`execution-build.json`, including the bootstrap executable hash and a combined
+hash of every runtime EXE, DLL, config, and package/container file. Every later
+attempt must match that exact local packaged build.
+
+The definitive 64x64 evidence completed locally on 2026-08-09. Plan
+`v2qualification-fdf741c861b5ef6e` validated all 1,112 mission cells and all 21
+sequence templates in 95 assignments; plan
+`v2qualification-67bddd117206cb1a` validated all 72 random cells in six
+assignments. Together they contain 1,205 accepted episodes, all 1,184 base IDs,
+all 21 sequence IDs, and zero semantic or technical failures. The merged
+realized report contains 248,408 credited observations across 101 validated
+assignments with zero train/evaluation replay overlap. The qualified calibration
+is `v2-local-qualified-3a4fd61cf86f9e06` and sets the minimum feasible
+production target to 402,200 credited observations.
+
+The frozen 128-slot visual audit is generated from focused 384x384 results:
+
+```powershell
+python Scripts/v2_dataset_controller.py qualification-plan `
+  Artifacts/V2FocusedAudit384Definitive/plan --audit-cells --workers 1 `
+  --recipes-per-assignment 8 --width 384 --height 384 --webp-effort 0
+python Scripts/dataset_worker.py Artifacts/V2FocusedAudit384Definitive/plan `
+  --executable Saved/PackagedV2Local/Windows/he_grenade_game.exe `
+  --worker-id 0 --executor-id local-windows-audit384-definitive
+python Scripts/v2_audit.py Artifacts/V2VisualAudit128Definitive `
+  Artifacts/V2FocusedAudit384Definitive/plan
+```
+
+The audit command exports only semantically accepted stored observations. Its
+manifest records catalog and continuous factors, temporal profiles, Q/E/contact/
+rest/tail indices, immutable replay provenance, and every source image key.
+`Scripts/v2_report.py` separately reconstructs realized source/family/cell,
+categorical-factor, temporal-profile, action-edge, rejection, grenade-count,
+contact, bounce, event-duration, storage, split-separation, and optional decoded
+exact/perceptual duplicate distributions from the immutable shards.
+
+The definitive visual run validated all 128 audit cells and nine additional
+representative sequence templates at 384x384. The audit export contains exactly
+128 MP4s plus six family contact sheets under
+`Artifacts/V2VisualAudit128Definitive`; the sequence reviews are under
+`Artifacts/V2SequenceReviewVideosDefinitive`. Actual stored frames were checked
+at Q preview, authoritative throw, contact, rest/tail, hoop passage, and SQ20
+multi-grenade persistence boundaries. Corrected diagnostic-only smoke and R08
+captures are under `Artifacts/V2DiagnosticsCorrected`; both have
+`accepted_for_balancing=false`.
+
+Once qualification is complete, a user-provided feasible frame budget is the
+only required production decision:
+
+```powershell
+python Scripts/v2_dataset_controller.py plan Artifacts/V2ProductionPlan `
+  --frame-budget <X> --workers 1 --width 384 --height 384
+```
+
+The planner then verifies the qualified calibration, complete mandatory
+coverage, exact frozen shares, stable prefix, evaluation separation, bounded
+reserves, and assignment boundaries before writing the immutable plan. The
+minimum-plan proof `Artifacts/V2ProductionMinimumQA` validates at X=402,200 with
+all 1,184 base cells, all 21 sequences, exact 55/45 and 15/10/8/6/6 allocation,
+1,873 active recipes, and two bounded reserves per active recipe. It was not
+executed. The large collection is not started until the user supplies X.
+
 ### Current same-GPU worker benchmark
 
 This was a generator-throughput/concurrency experiment, not model training or a
@@ -2159,7 +2263,8 @@ Automatic reports must include:
 - shard sizes and checksums
 - replay-test results
 
-V2 development and rollout:
+V2 development and rollout (items 1-8 are complete; items 9-10 wait only for
+the user-selected final X):
 
 1. Preserve the completed 500,000-frame Movement V1 collection unchanged.
 2. Implement combined V2 aim lock, Q-before-E gating, always-green trajectory,
@@ -2178,19 +2283,18 @@ V2 development and rollout:
    feasibility floor, and disjoint train/evaluation identities.
 9. Create and verify one immutable V2 production plan for the requested X. The
    current planning reference is one million credited observations.
-10. Package and execute that logical collection on the qualified RunPod GPU as
-    independently finalized, validated, retryable shards.
+10. Execute that logical collection on the local Windows GPU as independently
+    finalized, validated, retryable shards.
 
 At 20 Hz, one million frames represent approximately 13.89 simulated hours. The
 measured V2 WebP/Parquet pilot, not the older V1 estimate alone, must be used when
 sizing the production volume and run.
 
-The working training budget is approximately USD 100 using RunPod for storage
-and training. This rules out retaining thousands of hours or multi-terabyte
-lossless datasets for the first iteration. Collection must be coverage-driven,
-centrally accounted, interruption-safe, and evaluated incrementally. Each GPU
-uses one synchronous generator process; scale comes from separate centrally
-controlled RunPod workers.
+The earlier training budget discussion used RunPod for Movement V1 experiments;
+it does not govern the combined-V2 generation workflow. V2 collection remains
+coverage-driven, centrally accounted, interruption-safe, and evaluated
+incrementally. The local GPU uses one synchronous generator process; logical
+worker partitions execute sequentially and do not change recipe identity.
 
 ## Curriculum evaluation gates
 
@@ -2237,49 +2341,21 @@ or encoder.
 
 ### Active implementation checkpoint
 
-The authoritative storage conversion is complete for one-shard production-v1
-runs: native lossless WebP, typed Parquet, manifest/checksum updates, validation,
-review, benchmarking, and exact cross-format comparison are implemented on
-Windows. The automatic schema-v10 mission behavior is also implemented and
-validated. It uses named stateless parameters, enumerated categorical cells,
-stratified valid geometry, measurable outcomes, canonical action bits only, no
-mid-episode state correction, generic no-progress/time-limit failures,
-accepted-frame balancing, and natural endpoint-tail completion.
+Movement V1 remains unchanged. Combined V2 is locally production-ready: schema
+11 runtime/storage metadata, coherent random play, all mission geometry and
+outcomes, 21 deterministic temporal sequences, event-boundary duration
+extension, immutable attempts/results, reserves, inventory reconstruction,
+qualified duration calibration, realized reporting, and the 128-slot visual
+audit all work together. The complete 64x64 and focused 384x384 qualifications
+have zero semantic failures. Forty Python tests pass, Unreal automation
+`HEGrenadeGame.DataGenerator.V2.ActionSemantics` passes, and the final Win64
+Development BuildCookRun completed a full cook, stage, pak, and archive.
 
-The Windows baseline now implements the frozen centralized production
-architecture while retaining the synchronous one-shard generator as the trusted
-capture baseline. The first complete 20 Hz prescribed toy validated all 887
-discrete cells in one shard with 54,868 authoritative observations and zero
-semantic failures. The budget-controller run then generated 300,177 credited
-64x64 observations across 25 validated assignments with 177 frames of overshoot,
-887/887 credited cells, and zero semantic or technical failures. A graceful stop
-after assignment 23 and immutable resume under corrected near-target assignment
-boundaries preserved all validated work. That run supplied per-scenario duration
-calibration; a feasibility-aware 350,000-frame plan now predicts 350,041 frames
-at 55.010/19.992/14.990/4.998/5.010 mission shares. Interruption/retry,
-deliberate coarse-rate semantic failure, reserve activation, graceful stop,
-duplicate suppression, canonical-prefix stability, and inventory reconstruction
-are all covered.
-
-Immediate implementation order:
-
-1. Leave the completed 500,000-frame V1 collection and schema-v10 controller
-   evidence unchanged.
-2. Implement the combined V2 runtime action contract with final RGB as the sole
-   stored visual target.
-3. Design and implement the deterministic V2 random-play state machine,
-   prescribed mission catalog, scenario geometry, and semantic outcomes.
-4. Extend the central planner so any feasible requested X preserves 55% random
-   play / 45% missions, stable recipe prefixes, disjoint evaluation identities,
-   bounded reserves, and whole-shard retry.
-5. Complete focused Windows visual review, deterministic replay, the complete
-   toy catalog, and a mixed 384x384 duration/storage calibration pilot.
-6. Freeze the nested 45% mission shares and V2 feasibility floor from evidence,
-   then create and verify the intended production plan (currently expected to
-   target approximately one million credited observations).
-7. Run one packaged Linux parity smoke and execute the immutable collection on
-   the qualified RunPod GPU. Retain its plan, manifests, checksums, validated
-   shards, results, and final inventory for later representation training.
+No remote or cloud generation is required by this workflow. The only remaining
+production input is a user-selected X divisible by 100 and at least 402,200.
+After X is supplied, create one immutable local plan, verify it, and run its
+assignments through the same packaged-worker/finalization/validation path. No
+additional generator development or qualification fallback is required.
 
 Deferred work which is not a V2 data-generation gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple

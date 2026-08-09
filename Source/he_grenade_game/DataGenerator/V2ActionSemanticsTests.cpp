@@ -72,10 +72,30 @@ bool FV2ActionSemanticsTest::RunTest(const FString& Parameters)
 
 	const FDecision QRelease = Evaluate(0, CurriculumAction::Q, true, 0);
 	TestTrue(TEXT("Q falling edge is detected"), QRelease.bQFalling);
+	TestFalse(
+		TEXT("Movement is not suppressed after Q release"),
+		Evaluate(CurriculumAction::W, CurriculumAction::Q, true, 0)
+			.bPlanarMovementSuppressed);
+	TestTrue(
+		TEXT("Q-not-held takes precedence over cooldown for an E edge"),
+		Evaluate(CurriculumAction::E, 0, false, 40).RejectionReason
+			== EThrowRejectionReason::QNotHeld);
+	TestTrue(
+		TEXT("Q held without E has no rejection"),
+		Evaluate(CurriculumAction::Q, 0, false, 0).RejectionReason
+			== EThrowRejectionReason::None);
 	TestEqual(
 		TEXT("Two seconds at 20 Hz is exactly 40 transitions"),
 		GetCooldownDurationSteps(20),
 		40);
+	TestEqual(
+		TEXT("Cooldown scales at the minimum observation rate"),
+		GetCooldownDurationSteps(1),
+		2);
+	TestEqual(
+		TEXT("Cooldown scales at the maximum observation rate"),
+		GetCooldownDurationSteps(120),
+		240);
 	TestEqual(
 		TEXT("Trajectory-hold preview lasts half a second at 20 Hz"),
 		GetTrajectoryHoldThrowFrame(20),

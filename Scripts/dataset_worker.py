@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -14,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import dataset_controller as controller
+import dataset_controller as movement_controller
+import v2_dataset_controller as v2_controller
 
 
 def utc_now() -> str:
@@ -31,6 +33,72 @@ def write_new_json(path: Path, value: Any) -> None:
     with path.open("x", encoding="utf-8", newline="\n") as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def package_runtime_fingerprint(executable: Path) -> tuple[str, int, int]:
+    root = executable.resolve().parent
+    extensions = {".dll", ".exe", ".ini", ".pak", ".sig", ".ucas", ".utoc"}
+    files = sorted(
+        path for path in root.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in extensions
+        and "saved" not in {
+            part.lower() for part in path.relative_to(root).parts[:-1]
+        }
+    )
+    digest = hashlib.sha256()
+    total_size = 0
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        size = path.stat().st_size
+        total_size += size
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(size).encode("ascii"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        digest.update(b"\0")
+    return digest.hexdigest(), len(files), total_size
+
+
+def bind_execution_build(root: Path, executable: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the exact packaged binary used by every attempt in a collection."""
+    executable = executable.resolve()
+    if not executable.is_file():
+        raise ValueError(f"packaged executable does not exist: {executable}")
+    package_sha256, package_file_count, package_size = package_runtime_fingerprint(executable)
+    identity = {
+        "schema_version": 1,
+        "plan_id": plan["plan_id"],
+        "generator_source_sha256": plan.get("generator_source_sha256"),
+        "executable_sha256": sha256_file(executable),
+        "executable_size_bytes": executable.stat().st_size,
+        "executable_name": executable.name,
+        "package_runtime_sha256": package_sha256,
+        "package_runtime_file_count": package_file_count,
+        "package_runtime_size_bytes": package_size,
+    }
+    path = root / "execution-build.json"
+    try:
+        write_new_json(path, identity)
+    except FileExistsError:
+        frozen = read_json(path)
+        if frozen != identity:
+            raise ValueError(
+                "packaged executable identity differs from the collection's "
+                "immutable execution-build.json"
+            )
+    return identity
 
 
 def results_for(root: Path, assignment_id: str) -> list[dict[str, Any]]:
@@ -102,16 +170,26 @@ def build_validated_result(
         observation_count = int(row["observation_count"])
         produced_frames += observation_count
         mission = recipe["mission"]
-        semantic_success = mission == "semi_markov" or bool(row["mission_success"])
+        is_v2 = str(assignment.get("plan_version", "")).startswith("trajectory-throw-v2")
+        semantic_success = (
+            bool(row.get("accepted_for_balancing"))
+            if is_v2
+            else mission == "semi_markov" or bool(row["mission_success"])
+        )
         if semantic_success:
             successful.append(recipe_id)
-            accepted_frames += observation_count
-            accepted_frames_by_mission[mission] = accepted_frames_by_mission.get(mission, 0) + observation_count
+            credited_frame_cap = int(recipe.get("planned_credited_frames", observation_count))
+            credited_frames = min(observation_count, credited_frame_cap)
+            accepted_frames += credited_frames
+            accepted_frames_by_mission[mission] = accepted_frames_by_mission.get(mission, 0) + credited_frames
             credited_cells.append({
                 "mission": mission,
                 "scenario_index": int(recipe["scenario_index"]),
+                "cell_id": recipe.get("cell_id"),
+                "sequence_template_id": recipe.get("sequence_template_id"),
                 "recipe_id": recipe_id,
-                "credited_observation_frames": observation_count,
+                "credited_observation_frames": credited_frames,
+                "produced_observation_frames": observation_count,
             })
         else:
             semantic_failures.append(recipe_id)
@@ -168,6 +246,7 @@ def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:
         **assignment,
         "attempt_id": attempt_id,
         "executor_id": args.executor_id,
+        "execution_build": args.execution_build,
     }
     write_new_json(attempt_dir / "request.json", runtime_manifest)
     result_path = root / "results" / f"{assignment_id}--{attempt_id}.json"
@@ -230,7 +309,9 @@ def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:
         })
         return "validation_failed"
 
-    write_new_json(result_path, build_validated_result(assignment, attempt_id, args.executor_id, output))
+    result = build_validated_result(assignment, attempt_id, args.executor_id, output)
+    result["execution_build"] = args.execution_build
+    write_new_json(result_path, result)
     return "validated"
 
 
@@ -270,7 +351,21 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     root = args.collection.resolve()
+    plan = read_json(root / "plan" / "collection-plan.json")
+    controller = (
+        v2_controller
+        if str(plan.get("plan_version", "")).startswith("trajectory-throw-v2")
+        else movement_controller
+    )
     statuses: list[dict[str, str]] = []
+    if (root / "STOP").exists():
+        print(json.dumps({
+            "worker_id": args.worker_id,
+            "executor_id": args.executor_id,
+            "assignments": statuses,
+        }, indent=2, sort_keys=True))
+        return 0
+    args.execution_build = bind_execution_build(root, args.executable, plan)
     for assignment_path in sorted((root / "assignments").glob("*.json")):
         if (root / "STOP").exists():
             break
