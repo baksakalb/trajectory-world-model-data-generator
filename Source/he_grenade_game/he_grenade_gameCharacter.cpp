@@ -147,8 +147,30 @@ void Ahe_grenade_gameCharacter::ProcessCurriculumMovementInput(const float Delta
 			| (PlayerController->IsInputKeyDown(EKeys::Up) ? CurriculumAction::ArrowUp : 0)
 			| (PlayerController->IsInputKeyDown(EKeys::Down) ? CurriculumAction::ArrowDown : 0)
 			| (PlayerController->IsInputKeyDown(EKeys::Left) ? CurriculumAction::ArrowLeft : 0)
-			| (PlayerController->IsInputKeyDown(EKeys::Right) ? CurriculumAction::ArrowRight : 0);
+			| (PlayerController->IsInputKeyDown(EKeys::Right) ? CurriculumAction::ArrowRight : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::Q) ? CurriculumAction::Q : 0)
+			| (PlayerController->IsInputKeyDown(EKeys::E) ? CurriculumAction::E : 0);
 	}
+
+	const bool bQHeld = (ActionMask & CurriculumAction::Q) != 0;
+	if (bCurriculumV2ActionSemanticsEnabled)
+	{
+		if (bQHeld && !bCurriculumQHeldLastFrame)
+		{
+			if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+			{
+				// Q removes planar velocity only. Gravity and legitimate vertical
+				// motion remain authoritative.
+				Movement->Velocity.X = 0.0f;
+				Movement->Velocity.Y = 0.0f;
+			}
+		}
+		if (bQHeld)
+		{
+			ActionMask &= ~CurriculumAction::MovementMask;
+		}
+	}
+	bCurriculumQHeldLastFrame = bQHeld;
 
 	const float ForwardAxis = CurriculumAction::ForwardAxis(ActionMask);
 	const float RightAxis = CurriculumAction::RightAxis(ActionMask);
@@ -209,6 +231,17 @@ void Ahe_grenade_gameCharacter::SetCurriculumActionOverride(
 	bCurriculumActionOverrideEnabled = bEnabled;
 	CurriculumActionOverrideMask =
 		bEnabled ? (ActionMask & CurriculumAction::CanonicalMask) : 0;
+	if (!bEnabled)
+	{
+		bCurriculumQHeldLastFrame = false;
+	}
+}
+
+void Ahe_grenade_gameCharacter::SetCurriculumV2ActionSemanticsEnabled(
+	const bool bEnabled)
+{
+	bCurriculumV2ActionSemanticsEnabled = bEnabled;
+	bCurriculumQHeldLastFrame = false;
 }
 
 void Ahe_grenade_gameCharacter::MoveInput(const FInputActionValue& Value)

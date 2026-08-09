@@ -759,7 +759,8 @@ void UGrenadeTrajectoryComponent::DrawPredictedPath()
 		FMath::Max(MinRenderSubstepsPerSimulationStep, 4),
 		RenderPoints);
 
-	CachedTrajectoryColor = Thrower->IsStateGreen() ? AvailableColor : CooldownColor;
+	// V2 uses the crosshair—not the trajectory—as the availability indicator.
+	CachedTrajectoryColor = AvailableColor;
 	CachedTrajectoryRuns.Reset();
 	bHasCachedExplosionTip = false;
 

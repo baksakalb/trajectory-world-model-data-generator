@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Grenade/GrenadeSim.h"
+#include "DataGenerator/V2ActionSemantics.h"
 #include "CurriculumDataGenerator.generated.h"
 
 class AStaticMeshActor;
@@ -47,8 +48,18 @@ private:
 	enum class ECurriculumStage : uint8
 	{
 		Movement = 1,
-		Trajectory = 2,
-		Throw = 3
+		LegacyTrajectory = 2,
+		LegacyThrow = 3,
+		TrajectoryThrowV2 = 4
+	};
+
+	enum class EV2EpisodePhase : uint8
+	{
+		NotApplicable,
+		Traverse,
+		Aim,
+		Cooldown,
+		PostThrow
 	};
 
 	enum class EStorageFormat : uint8
@@ -236,6 +247,8 @@ private:
 		int32 SuccessObservationIndex);
 	uint16 SelectPostSuccessAction() const;
 	uint16 SelectTrajectoryShowcaseAction() const;
+	uint16 SelectV2RuntimeSmokeAction() const;
+	uint16 SelectV2TrajectoryHoldMissionAction() const;
 	uint16 SelectCoverageGuidedAction();
 	uint16 WorldDirectionToMovementBits(const FVector& DesiredWorldDirection) const;
 	uint16 CameraBitsToward(const FVector& WorldTarget, float* OutYawError = nullptr) const;
@@ -280,9 +293,11 @@ private:
 	void ResetStageState();
 	void AdvanceGrenades();
 	bool BuildLaunchState(FVector& OutSpawnLocation, FVector& OutVelocity) const;
-	bool AcceptThrow();
+	int32 AcceptThrow();
 	void DrawTrajectoryOverlay(TArray<FColor>& Pixels) const;
 	FString BuildGrenadesJson() const;
+	EV2EpisodePhase GetV2EpisodePhase() const;
+	FString GetV2EpisodePhaseSlug() const;
 	FString GetStageSlug() const;
 	FString GetStageSchemaVersion() const;
 	FString MakeEpisodeId() const;
@@ -341,6 +356,9 @@ private:
 	int32 WebPLosslessEffort = 0;
 	int32 CooldownRemainingSteps = 0;
 	int32 NextGrenadeId = 0;
+	int32 CurrentAcceptedGrenadeId = INDEX_NONE;
+	int32 CurrentCooldownBeforeSteps = 0;
+	int32 CurrentCooldownAfterSteps = 0;
 	int32 NextThrowRequestFrame = 0;
 	int32 TransitionsPerEpisode = 200;
 	int32 EpisodeIndex = 0;
@@ -476,6 +494,10 @@ private:
 	bool bNaturalPlayEscapeActionActive = false;
 	bool bCurrentERequestEdge = false;
 	bool bCurrentEAccepted = false;
+	bool bCurrentQRising = false;
+	bool bCurrentQFalling = false;
+	bool bCurrentPlanarMovementSuppressed = false;
+	bool bQVisibleInLatestObservation = false;
 	bool bCurrentCoverageTargetVisible = false;
 	bool bCoveragePreviousPositionValid = false;
 	bool bCoverageOrbitClockwise = false;
@@ -496,6 +518,10 @@ private:
 	bool bExitOnComplete = true;
 	bool bTrajectoryShowcase = false;
 	bool bMissionReviewSuite = false;
+	bool bV2RuntimeSmoke = false;
+	bool bV2TrajectoryHoldMission = false;
 	bool bCoverageGuided = true;
 	bool bPrescribedRecipes = false;
+	V2ActionSemantics::EThrowRejectionReason CurrentERejectionReason =
+		V2ActionSemantics::EThrowRejectionReason::None;
 };

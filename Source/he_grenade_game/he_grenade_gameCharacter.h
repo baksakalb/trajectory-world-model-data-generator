@@ -159,6 +159,7 @@ public:
 	 * the canonical [W,A,S,D,Up,Down,Left,Right,Q,E] bit order.
 	 */
 	void SetCurriculumActionOverride(bool bEnabled, uint16 ActionMask);
+	void SetCurriculumV2ActionSemanticsEnabled(bool bEnabled);
 
 	UFUNCTION(BlueprintPure, Category = "Grenade")
 	bool IsAimModeActive() const { return bAimModeActive; }
@@ -168,5 +169,7 @@ public:
 
 private:
 	bool bCurriculumActionOverrideEnabled = false;
+	bool bCurriculumV2ActionSemanticsEnabled = false;
+	bool bCurriculumQHeldLastFrame = false;
 	uint16 CurriculumActionOverrideMask = 0;
 };

@@ -5,6 +5,7 @@
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/StaticMeshComponent.h"
 #include "DataGenerator/CurriculumAction.h"
+#include "DataGenerator/V2ActionSemantics.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Engine.h"
 #include "Engine/OverlapResult.h"
@@ -798,6 +799,7 @@ void ACurriculumDataGenerator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	ResetStageState();
 	if (Character)
 	{
+		Character->SetCurriculumV2ActionSemanticsEnabled(false);
 		Character->SetCurriculumActionOverride(false, 0);
 	}
 	if (TarWriter && !bTarFinalized)
@@ -846,11 +848,17 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 			}
 			else if (StageValue == TEXT("trajectory") || StageValue == TEXT("trajectory_v2"))
 			{
-				CurriculumStage = ECurriculumStage::Trajectory;
+				CurriculumStage = ECurriculumStage::LegacyTrajectory;
 			}
 			else if (StageValue == TEXT("throw") || StageValue == TEXT("throw_v3"))
 			{
-				CurriculumStage = ECurriculumStage::Throw;
+				CurriculumStage = ECurriculumStage::LegacyThrow;
+			}
+			else if (StageValue == TEXT("v2")
+				|| StageValue == TEXT("trajectory_throw")
+				|| StageValue == TEXT("trajectory_throw_v2"))
+			{
+				CurriculumStage = ECurriculumStage::TrajectoryThrowV2;
 			}
 			else
 			{
@@ -918,6 +926,10 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 		Config->TryGetStringField(TEXT("recipe_manifest"), RecipeManifestPath);
 		Config->TryGetBoolField(TEXT("exit_on_complete"), bExitOnComplete);
 		Config->TryGetBoolField(TEXT("coverage_guided"), bCoverageGuided);
+		Config->TryGetBoolField(TEXT("v2_runtime_smoke"), bV2RuntimeSmoke);
+		Config->TryGetBoolField(
+			TEXT("v2_trajectory_hold_mission"),
+			bV2TrajectoryHoldMission);
 
 		if (!OutputDirectory.IsEmpty() && FPaths::IsRelative(OutputDirectory))
 		{
@@ -1003,11 +1015,17 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 		}
 		else if (CommandLineStage == TEXT("trajectory") || CommandLineStage == TEXT("trajectory_v2"))
 		{
-			CurriculumStage = ECurriculumStage::Trajectory;
+			CurriculumStage = ECurriculumStage::LegacyTrajectory;
 		}
 		else if (CommandLineStage == TEXT("throw") || CommandLineStage == TEXT("throw_v3"))
 		{
-			CurriculumStage = ECurriculumStage::Throw;
+			CurriculumStage = ECurriculumStage::LegacyThrow;
+		}
+		else if (CommandLineStage == TEXT("v2")
+			|| CommandLineStage == TEXT("trajectory_throw")
+			|| CommandLineStage == TEXT("trajectory_throw_v2"))
+		{
+			CurriculumStage = ECurriculumStage::TrajectoryThrowV2;
 		}
 		else
 		{
@@ -1062,6 +1080,16 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 		FParse::Param(CommandLine, TEXT("TrajectoryShowcase"));
 	bMissionReviewSuite =
 		FParse::Param(CommandLine, TEXT("MissionReviewSuite"));
+	bV2RuntimeSmoke = bV2RuntimeSmoke
+		|| FParse::Param(CommandLine, TEXT("V2RuntimeSmoke"));
+	bV2TrajectoryHoldMission = bV2TrajectoryHoldMission
+		|| FParse::Param(CommandLine, TEXT("V2TrajectoryHoldMission"));
+	if (bV2RuntimeSmoke && bV2TrajectoryHoldMission)
+	{
+		LastError =
+			TEXT("-V2RuntimeSmoke and -V2TrajectoryHoldMission are mutually exclusive.");
+		return false;
+	}
 	if (bTrajectoryShowcase && bMissionReviewSuite)
 	{
 		LastError =
@@ -1087,6 +1115,52 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	if (bMissionReviewSuite)
 	{
 		bCoverageGuided = true;
+	}
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& bPrescribedRecipes)
+	{
+		LastError =
+			TEXT("A Movement V1 recipe manifest cannot be overridden into combined V2; the V2 catalog parser is not implemented yet.");
+		return false;
+	}
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& !bV2RuntimeSmoke
+		&& !bV2TrajectoryHoldMission)
+	{
+		LastError =
+			TEXT("Combined V2 currently requires -V2RuntimeSmoke or -V2TrajectoryHoldMission until the coherent random/mission policy is implemented; refusing to use the legacy independent Q/E sampler.");
+		return false;
+	}
+	if (bV2TrajectoryHoldMission
+		&& CurriculumStage != ECurriculumStage::TrajectoryThrowV2)
+	{
+		LastError =
+			TEXT("-V2TrajectoryHoldMission requires -Stage=trajectory_throw_v2.");
+		return false;
+	}
+	if (bV2TrajectoryHoldMission && EpisodeSeconds < 4)
+	{
+		LastError =
+			TEXT("-V2TrajectoryHoldMission requires at least four episode seconds so Q remains visible through the complete cooldown.");
+		return false;
+	}
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
+	{
+		bCoverageGuided = false;
+	}
+	if (bTrajectoryShowcase
+		&& CurriculumStage != ECurriculumStage::LegacyTrajectory)
+	{
+		LastError =
+			TEXT("-TrajectoryShowcase is restricted to the explicit legacy trajectory comparison stage.");
+		return false;
+	}
+	if (bMissionReviewSuite
+		&& CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
+	{
+		LastError =
+			TEXT("The Movement V1 mission review suite is incompatible with combined V2.");
+		return false;
 	}
 
 	const bool bHasCommandLineOutput =
@@ -1155,9 +1229,18 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 			{
 				CurriculumStage = ECurriculumStage::Movement;
 			}
+			else if (StageValue == TEXT("v2")
+				|| StageValue == TEXT("trajectory_throw")
+				|| StageValue == TEXT("trajectory_throw_v2"))
+			{
+				LastError =
+					TEXT("Combined V2 prescribed recipes require the V2 catalog fields and are not enabled by the Movement V1 manifest parser.");
+				return false;
+			}
 			else
 			{
-				LastError = TEXT("Prescribed production recipes currently support Movement V1 only.");
+				LastError =
+					TEXT("Legacy trajectory/throw stages are comparison-only and cannot run prescribed production recipes.");
 				return false;
 			}
 		}
@@ -1332,6 +1415,8 @@ bool ACurriculumDataGenerator::ResolvePlayer()
 	{
 		return false;
 	}
+	Character->SetCurriculumV2ActionSemanticsEnabled(
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2);
 
 	AddTickPrerequisiteActor(Character);
 
@@ -1763,6 +1848,7 @@ void ACurriculumDataGenerator::EndEpisode()
 		TEXT("\"seed\":%d,\"prescribed\":%s,\"plan_id\":%s,")
 		TEXT("\"plan_version\":%s,\"assignment_id\":%s,\"attempt_id\":%s,")
 		TEXT("\"executor_id\":%s,\"split\":%s,\"recipe_id\":%s,")
+		TEXT("\"v2_contract_version\":%s,\"v2_source\":%s,\"v2_cell_id\":%s,")
 		TEXT("\"continuous_sample_ordinal\":%s,\"refinement_level\":%s,")
 		TEXT("\"repetition_index\":%s,\"prescribed_scenario_index\":%s,")
 		TEXT("\"requested_transitions\":%d,\"actual_transitions\":%d,")
@@ -1827,6 +1913,17 @@ void ACurriculumDataGenerator::EndEpisode()
 		bPrescribedRecipes
 			? *FString::Printf(TEXT("\"%s\""), *CurrentRecipeId.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+			? TEXT("\"v2-data-generation-spec-2\"")
+			: TEXT("null"),
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+			? TEXT("\"random_play\"")
+			: TEXT("null"),
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+			? (bV2TrajectoryHoldMission
+				? TEXT("\"R08_throw_hold_cooldown_diagnostic\"")
+				: TEXT("\"runtime_smoke_unqualified\""))
+			: TEXT("null"),
 		bPrescribedRecipes ? *FString::FromInt(CurrentContinuousSampleOrdinal) : TEXT("null"),
 		bPrescribedRecipes ? *FString::FromInt(CurrentRefinementLevel) : TEXT("null"),
 		bPrescribedRecipes ? *FString::FromInt(CurrentRepetitionIndex) : TEXT("null"),
@@ -1835,9 +1932,13 @@ void ACurriculumDataGenerator::EndEpisode()
 		FrameIndex,
 		FrameIndex + 1,
 		*GetCoverageMissionSlug(),
-		bMissionReviewSuite
-			? *FString::Printf(TEXT("\"%s\""), *GetMissionReviewSlug())
-			: TEXT("null"),
+		bV2TrajectoryHoldMission
+			? *FString::Printf(
+				TEXT("\"v2-r08-trajectory-hold-e%06d\""),
+				EpisodeIndex)
+			: (bMissionReviewSuite
+				? *FString::Printf(TEXT("\"%s\""), *GetMissionReviewSlug())
+				: TEXT("null")),
 		MissionObservationFrames,
 		PostSuccessObservationFrames,
 		CoverageMissionSuccessFrameIndex != INDEX_NONE
@@ -2117,7 +2218,8 @@ bool ACurriculumDataGenerator::CaptureObservation(
 	const int32 Thickness = 1;
 	FColor CrosshairColor(242, 242, 242, 255);
 	FString CrosshairState = TEXT("Neutral");
-	if (CurriculumStage == ECurriculumStage::Throw)
+	if (CurriculumStage == ECurriculumStage::LegacyThrow
+		|| CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 	{
 		if (CooldownRemainingSteps > 0)
 		{
@@ -2263,6 +2365,53 @@ bool ACurriculumDataGenerator::CaptureObservation(
 	const bool bQVisible =
 		CurriculumStage != ECurriculumStage::Movement
 		&& (CurrentActionMask & CurriculumAction::Q) != 0;
+	const bool bAimLockActive =
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& bQVisible;
+	int32 FlyingGrenadeCount = 0;
+	int32 RestingGrenadeCount = 0;
+	int32 VisibleGrenadeCount = 0;
+	const FTransform CameraTransform = PlayerCamera->GetComponentTransform();
+	for (const FGeneratedGrenade& Grenade : Grenades)
+	{
+		if (Grenade.State.bMotionStopped)
+		{
+			++RestingGrenadeCount;
+		}
+		else
+		{
+			++FlyingGrenadeCount;
+		}
+		FVector2D ProjectedGrenade;
+		if (ProjectToCapture(
+				Grenade.State.Position,
+				CameraTransform,
+				PlayerCamera->FieldOfView,
+				CaptureWidth,
+				CaptureHeight,
+				ProjectedGrenade))
+		{
+			FHitResult VisibilityHit;
+			FCollisionQueryParams VisibilityQuery(
+				SCENE_QUERY_STAT(CurriculumGrenadeVisibility),
+				false,
+				Character);
+			const FVector ViewLocation = CameraTransform.GetLocation();
+			const bool bOccluded = GetWorld()->LineTraceSingleByChannel(
+				VisibilityHit,
+				ViewLocation,
+				Grenade.State.Position,
+				ECC_Visibility,
+				VisibilityQuery)
+				&& VisibilityHit.Distance
+					< FVector::Distance(ViewLocation, Grenade.State.Position)
+						- FMath::Max(1.0f, GrenadeSimConfig.RadiusCm);
+			if (!bOccluded)
+			{
+				++VisibleGrenadeCount;
+			}
+		}
+	}
 	UpdatePitchMetrics(OutState.CameraRotation.Pitch);
 	UpdateCoverageMetrics(OutState, ObservationIndex);
 	const FString GrenadesJson = BuildGrenadesJson();
@@ -2273,7 +2422,11 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		TEXT("\"camera\":{\"yaw\":%s,\"pitch\":%s,\"roll\":0.0},")
 		TEXT("\"grounded\":%s,\"contact\":%s,\"contact_object\":%s,")
 		TEXT("\"crosshair_state\":\"%s\",")
-		TEXT("\"cooldown_remaining_steps\":%d,\"q_visibility\":%s,\"grenades\":%s,")
+		TEXT("\"cooldown_remaining_steps\":%d,\"q_visibility\":%s,")
+		TEXT("\"aim_lock_active\":%s,\"trajectory_visible\":%s,")
+		TEXT("\"flying_grenade_count\":%d,\"resting_grenade_count\":%d,")
+		TEXT("\"visible_grenade_count\":%d,\"total_grenade_count\":%d,")
+		TEXT("\"v2_episode_phase\":\"%s\",\"grenades\":%s,")
 		TEXT("\"collection_mission\":\"%s\",\"mission_phase\":\"%s\",")
 		TEXT("\"mission_success_frame_index\":%s,\"coverage_target\":%s,")
 		TEXT("\"mission_review_slug\":%s,")
@@ -2326,6 +2479,13 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		*CrosshairState,
 		CooldownRemainingSteps,
 		JsonBool(bQVisible),
+		JsonBool(bAimLockActive),
+		JsonBool(bQVisible),
+		FlyingGrenadeCount,
+		RestingGrenadeCount,
+		VisibleGrenadeCount,
+		Grenades.Num(),
+		*GetV2EpisodePhaseSlug(),
 		*GrenadesJson,
 		*GetCoverageMissionSlug(),
 		*GetMissionPhaseSlug(),
@@ -2335,9 +2495,13 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		(CoverageTargetIndex != INDEX_NONE || ContactTargetIndex != INDEX_NONE)
 			? *FString::Printf(TEXT("\"%s\""), *GetCoverageTargetSlug())
 			: TEXT("null"),
-		bMissionReviewSuite
-			? *FString::Printf(TEXT("\"%s\""), *GetMissionReviewSlug())
-			: TEXT("null"),
+		bV2TrajectoryHoldMission
+			? *FString::Printf(
+				TEXT("\"v2-r08-trajectory-hold-e%06d\""),
+				EpisodeIndex)
+			: (bMissionReviewSuite
+				? *FString::Printf(TEXT("\"%s\""), *GetMissionReviewSlug())
+				: TEXT("null")),
 		CoverageMission == ECoverageMission::ObjectView
 			? *FString::Printf(TEXT("\"%s\""), *GetObjectViewModeSlug())
 			: TEXT("null"),
@@ -2429,6 +2593,9 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		NaturalPlayContactSteps,
 		NaturalPlayContactLimitSteps,
 		JsonBool(bNaturalPlayEscapeActionActive));
+	bQVisibleInLatestObservation =
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& bQVisible;
 	return true;
 }
 
@@ -2438,8 +2605,15 @@ void ACurriculumDataGenerator::AppendTransition(
 	const FRecordedState& SourceState,
 	const FRecordedState& TargetState)
 {
-	const float ForwardAxis = CurriculumAction::ForwardAxis(ActionMask);
-	const float RightAxis = CurriculumAction::RightAxis(ActionMask);
+	const bool bAimLockActive =
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& (ActionMask & CurriculumAction::Q) != 0;
+	const float ForwardAxis = bAimLockActive
+		? 0.0f
+		: CurriculumAction::ForwardAxis(ActionMask);
+	const float RightAxis = bAimLockActive
+		? 0.0f
+		: CurriculumAction::RightAxis(ActionMask);
 	const float PitchAxis = CurriculumAction::PitchAxis(ActionMask);
 	const float YawAxis = CurriculumAction::YawAxis(ActionMask);
 
@@ -2449,7 +2623,11 @@ void ACurriculumDataGenerator::AppendTransition(
 		TEXT("\"arrow_up\":%s,\"arrow_down\":%s,\"arrow_left\":%s,\"arrow_right\":%s,")
 		TEXT("\"q\":%s,\"e\":%s,\"forward_axis\":%s,\"right_axis\":%s,")
 		TEXT("\"pitch_axis\":%s,\"yaw_axis\":%s,\"e_request_edge\":%s,")
-		TEXT("\"e_accepted\":%s,\"cooldown_remaining_steps\":%d,")
+		TEXT("\"e_accepted\":%s,\"planar_movement_suppressed\":%s,")
+		TEXT("\"q_rising_edge\":%s,\"q_falling_edge\":%s,")
+		TEXT("\"e_rejection_reason\":\"%s\",\"accepted_throw_grenade_id\":%s,")
+		TEXT("\"cooldown_before_steps\":%d,\"cooldown_after_steps\":%d,")
+		TEXT("\"cooldown_remaining_steps\":%d,")
 		TEXT("\"observation_valid\":true}\n"),
 		*MakeEpisodeId(),
 		SourceFrameIndex,
@@ -2470,7 +2648,16 @@ void ACurriculumDataGenerator::AppendTransition(
 		*JsonNumber(YawAxis),
 		JsonBool(bCurrentERequestEdge),
 		JsonBool(bCurrentEAccepted),
-		CooldownRemainingSteps);
+		JsonBool(bCurrentPlanarMovementSuppressed),
+		JsonBool(bCurrentQRising),
+		JsonBool(bCurrentQFalling),
+		V2ActionSemantics::GetRejectionReasonSlug(CurrentERejectionReason),
+		CurrentAcceptedGrenadeId != INDEX_NONE
+			? *FString::FromInt(CurrentAcceptedGrenadeId)
+			: TEXT("null"),
+		CurrentCooldownBeforeSteps,
+		CurrentCooldownAfterSteps,
+		CurrentCooldownAfterSteps);
 }
 
 uint16 ACurriculumDataGenerator::SelectAction()
@@ -3247,6 +3434,57 @@ uint16 ACurriculumDataGenerator::SelectTrajectoryShowcaseAction() const
 	}
 
 	return ActionMask;
+}
+
+uint16 ACurriculumDataGenerator::SelectV2RuntimeSmokeAction() const
+{
+	// This is a bounded diagnostic sequence, not the production random policy.
+	// It deliberately exercises every frozen Q/E gate in a stable order.
+	switch (FrameIndex)
+	{
+	case 0:
+		return CurriculumAction::W;
+	case 1:
+		return CurriculumAction::Q | CurriculumAction::W;
+	case 2:
+		return CurriculumAction::Q | CurriculumAction::ArrowRight;
+	case 3:
+		return CurriculumAction::Q | CurriculumAction::E;
+	case 4:
+		return CurriculumAction::Q | CurriculumAction::E;
+	case 5:
+		return 0;
+	case 6:
+		return CurriculumAction::E;
+	case 7:
+		return 0;
+	case 8:
+		return CurriculumAction::Q | CurriculumAction::E;
+	case 9:
+		return CurriculumAction::Q;
+	case 10:
+		return 0;
+	case 11:
+	case 12:
+		return CurriculumAction::Q | CurriculumAction::ArrowUp;
+	case 13:
+		return CurriculumAction::Q | CurriculumAction::E;
+	case 14:
+		return 0;
+	default:
+		return 0;
+	}
+}
+
+uint16 ACurriculumDataGenerator::SelectV2TrajectoryHoldMissionAction() const
+{
+	// Diagnostic implementation of frozen random family R08. The initial
+	// observation is Q-off; every generated action then holds Q. E rises once
+	// after a half-second stable preview and Q remains held for the rest of the
+	// episode so the preview can be compared with the live grenade simulation.
+	return V2ActionSemantics::SelectTrajectoryHoldAction(
+		FrameIndex,
+		ObservationRate);
 }
 
 void ACurriculumDataGenerator::SelectCoverageMission()
@@ -6343,16 +6581,50 @@ void ACurriculumDataGenerator::ApplyAction(const uint16 ActionMask)
 	{
 		CurrentActionMask &= ~(CurriculumAction::Q | CurriculumAction::E);
 	}
-	else if (CurriculumStage == ECurriculumStage::Trajectory)
+	else if (CurriculumStage == ECurriculumStage::LegacyTrajectory)
 	{
 		CurrentActionMask &= ~CurriculumAction::E;
 	}
 
-	bCurrentERequestEdge =
-		CurriculumStage == ECurriculumStage::Throw
-		&& (CurrentActionMask & CurriculumAction::E) != 0
-		&& (LastAppliedActionMask & CurriculumAction::E) == 0;
-	bCurrentEAccepted = bCurrentERequestEdge && AcceptThrow();
+	bCurrentQRising = false;
+	bCurrentQFalling = false;
+	bCurrentERequestEdge = false;
+	bCurrentEAccepted = false;
+	bCurrentPlanarMovementSuppressed = false;
+	CurrentERejectionReason =
+		V2ActionSemantics::EThrowRejectionReason::None;
+	CurrentAcceptedGrenadeId = INDEX_NONE;
+	CurrentCooldownBeforeSteps = CooldownRemainingSteps;
+	CurrentCooldownAfterSteps = CooldownRemainingSteps;
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
+	{
+		const V2ActionSemantics::FDecision Decision =
+			V2ActionSemantics::Evaluate(
+				CurrentActionMask,
+				LastAppliedActionMask,
+				bQVisibleInLatestObservation,
+				CooldownRemainingSteps);
+		bCurrentQRising = Decision.bQRising;
+		bCurrentQFalling = Decision.bQFalling;
+		bCurrentERequestEdge = Decision.bERequestEdge;
+		bCurrentPlanarMovementSuppressed =
+			Decision.bPlanarMovementSuppressed;
+		CurrentERejectionReason = Decision.RejectionReason;
+		if (Decision.bThrowEligible)
+		{
+			bCurrentEAccepted = (CurrentAcceptedGrenadeId = AcceptThrow()) != INDEX_NONE;
+		}
+		CurrentCooldownAfterSteps = CooldownRemainingSteps;
+	}
+	else if (CurriculumStage == ECurriculumStage::LegacyThrow)
+	{
+		bCurrentERequestEdge =
+			(CurrentActionMask & CurriculumAction::E) != 0
+			&& (LastAppliedActionMask & CurriculumAction::E) == 0;
+		bCurrentEAccepted = bCurrentERequestEdge
+			&& (CurrentAcceptedGrenadeId = AcceptThrow()) != INDEX_NONE;
+		CurrentCooldownAfterSteps = CooldownRemainingSteps;
+	}
 	LastAppliedActionMask = CurrentActionMask;
 
 	if (Character)
@@ -6364,8 +6636,20 @@ void ACurriculumDataGenerator::ApplyAction(const uint16 ActionMask)
 void ACurriculumDataGenerator::PrepareNextAction()
 {
 	bNaturalPlayEscapeActionActive = false;
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& bV2TrajectoryHoldMission)
+	{
+		ApplyAction(SelectV2TrajectoryHoldMissionAction());
+		return;
+	}
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& bV2RuntimeSmoke)
+	{
+		ApplyAction(SelectV2RuntimeSmokeAction());
+		return;
+	}
 
-	if (bTrajectoryShowcase && CurriculumStage == ECurriculumStage::Trajectory)
+	if (bTrajectoryShowcase && CurriculumStage == ECurriculumStage::LegacyTrajectory)
 	{
 		ApplyAction(SelectTrajectoryShowcaseAction());
 		return;
@@ -6381,7 +6665,8 @@ void ACurriculumDataGenerator::PrepareNextAction()
 	if (bCoverageGuided && CoverageMission != ECoverageMission::SemiMarkov)
 	{
 		uint16 NextActionMask = SelectCoverageGuidedAction();
-		if (CurriculumStage == ECurriculumStage::Throw
+		if ((CurriculumStage == ECurriculumStage::LegacyThrow
+				|| CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 			&& FrameIndex >= NextThrowRequestFrame)
 		{
 			NextActionMask |= CurriculumAction::E;
@@ -6472,7 +6757,8 @@ void ACurriculumDataGenerator::PrepareNextAction()
 
 		uint16 NextActionMask =
 			BalancePitchAction(HeldActionMask & ~CurriculumAction::E);
-		if (CurriculumStage == ECurriculumStage::Throw
+		if ((CurriculumStage == ECurriculumStage::LegacyThrow
+				|| CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 			&& FrameIndex >= NextThrowRequestFrame)
 		{
 			NextActionMask |= CurriculumAction::E;
@@ -6495,7 +6781,8 @@ void ACurriculumDataGenerator::PrepareNextAction()
 
 	uint16 NextActionMask =
 		BalancePitchAction(HeldActionMask & ~CurriculumAction::E);
-	if (CurriculumStage == ECurriculumStage::Throw
+	if ((CurriculumStage == ECurriculumStage::LegacyThrow
+			|| CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 		&& FrameIndex >= NextThrowRequestFrame)
 	{
 		NextActionMask |= CurriculumAction::E;
@@ -6518,8 +6805,17 @@ void ACurriculumDataGenerator::ResetStageState()
 	Grenades.Reset();
 	CooldownRemainingSteps = 0;
 	NextGrenadeId = 0;
+	CurrentAcceptedGrenadeId = INDEX_NONE;
+	CurrentCooldownBeforeSteps = 0;
+	CurrentCooldownAfterSteps = 0;
 	bCurrentERequestEdge = false;
 	bCurrentEAccepted = false;
+	bCurrentQRising = false;
+	bCurrentQFalling = false;
+	bCurrentPlanarMovementSuppressed = false;
+	bQVisibleInLatestObservation = false;
+	CurrentERejectionReason =
+		V2ActionSemantics::EThrowRejectionReason::None;
 	LastAppliedActionMask = 0;
 }
 
@@ -6545,20 +6841,21 @@ bool ACurriculumDataGenerator::BuildLaunchState(
 	return true;
 }
 
-bool ACurriculumDataGenerator::AcceptThrow()
+int32 ACurriculumDataGenerator::AcceptThrow()
 {
-	if (CurriculumStage != ECurriculumStage::Throw
+	if ((CurriculumStage != ECurriculumStage::LegacyThrow
+			&& CurriculumStage != ECurriculumStage::TrajectoryThrowV2)
 		|| CooldownRemainingSteps > 0
 		|| !GetWorld())
 	{
-		return false;
+		return INDEX_NONE;
 	}
 
 	FVector SpawnLocation;
 	FVector InitialVelocity;
 	if (!BuildLaunchState(SpawnLocation, InitialVelocity))
 	{
-		return false;
+		return INDEX_NONE;
 	}
 
 	FActorSpawnParameters SpawnParams;
@@ -6570,7 +6867,7 @@ bool ACurriculumDataGenerator::AcceptThrow()
 		SpawnParams);
 	if (!VisualActor)
 	{
-		return false;
+		return INDEX_NONE;
 	}
 
 	VisualActor->SetActorEnableCollision(false);
@@ -6597,15 +6894,16 @@ bool ACurriculumDataGenerator::AcceptThrow()
 		SpawnLocation,
 		InitialVelocity,
 		3600.0f);
-	CooldownRemainingSteps = FMath::Max(
-		1,
-		FMath::RoundToInt(2.0f * static_cast<float>(ObservationRate)));
-	return true;
+	CooldownRemainingSteps =
+		V2ActionSemantics::GetCooldownDurationSteps(ObservationRate);
+	return Grenade.Id;
 }
 
 void ACurriculumDataGenerator::AdvanceGrenades()
 {
-	if (CurriculumStage != ECurriculumStage::Throw || Grenades.IsEmpty())
+	if ((CurriculumStage != ECurriculumStage::LegacyThrow
+			&& CurriculumStage != ECurriculumStage::TrajectoryThrowV2)
+		|| Grenades.IsEmpty())
 	{
 		return;
 	}
@@ -6740,14 +7038,55 @@ FString ACurriculumDataGenerator::BuildGrenadesJson() const
 	return Result;
 }
 
+ACurriculumDataGenerator::EV2EpisodePhase
+ACurriculumDataGenerator::GetV2EpisodePhase() const
+{
+	if (CurriculumStage != ECurriculumStage::TrajectoryThrowV2)
+	{
+		return EV2EpisodePhase::NotApplicable;
+	}
+	if (!Grenades.IsEmpty() && CooldownRemainingSteps > 0)
+	{
+		return EV2EpisodePhase::Cooldown;
+	}
+	if (!Grenades.IsEmpty())
+	{
+		return EV2EpisodePhase::PostThrow;
+	}
+	if ((CurrentActionMask & CurriculumAction::Q) != 0)
+	{
+		return EV2EpisodePhase::Aim;
+	}
+	return EV2EpisodePhase::Traverse;
+}
+
+FString ACurriculumDataGenerator::GetV2EpisodePhaseSlug() const
+{
+	switch (GetV2EpisodePhase())
+	{
+	case EV2EpisodePhase::Traverse:
+		return TEXT("traverse");
+	case EV2EpisodePhase::Aim:
+		return TEXT("aim");
+	case EV2EpisodePhase::Cooldown:
+		return TEXT("cooldown");
+	case EV2EpisodePhase::PostThrow:
+		return TEXT("post_throw");
+	default:
+		return TEXT("not_applicable");
+	}
+}
+
 FString ACurriculumDataGenerator::GetStageSlug() const
 {
 	switch (CurriculumStage)
 	{
-	case ECurriculumStage::Trajectory:
+	case ECurriculumStage::LegacyTrajectory:
 		return TEXT("trajectory_v2");
-	case ECurriculumStage::Throw:
+	case ECurriculumStage::LegacyThrow:
 		return TEXT("throw_v3");
+	case ECurriculumStage::TrajectoryThrowV2:
+		return TEXT("trajectory_throw_v2");
 	default:
 		return TEXT("movement_v1");
 	}
@@ -6755,6 +7094,15 @@ FString ACurriculumDataGenerator::GetStageSlug() const
 
 FString ACurriculumDataGenerator::GetStageSchemaVersion() const
 {
+	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
+	{
+		return FString::Printf(
+			TEXT("%s-%s-11"),
+			*GetStageSlug(),
+			StorageFormat == EStorageFormat::WebPParquet
+				? TEXT("production")
+				: TEXT("preflight"));
+	}
 	if (StorageFormat == EStorageFormat::WebPParquet)
 	{
 		return FString::Printf(TEXT("%s-production-1"), *GetStageSlug());
@@ -6803,7 +7151,12 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		CameraPitchRate =
 			Character->GetCurriculumCameraPitchRateDegreesPerSecond();
 	}
-	const TCHAR* CollectionPolicy = bPrescribedRecipes
+	const TCHAR* CollectionPolicy =
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		? (bV2TrajectoryHoldMission
+			? TEXT("diagnostic_v2_trajectory_hold_mission")
+			: TEXT("diagnostic_v2_runtime_smoke"))
+		: (bPrescribedRecipes
 		? TEXT("training_central_prescribed_recipes_v1")
 		: (bTrajectoryShowcase
 		? TEXT("inspection_only_trajectory_showcase")
@@ -6811,7 +7164,7 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 			? TEXT("inspection_only_mission_review_suite")
 			: (bCoverageGuided
 				? TEXT("training_frame_balanced_final_agent_v5")
-				: TEXT("training_semimarkov"))));
+				: TEXT("training_semimarkov")))));
 	const TCHAR* ParameterSampler = bPrescribedRecipes
 		? TEXT("prescribed_nested_radical_inverse_stratified_v1")
 		: TEXT("enumerated_cells_global_replay_stratified_stateless_v2");

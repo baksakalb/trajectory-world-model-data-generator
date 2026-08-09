@@ -278,6 +278,48 @@ local security and should be reversed when unattended operation ends; the normal
 administrator defaults are `ConsentPromptBehaviorAdmin=5` and
 `PromptOnSecureDesktop=1`.
 
+### Remote video-review handoff
+
+When the user is working through a remote Codex chat and asks to see generated
+videos, a local Windows path is not an acceptable handoff because it cannot be
+opened from the user's phone. Use the Google Drive session for
+`dr.aksakal.tr@gmail.com` and create a new, descriptively named folder directly
+in the root of **My Drive** for that request. Do not require the user to browse
+through a permanent project folder or an existing subsection. A suitable name
+should identify the run or purpose and end in `Videos`, for example
+`Trajectory V2 Smoke Test Videos` or `Linux 300k Review Videos`.
+
+Upload the relevant generated review MP4s to that newly created root-level
+folder, verify that the uploads complete, and return the Google Drive folder URL
+in the chat so it can be opened on the phone. Keep the folder private to the
+Google account unless the user explicitly requests a different sharing scope.
+Review MP4s remain derived QA artifacts only; this remote handoff does not
+change the authoritative observation-first data and validation workflow.
+
+At the start of a new Codex chat, if the user says that the session will operate
+in **remote mode**, perform an end-to-end video handoff test before beginning
+substantial code work. This is an operational browser/Drive test, not a request
+to write or modify project code. The agent must:
+
+1. Confirm that the available Google Drive session is signed in as
+   `dr.aksakal.tr@gmail.com`.
+2. Create a new, clearly named test folder directly in the root of **My Drive**,
+   such as `Remote Workflow Test Videos`. If that name already exists, add a
+   date or short distinguishing suffix rather than reusing an uncertain folder.
+3. Select one small existing project MP4, upload it to the new test folder, and
+   wait for Google Drive to report that the upload completed. The user does not
+   need to upload the file manually, and no new video or project code needs to
+   be generated for this test.
+4. Return the new Google Drive folder URL in the chat and ask the user to verify
+   that the video opens on the remote phone. Do not treat remote mode as ready
+   until the user confirms that the test succeeded.
+
+After that confirmation, use the per-request root-level folder workflow above
+whenever the user asks to see newly generated or selected videos. If the Drive
+session, account, browser-file access, upload, or phone playback test fails,
+resolve that handoff problem before starting a long unattended coding or capture
+run whose results the user would be unable to review remotely.
+
 ### Movement V1 collection plan and retained controller contract
 
 The first production dataset is automated Movement V1. Its accepted-frame target
@@ -909,6 +951,44 @@ Grenades:
 - do not collide with the player or later grenades
 - do not affect the currently computed Q preview
 - are all removed at episode reset
+
+#### Current V2 implementation checkpoint (schema 11)
+
+The combined runtime and storage boundary is implemented as
+`trajectory_throw_v2-preflight-11`. The implementation includes Q-priority
+stationary aim, Q-before-E and E-rising-edge gating, exact two-second cooldown,
+accepted-grenade identity, rejection reasons, persistent harmless grenades,
+always-green trajectory rendering, cooldown-only crosshair color, schema-11
+frame/transition metadata, typed WebP/Parquet finalization, and strict review
+validation. C++ automation covers the pure action contract and Python tests
+cover valid, rejected, corrupted, and persistent-Q records.
+
+Two deterministic diagnostic policies are available while the production
+catalog and coherent random state machine are still being implemented:
+
+- `-V2RuntimeSmoke` exercises Q priority, a valid throw, held-E rejection,
+  E-without-Q rejection, simultaneous first-Q+E rejection, and cooldown
+  rejection in a bounded sequence.
+- `-V2TrajectoryHoldMission` implements the diagnostic form of random behavior
+  family `R08` (`throw_hold_cooldown`). After the required initial Q-off
+  observation it holds Q for the entire episode, shows a stable preview for
+  half a second, throws exactly once, and keeps the player, camera, and green
+  preview fixed through flight, bounce, rest, the full cooldown, and the final
+  tail. It requires at least four episode seconds.
+
+Both policies are deliberately marked diagnostic and receive no production
+coverage credit. Combined V2 refuses to fall back to the legacy independent
+Q/E sampler: until the full policy is present, a run must explicitly select one
+of these diagnostic flags. The frozen 55/45 controller, all R01-R18 random
+families, the 1,112 prescribed mission cells, duration extension, production
+qualification, and remote controller remain subsequent implementation phases.
+
+The checkpoint has passed an Unreal Editor Development build, the
+`HEGrenadeGame.DataGenerator.V2.ActionSemantics` automation test, Python
+contract/controller tests, PNG/JSONL capture and validation, and native
+WebP-to-typed-Parquet finalization. Representative local evidence includes an
+80-transition runtime smoke, a 20-transition production-format smoke, and a
+160-transition/161-observation 384x384 persistent-Q R08 review episode.
 
 V2 collection uses the same variable-budget controller principle as V1. For any
 production frame target X at or above the calibrated feasibility floor, exactly

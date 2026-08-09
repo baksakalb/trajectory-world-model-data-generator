@@ -60,6 +60,13 @@ FRAME_SCHEMA = pa.schema(
         pa.field("crosshair_state", pa.string(), nullable=False),
         pa.field("cooldown_remaining_steps", pa.int32(), nullable=False),
         pa.field("q_visibility", pa.bool_(), nullable=False),
+        pa.field("aim_lock_active", pa.bool_(), nullable=False),
+        pa.field("trajectory_visible", pa.bool_(), nullable=False),
+        pa.field("flying_grenade_count", pa.int32(), nullable=False),
+        pa.field("resting_grenade_count", pa.int32(), nullable=False),
+        pa.field("visible_grenade_count", pa.int32(), nullable=False),
+        pa.field("total_grenade_count", pa.int32(), nullable=False),
+        pa.field("v2_episode_phase", pa.string(), nullable=False),
         pa.field("grenades", pa.list_(GRENADE), nullable=False),
         pa.field("collection_mission", pa.string(), nullable=False),
         pa.field("mission_phase", pa.string(), nullable=False),
@@ -141,6 +148,13 @@ TRANSITION_SCHEMA = pa.schema(
         ],
         pa.field("e_request_edge", pa.bool_(), nullable=False),
         pa.field("e_accepted", pa.bool_(), nullable=False),
+        pa.field("planar_movement_suppressed", pa.bool_(), nullable=False),
+        pa.field("q_rising_edge", pa.bool_(), nullable=False),
+        pa.field("q_falling_edge", pa.bool_(), nullable=False),
+        pa.field("e_rejection_reason", pa.string(), nullable=False),
+        pa.field("accepted_throw_grenade_id", pa.int32()),
+        pa.field("cooldown_before_steps", pa.int32(), nullable=False),
+        pa.field("cooldown_after_steps", pa.int32(), nullable=False),
         pa.field("cooldown_remaining_steps", pa.int32(), nullable=False),
         pa.field("observation_valid", pa.bool_(), nullable=False),
     ]
@@ -168,6 +182,9 @@ EPISODE_SCHEMA = pa.schema(
                 "executor_id",
                 "split",
                 "recipe_id",
+                "v2_contract_version",
+                "v2_source",
+                "v2_cell_id",
             )
         ],
         *[
@@ -286,8 +303,34 @@ def read_json_lines(path: Path) -> list[dict[str, Any]]:
 def parquet_bytes(
     records: list[dict[str, Any]], schema: pa.Schema, *, episodes: bool = False
 ) -> bytes:
+    records = [dict(record) for record in records]
+    if "aim_lock_active" in schema.names:
+        for record in records:
+            record.setdefault("aim_lock_active", False)
+            record.setdefault("trajectory_visible", bool(record.get("q_visibility")))
+            grenades = record.get("grenades") or []
+            record.setdefault(
+                "flying_grenade_count",
+                sum(not grenade.get("resting", False) for grenade in grenades),
+            )
+            record.setdefault(
+                "resting_grenade_count",
+                sum(bool(grenade.get("resting", False)) for grenade in grenades),
+            )
+            record.setdefault("visible_grenade_count", 0)
+            record.setdefault("total_grenade_count", len(grenades))
+            record.setdefault("v2_episode_phase", "not_applicable")
+    if "planar_movement_suppressed" in schema.names:
+        for record in records:
+            record.setdefault("planar_movement_suppressed", False)
+            record.setdefault("q_rising_edge", False)
+            record.setdefault("q_falling_edge", False)
+            record.setdefault("e_rejection_reason", "none")
+            record.setdefault("accepted_throw_grenade_id", None)
+            cooldown = int(record.get("cooldown_remaining_steps", 0))
+            record.setdefault("cooldown_before_steps", cooldown)
+            record.setdefault("cooldown_after_steps", cooldown)
     if episodes:
-        records = [dict(record) for record in records]
         for record in records:
             record["mission_parameters_json"] = json.dumps(
                 record.pop("mission_parameters"),

@@ -20,6 +20,8 @@ namespace CurriculumAction
 
 	constexpr uint16 CanonicalMask =
 		W | A | S | D | ArrowUp | ArrowDown | ArrowLeft | ArrowRight | Q | E;
+	constexpr uint16 MovementMask = W | A | S | D;
+	constexpr uint16 CameraMask = ArrowUp | ArrowDown | ArrowLeft | ArrowRight;
 
 	inline float ForwardAxis(const uint16 Mask)
 	{
