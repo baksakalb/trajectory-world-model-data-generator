@@ -163,6 +163,7 @@ class V2RuntimeContractTests(unittest.TestCase):
         episode = {
             "v2_source": "random_play",
             "v2_cell_id": "R08_throw_hold_cooldown_diagnostic",
+            "accepted_for_balancing": False,
         }
         frames, transitions = self.make_trajectory_hold_records()
         validate_v2_runtime_contract(
@@ -177,11 +178,28 @@ class V2RuntimeContractTests(unittest.TestCase):
         episode = {
             "v2_source": "random_play",
             "v2_cell_id": "R08_throw_hold_cooldown_diagnostic",
+            "accepted_for_balancing": False,
         }
         frames, transitions = self.make_trajectory_hold_records()
         frames[60]["q_visibility"] = False
         frames[60]["trajectory_visible"] = False
         frames[60]["aim_lock_active"] = False
+        with self.assertRaises(DatasetValidationError):
+            validate_v2_runtime_contract(
+                dataset, "episode", frames, transitions, episode
+            )
+
+    def test_diagnostic_v2_rejects_balancing_credit(self) -> None:
+        dataset = {
+            **self.dataset,
+            "collection_policy": "diagnostic_v2_trajectory_hold_mission",
+        }
+        episode = {
+            "v2_source": "random_play",
+            "v2_cell_id": "R08_throw_hold_cooldown_diagnostic",
+            "accepted_for_balancing": True,
+        }
+        frames, transitions = self.make_trajectory_hold_records()
         with self.assertRaises(DatasetValidationError):
             validate_v2_runtime_contract(
                 dataset, "episode", frames, transitions, episode

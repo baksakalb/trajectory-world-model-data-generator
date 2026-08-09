@@ -1546,8 +1546,12 @@ void ACurriculumDataGenerator::EndEpisode()
 	ApplyAction(0);
 	const bool bMissionRequired =
 		CoverageMission != ECoverageMission::SemiMarkov;
+	const bool bDiagnosticV2 =
+		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& (bV2RuntimeSmoke || bV2TrajectoryHoldMission);
 	const bool bAcceptedForBalancing =
-		!bMissionRequired || bCoverageMissionSucceeded;
+		!bDiagnosticV2
+		&& (!bMissionRequired || bCoverageMissionSucceeded);
 	const int32 MissionObservationFrames =
 		bCoverageMissionSucceeded
 			&& CoverageMissionSuccessFrameIndex != INDEX_NONE

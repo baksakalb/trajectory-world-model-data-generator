@@ -829,7 +829,18 @@ def validate_v2_runtime_contract(
                 f"{episode_id}: crosshair does not match cooldown state."
             )
 
-    if dataset.get("collection_policy") != "diagnostic_v2_trajectory_hold_mission":
+    collection_policy = str(dataset.get("collection_policy", ""))
+    if collection_policy.startswith("diagnostic_v2_"):
+        if episode is None:
+            raise DatasetValidationError(
+                f"{episode_id}: diagnostic V2 validation lacks an episode record."
+            )
+        if bool(episode.get("accepted_for_balancing")):
+            raise DatasetValidationError(
+                f"{episode_id}: diagnostic V2 episode claimed balancing credit."
+            )
+
+    if collection_policy != "diagnostic_v2_trajectory_hold_mission":
         return
     if episode is None:
         raise DatasetValidationError(
