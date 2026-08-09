@@ -14,7 +14,7 @@ from typing import Any, Iterable
 import pyarrow.parquet as pq
 
 from v2_catalog import SEQUENCE_TEMPLATES, base_cells
-from v2_dataset_controller import FAMILY_FRAME_SHARES, canonical_json
+from v2_dataset_controller import CONTRACT_VERSION, FAMILY_FRAME_SHARES, canonical_json
 
 
 def read_json(path: Path) -> Any:
@@ -51,6 +51,9 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     sequence_durations: dict[int, list[int]] = defaultdict(list)
     credited_cells: set[str] = set()
     credited_sequences: set[str] = set()
+    observed_contract_versions = {
+        str(episode.get("v2_contract_version") or "missing") for episode in values
+    }
     for episode in values:
         family = str(episode.get("v2_source") == "random_play" and "random_play"
                      or (episode.get("v2_throws") or [{}])[0].get("intended_family")
@@ -67,7 +70,12 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
     expected_cells = {cell["cell_id"] for cell in base_cells()}
     expected_sequences = {template.template_id for template in SEQUENCE_TEMPLATES}
-    complete = credited_cells >= expected_cells and credited_sequences >= expected_sequences
+    contract_complete = observed_contract_versions == {CONTRACT_VERSION}
+    complete = (
+        credited_cells >= expected_cells
+        and credited_sequences >= expected_sequences
+        and contract_complete
+    )
     missing_families = sorted(set(FAMILY_FRAME_SHARES) - set(durations))
     if missing_families:
         raise ValueError(f"calibration has no accepted samples for families: {missing_families}")
@@ -80,9 +88,11 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "family_caps": family_caps, "sequence_caps": sequence_caps,
         "credited_cells": sorted(credited_cells & expected_cells),
         "credited_sequences": sorted(credited_sequences & expected_sequences),
+        "contract_version": CONTRACT_VERSION,
     }
     return {
         "schema_version": 2,
+        "contract_version": CONTRACT_VERSION,
         "calibration_version": "v2-local-qualified-" + hashlib.sha256(
             canonical_json(identity).encode()).hexdigest()[:16],
         "qualified": complete,
@@ -97,6 +107,8 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "required_base_cell_count": 1184,
             "accepted_sequence_template_count": len(credited_sequences & expected_sequences),
             "required_sequence_template_count": len(expected_sequences),
+            "observed_contract_versions": sorted(observed_contract_versions),
+            "contract_version_complete": contract_complete,
             "sample_count_by_family": {key: len(value) for key, value in sorted(durations.items())},
             "sample_count_by_sequence_grenade_count": {
                 str(key): len(value) for key, value in sorted(sequence_durations.items())

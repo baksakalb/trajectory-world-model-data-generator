@@ -33,8 +33,8 @@ from v2_catalog import (
 )
 
 
-PLAN_VERSION = "trajectory-throw-v2-local-2"
-CONTRACT_VERSION = "v2-data-generation-spec-2+temporal-2"
+PLAN_VERSION = "trajectory-throw-v2-local-3"
+CONTRACT_VERSION = "v2-data-generation-spec-3+temporal-2"
 DEFAULT_CALIBRATION = Path(__file__).with_name("movement_v2_duration_calibration.json")
 FAMILY_FRAME_SHARES = {
     "random_play": Fraction(55, 100),
@@ -460,8 +460,18 @@ def create_plan(args: argparse.Namespace) -> None:
     diagnostic = args.frame_budget < minimum
     if diagnostic and not args.allow_infeasible_diagnostic:
         raise ValueError(f"requested X={args.frame_budget} is below calibrated V2 floor {minimum}")
-    if not diagnostic and not bool(calibration.get("qualified")) and not args.allow_unqualified_calibration:
-        raise ValueError("production V2 plan requires a qualified local duration calibration")
+    calibration_matches_contract = (
+        str(calibration.get("contract_version", "")) == CONTRACT_VERSION
+    )
+    if (
+        not diagnostic
+        and not args.allow_unqualified_calibration
+        and (not bool(calibration.get("qualified")) or not calibration_matches_contract)
+    ):
+        raise ValueError(
+            "production V2 plan requires a qualified local duration calibration "
+            f"for {CONTRACT_VERSION}"
+        )
     if not diagnostic:
         target_family_frames(args.frame_budget)
     recipes = build_schedule(

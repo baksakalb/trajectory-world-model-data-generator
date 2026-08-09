@@ -952,11 +952,11 @@ Grenades:
 - do not affect the currently computed Q preview
 - are all removed at episode reset
 
-#### Current V2 implementation checkpoint (schema 11 plus temporal contract 2)
+#### Current V2 implementation checkpoint (schema 11, runtime contract 3)
 
 The combined runtime, storage, planner, and local worker boundary is implemented
-as plan version `trajectory-throw-v2-local-2` with runtime contract
-`v2-data-generation-spec-2+temporal-2`. It includes Q-priority stationary aim,
+as plan version `trajectory-throw-v2-local-3` with runtime contract
+`v2-data-generation-spec-3+temporal-2`. It includes Q-priority stationary aim,
 Q-before-E and E-rising-edge gating, exact two-second cooldown, accepted-grenade
 identity, rejection reasons, persistent harmless grenades, always-green
 trajectory rendering, cooldown-only crosshair color, typed WebP/Parquet
@@ -2100,7 +2100,7 @@ inventory or calibration evidence. The first worker also freezes
 hash of every runtime EXE, DLL, config, and package/container file. Every later
 attempt must match that exact local packaged build.
 
-The definitive 64x64 evidence completed locally on 2026-08-09. Plan
+The original contract-2 64x64 evidence completed locally on 2026-08-09. Plan
 `v2qualification-fdf741c861b5ef6e` validated all 1,112 mission cells and all 21
 sequence templates in 95 assignments; plan
 `v2qualification-67bddd117206cb1a` validated all 72 random cells in six
@@ -2109,7 +2109,12 @@ all 21 sequence IDs, and zero semantic or technical failures. The merged
 realized report contains 248,408 credited observations across 101 validated
 assignments with zero train/evaluation replay overlap. The qualified calibration
 is `v2-local-qualified-3a4fd61cf86f9e06` and sets the minimum feasible
-production target to 402,200 credited observations.
+production target to 402,200 credited observations. User review of the stored
+384x384 videos subsequently rejected that qualification: the designated V2
+random event often ended in the first few seconds and was followed by tens of
+seconds of zero input, fixed camera oscillation, or movement into a wall. The
+contract-2 calibration and 402,200-frame floor are therefore historical only
+and must not authorize production under contract 3.
 
 The frozen 128-slot visual audit is generated from focused 384x384 results:
 
@@ -2132,7 +2137,7 @@ categorical-factor, temporal-profile, action-edge, rejection, grenade-count,
 contact, bounce, event-duration, storage, split-separation, and optional decoded
 exact/perceptual duplicate distributions from the immutable shards.
 
-The definitive visual run validated all 128 audit cells and nine additional
+The contract-2 visual run structurally validated all 128 audit cells and nine additional
 representative sequence templates at 384x384. The audit export contains exactly
 128 MP4s plus six family contact sheets under
 `Artifacts/V2VisualAudit128Definitive`; the sequence reviews are under
@@ -2140,7 +2145,30 @@ representative sequence templates at 384x384. The audit export contains exactly
 at Q preview, authoritative throw, contact, rest/tail, hoop passage, and SQ20
 multi-grenade persistence boundaries. Corrected diagnostic-only smoke and R08
 captures are under `Artifacts/V2DiagnosticsCorrected`; both have
-`accepted_for_balancing=false`.
+`accepted_for_balancing=false`. Human review later rejected the audit despite
+those structural passes, demonstrating that the old validator did not measure
+tail activity or useful visual continuation.
+
+Contract 3 replaces the dead V2 tail with Movement-V1-style semi-Markov held
+actions and transition scripts augmented with Q acquisition/cancellation,
+camera motion while Q is held, pitch balancing, and Q-free physical escape from
+contact. Ordinary missions append 1.5-3 seconds of active continuation after
+the grenade resolves and completes its rest tail; multi-throw sequences append
+2-4 seconds, and event-focused random recipes append 2-5 seconds after their
+designated event. Only dedicated free-exploration recipes retain the 45-75-second
+duration. Validation
+now rejects plan/runtime version mismatch, more than five seconds of inactive
+zero/fixed input, more than one second of continuous player contact, random
+episodes without action/camera/Q variation, and missions without the active
+continuation. A focused 384x384 contract-3 run at
+`Artifacts/V2RandomContinuationFix384Contract3d` validates R02, R13, R18, and a
+direct rectangle mission; the full catalog, calibration, and 128-slot audit
+remain to be regenerated and reviewed.
+
+Measured from the authoritative contract-2 shards, the 1,112 ordinary missions
+lasted 6.92 seconds on average (6.80 median, 4.45 minimum, 9.00 maximum). That
+measurement motivated keeping continuation shorter than the mission itself; it
+is not reused as contract-3 duration calibration.
 
 Once qualification is complete, a user-provided feasible frame budget is the
 only required production decision:
@@ -2150,13 +2178,12 @@ python Scripts/v2_dataset_controller.py plan Artifacts/V2ProductionPlan `
   --frame-budget <X> --workers 1 --width 384 --height 384
 ```
 
-The planner then verifies the qualified calibration, complete mandatory
-coverage, exact frozen shares, stable prefix, evaluation separation, bounded
-reserves, and assignment boundaries before writing the immutable plan. The
-minimum-plan proof `Artifacts/V2ProductionMinimumQA` validates at X=402,200 with
-all 1,184 base cells, all 21 sequences, exact 55/45 and 15/10/8/6/6 allocation,
-1,873 active recipes, and two bounded reserves per active recipe. It was not
-executed. The large collection is not started until the user supplies X.
+The planner verifies the qualified calibration, complete mandatory coverage,
+exact frozen shares, stable prefix, evaluation separation, bounded reserves,
+and assignment boundaries before writing an immutable plan. The old
+`Artifacts/V2ProductionMinimumQA` proof at X=402,200 belongs to contract 2 and
+must not be executed or treated as a contract-3 feasibility result. A new proof
+can be created only after complete contract-3 calibration.
 
 ### Current same-GPU worker benchmark
 
@@ -2341,21 +2368,22 @@ or encoder.
 
 ### Active implementation checkpoint
 
-Movement V1 remains unchanged. Combined V2 is locally production-ready: schema
-11 runtime/storage metadata, coherent random play, all mission geometry and
-outcomes, 21 deterministic temporal sequences, event-boundary duration
-extension, immutable attempts/results, reserves, inventory reconstruction,
-qualified duration calibration, realized reporting, and the 128-slot visual
-audit all work together. The complete 64x64 and focused 384x384 qualifications
-have zero semantic failures. Forty Python tests pass, Unreal automation
-`HEGrenadeGame.DataGenerator.V2.ActionSemantics` passes, and the final Win64
-Development BuildCookRun completed a full cook, stage, pak, and archive.
+Movement V1 remains unchanged. Combined V2 contract 3 is under requalification
+after human review rejected the contract-2 random tails. The corrected focused
+384x384 run proves active V1-style semi-Markov continuation, trajectory
+acquire/cancel activity, and Q-free collision escape for four representative
+cells. A fresh event-relative capture at
+`Artifacts/V2EventRelativeDuration384` validates the same four cells at 4.45,
+11.75, 19.10, and 8.90 seconds total, with 3.50, 4.95, 2.40, and 2.70 seconds
+of recorded active continuation respectively. This does not restore production
+readiness by itself.
 
-No remote or cloud generation is required by this workflow. The only remaining
-production input is a user-selected X divisible by 100 and at least 402,200.
-After X is supplied, create one immutable local plan, verify it, and run its
-assignments through the same packaged-worker/finalization/validation path. No
-additional generator development or qualification fallback is required.
+No remote or cloud generation is required by this workflow. Before any final X
+can be selected or planned, contract 3 must rerun the full 1,184-cell/21-sequence
+qualification, derive a new duration calibration and feasibility floor, rebuild
+the realized distribution report, and regenerate the 128-slot 384x384 audit for
+human review. The former 402,200 minimum is not valid for the changed episode
+durations.
 
 Deferred work which is not a V2 data-generation gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple

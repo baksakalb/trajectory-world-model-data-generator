@@ -1,5 +1,6 @@
 {
   "calibration_version": "v2-local-qualified-3a4fd61cf86f9e06",
+  "contract_version": "v2-data-generation-spec-2+temporal-2",
   "expected_credited_frames_by_family": {
     "floor_bounce_rest": 90,
     "hoop": 116,

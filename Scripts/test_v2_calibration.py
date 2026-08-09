@@ -6,6 +6,7 @@ import unittest
 
 from v2_calibration import derive_calibration
 from v2_catalog import SEQUENCE_TEMPLATES, base_cells
+from v2_dataset_controller import CONTRACT_VERSION
 
 
 class V2CalibrationTests(unittest.TestCase):
@@ -16,6 +17,7 @@ class V2CalibrationTests(unittest.TestCase):
                 "v2_source": cell["source"], "v2_cell_id": cell["cell_id"],
                 "v2_sequence_template_id": None, "v2_throws": [{"intended_family": cell["family"]}],
                 "observation_count": 120, "accepted_for_balancing": True,
+                "v2_contract_version": CONTRACT_VERSION,
             })
         for template in SEQUENCE_TEMPLATES:
             records.append({
@@ -25,6 +27,7 @@ class V2CalibrationTests(unittest.TestCase):
                 "v2_throws": [{"intended_family": "solid_object"}],
                 "observation_count": 200 + template.grenade_count,
                 "accepted_for_balancing": True,
+                "v2_contract_version": CONTRACT_VERSION,
             })
         value = derive_calibration(records)
         self.assertTrue(value["qualified"])

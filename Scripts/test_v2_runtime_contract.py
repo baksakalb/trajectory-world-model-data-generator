@@ -242,6 +242,93 @@ class V2RuntimeContractTests(unittest.TestCase):
                 dataset, "episode", frames, transitions, episode
             )
 
+    def make_contract3_random_records(
+        self, masks: list[int], cell_id: str = "R01-short"
+    ) -> tuple[dict, list[dict], list[dict], dict]:
+        dataset = {
+            **self.dataset,
+            "collection_policy": "training_v2_immutable_local_recipes_v1",
+        }
+        frames = [frame(0, q=False, cooldown=0)]
+        transitions = []
+        previous = 0
+        for index, mask in enumerate(masks):
+            q = bool(mask & (1 << 8))
+            q_previous = bool(previous & (1 << 8))
+            target = frame(index + 1, q=q, cooldown=0)
+            target["contact"] = False
+            frames.append(target)
+            transitions.append(
+                {
+                    "source_frame_index": index,
+                    "action_mask": mask,
+                    "forward_axis": 1.0 if mask & 1 else 0.0,
+                    "right_axis": 0.0,
+                    "q_rising_edge": q and not q_previous,
+                    "q_falling_edge": q_previous and not q,
+                    "e_request_edge": False,
+                    "e_accepted": False,
+                    "planar_movement_suppressed": False,
+                    "e_rejection_reason": "none",
+                    "accepted_throw_grenade_id": None,
+                    "cooldown_before_steps": 0,
+                    "cooldown_after_steps": 0,
+                }
+            )
+            previous = mask
+        frames[0]["contact"] = False
+        episode = {
+            "plan_version": "trajectory-throw-v2-local-3",
+            "v2_contract_version": "v2-data-generation-spec-3+temporal-2",
+            "v2_source": "random_play",
+            "v2_cell_id": cell_id,
+            "v2_replay_identity": "test-replay",
+            "v2_aim_acquisition_profile": "static_hold",
+            "v2_q_retention_profile": "immediate_release",
+            "v2_post_throw_movement_profile": "stationary",
+            "v2_post_throw_camera_profile": "fixed",
+            "v2_expected_throw_count": 0,
+            "v2_accepted_throw_count": 0,
+            "v2_primary_event_complete_frame": (
+                None if cell_id.startswith("R01-") else 1
+            ),
+            "v2_required_continuation_steps": (
+                0 if cell_id.startswith("R01-") else len(frames) - 2
+            ),
+            "v2_throws": [],
+            "planned_credited_frames": len(frames),
+            "accepted_for_balancing": True,
+            "mission_success": True,
+        }
+        return dataset, frames, transitions, episode
+
+    def test_contract3_rejects_dead_random_tail(self) -> None:
+        dataset, frames, transitions, episode = self.make_contract3_random_records(
+            [1, (1 << 8), 0] + ([0] * 119)
+        )
+        with self.assertRaisesRegex(DatasetValidationError, "zero-input run"):
+            validate_v2_runtime_contract(
+                dataset, "episode", frames, transitions, episode
+            )
+
+    def test_contract3_accepts_varied_random_activity(self) -> None:
+        masks = [(1 << 8), 0, (1 << 4), 1] * 30
+        dataset, frames, transitions, episode = self.make_contract3_random_records(
+            masks
+        )
+        validate_v2_runtime_contract(
+            dataset, "episode", frames, transitions, episode
+        )
+
+    def test_contract3_accepts_bounded_event_random_continuation(self) -> None:
+        masks = [(1 << 8), 0] + ([1, (1 << 4), (1 << 8), 0] * 10)
+        dataset, frames, transitions, episode = self.make_contract3_random_records(
+            masks, "R02-medium"
+        )
+        validate_v2_runtime_contract(
+            dataset, "episode", frames, transitions, episode
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

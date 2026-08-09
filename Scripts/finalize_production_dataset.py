@@ -335,6 +335,8 @@ EPISODE_SCHEMA = pa.schema(
         pa.field("v2_post_throw_camera_profile", pa.string()),
         pa.field("v2_expected_throw_count", pa.int32()),
         pa.field("v2_accepted_throw_count", pa.int32()),
+        pa.field("v2_primary_event_complete_frame", pa.int32()),
+        pa.field("v2_required_continuation_steps", pa.int32()),
         pa.field("planned_credited_frames", pa.int32()),
         pa.field("v2_throws", pa.list_(V2_THROW)),
         pa.field("termination_reason", pa.string(), nullable=False),

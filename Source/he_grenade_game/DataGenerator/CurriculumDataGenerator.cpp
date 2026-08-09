@@ -1835,6 +1835,31 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	CurrentV2RestTailSteps = 0;
 	CurrentV2RequiredRestTailSteps = ObservationRate
 		+ SampleParameterIndex(TEXT("v2_rest_tail_steps"), ObservationRate + 1);
+	CurrentV2ContinuationStartFrame = INDEX_NONE;
+	if (CurrentV2Source == TEXT("random_play"))
+	{
+		const int32 MinimumSteps = 2 * ObservationRate;
+		CurrentV2RequiredContinuationSteps = MinimumSteps
+			+ SampleParameterIndex(
+				TEXT("v2_random_event_continuation_steps"),
+				(3 * ObservationRate) + 1);
+	}
+	else if (!CurrentV2SequenceSteps.IsEmpty())
+	{
+		const int32 MinimumSteps = 2 * ObservationRate;
+		CurrentV2RequiredContinuationSteps = MinimumSteps
+			+ SampleParameterIndex(
+				TEXT("v2_sequence_continuation_steps"),
+				(2 * ObservationRate) + 1);
+	}
+	else
+	{
+		const int32 MinimumSteps = (3 * ObservationRate) / 2;
+		CurrentV2RequiredContinuationSteps = MinimumSteps
+			+ SampleParameterIndex(
+				TEXT("v2_mission_continuation_steps"),
+				(3 * ObservationRate) - MinimumSteps + 1);
+	}
 	CurrentV2LastThrowFrame = INDEX_NONE;
 	CurrentV2ERequestCount = 0;
 	CurrentV2QRisingCount = 0;
@@ -1845,6 +1870,7 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	CurrentV2MovementActionCount = 0;
 	bV2SemanticSuccess = false;
 	bV2SemanticFailure = false;
+	bV2PrimaryEventComplete = false;
 	if (bV2ProductionRecipe)
 	{
 		const bool bCancelOrReject = CurrentV2BehaviorFamily.Contains(TEXT("cancel"))
@@ -1867,7 +1893,10 @@ bool ACurriculumDataGenerator::BeginEpisode()
 				: (CurrentV2HoldBand == TEXT("medium") ? 55 : 45));
 		CurrentV2NominalTransitions = (CurrentV2Source == TEXT("random_play")
 			? RandomSeconds : EpisodeSeconds) * ObservationRate;
-		CurrentV2MaximumTransitions = CurrentV2NominalTransitions + (12 * ObservationRate);
+		// Allow the physical event to resolve plus the bounded continuation
+		// trajectory-aware continuation. This remains a failure bound, not a
+		// target duration.
+		CurrentV2MaximumTransitions = CurrentV2NominalTransitions + (22 * ObservationRate);
 	}
 	bCoveragePreviousPositionValid = false;
 	CoveragePreviousPosition = SpawnLocation;
@@ -2257,6 +2286,8 @@ void ACurriculumDataGenerator::EndEpisode()
 		TEXT("\"v2_post_throw_movement_profile\":%s,")
 		TEXT("\"v2_post_throw_camera_profile\":%s,")
 		TEXT("\"v2_expected_throw_count\":%d,\"v2_accepted_throw_count\":%d,")
+		TEXT("\"v2_primary_event_complete_frame\":%s,")
+		TEXT("\"v2_required_continuation_steps\":%d,")
 		TEXT("\"planned_credited_frames\":%d,\"v2_throws\":%s,")
 		TEXT("\"termination_reason\":\"%s\"}\n"),
 		*MakeEpisodeId(),
@@ -2286,7 +2317,7 @@ void ACurriculumDataGenerator::EndEpisode()
 			? *FString::Printf(TEXT("\"%s\""), *CurrentRecipeId.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-			? TEXT("\"v2-data-generation-spec-2+temporal-2\"")
+			? TEXT("\"v2-data-generation-spec-3+temporal-2\"")
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 			? (bV2ProductionRecipe
@@ -2428,6 +2459,10 @@ void ACurriculumDataGenerator::EndEpisode()
 			: *FString::Printf(TEXT("\"%s\""), *CurrentV2PostThrowCameraProfile.ReplaceCharWithEscapedChar()),
 		CurrentV2ExpectedThrowCount,
 		CurrentV2AcceptedThrowCount,
+		CurrentV2ContinuationStartFrame != INDEX_NONE
+			? *FString::FromInt(CurrentV2ContinuationStartFrame)
+			: TEXT("null"),
+		CurrentV2RequiredContinuationSteps,
 		CurrentPlannedCreditedFrames,
 		*BuildV2ThrowsJson(),
 		TerminationReason);
@@ -3697,6 +3732,7 @@ uint16 ACurriculumDataGenerator::SelectNaturalPlayEscapeAction(
 				+ FVector(0.0f, 0.0f, 70.0f));
 	}
 	if (CurriculumStage != ECurriculumStage::Movement
+		&& CurriculumStage != ECurriculumStage::TrajectoryThrowV2
 		&& SampleParameterBool(
 			TEXT("natural_play_escape_q"),
 			NaturalPlayEscapeCount))
@@ -3909,7 +3945,113 @@ uint16 ACurriculumDataGenerator::SelectV2TrajectoryHoldMissionAction() const
 		ObservationRate);
 }
 
-uint16 ACurriculumDataGenerator::SelectV2ProductionAction() const
+uint16 ACurriculumDataGenerator::SelectV2SemiMarkovAction(
+	const bool bAllowThrows)
+{
+	// V2 continuation uses the same varied held-action and transition-script
+	// machinery as Movement V1. Q is part of the sampled action vocabulary in
+	// this stage, so previews can be acquired, adjusted, cancelled, and
+	// reacquired without turning the remainder of an episode into a fixed tail.
+	if (NaturalPlayEscapeStepsRemaining > 0
+		|| (PreviousState.bContact
+			&& NaturalPlayContactLimitSteps > 0
+			&& NaturalPlayContactSteps >= NaturalPlayContactLimitSteps))
+	{
+		if (NaturalPlayEscapeStepsRemaining <= 0)
+		{
+			NaturalPlayEscapeDirection =
+				GetNaturalPlayEscapeDirection(PreviousState);
+			NaturalPlayEscapeStepsRemaining =
+				8 + SampleParameterIndex(
+					TEXT("v2_natural_play_escape_duration_steps"),
+					7,
+					NaturalPlayEscapeCount);
+			++NaturalPlayEscapeCount;
+			HoldStepsRemaining = 0;
+			ActionScriptMasks.Reset();
+			ActionScriptHoldSteps.Reset();
+			ActionScriptIndex = 0;
+			ActionScriptStepsRemaining = 0;
+		}
+		bNaturalPlayEscapeActionActive = true;
+		--NaturalPlayEscapeStepsRemaining;
+		return SelectNaturalPlayEscapeAction(NaturalPlayEscapeDirection);
+	}
+
+	bNaturalPlayEscapeActionActive = false;
+	if (ActionScriptIndex >= ActionScriptMasks.Num()
+		&& HoldStepsRemaining <= 0
+		&& EpisodeRandom.FRand() < 0.30f)
+	{
+		BuildTransitionScript();
+	}
+
+	uint16 Action = 0;
+	if (ActionScriptIndex < ActionScriptMasks.Num())
+	{
+		if (ActionScriptStepsRemaining <= 0)
+		{
+			HeldActionMask = ActionScriptMasks[ActionScriptIndex];
+			const float CurrentPitch = Character && Character->GetController()
+				? FRotator::NormalizeAxis(
+					Character->GetController()->GetControlRotation().Pitch)
+				: 0.0f;
+			const bool bPitchUp =
+				(HeldActionMask & CurriculumAction::ArrowUp) != 0
+				&& (HeldActionMask & CurriculumAction::ArrowDown) == 0;
+			const bool bPitchDown =
+				(HeldActionMask & CurriculumAction::ArrowDown) != 0
+				&& (HeldActionMask & CurriculumAction::ArrowUp) == 0;
+			if (bPitchUp || bPitchDown)
+			{
+				const float Delta = EpisodeRandom.FRandRange(8.0f, 18.0f)
+					* (bPitchUp ? 1.0f : -1.0f);
+				HeldCameraPitchTargetDegrees = FMath::Clamp(
+					CurrentPitch + Delta, -40.0f, 40.0f);
+			}
+			if (EpisodeRandom.FRand() < 0.45f)
+			{
+				HeldActionMask |= CurriculumAction::Q;
+			}
+			ActionScriptStepsRemaining =
+				ActionScriptHoldSteps.IsValidIndex(ActionScriptIndex)
+				? ActionScriptHoldSteps[ActionScriptIndex] : 1;
+			++ActionScriptIndex;
+		}
+		Action = BalancePitchAction(HeldActionMask & ~CurriculumAction::E);
+		--ActionScriptStepsRemaining;
+	}
+	else
+	{
+		ActionScriptMasks.Reset();
+		ActionScriptHoldSteps.Reset();
+		ActionScriptIndex = 0;
+		ActionScriptStepsRemaining = 0;
+		if (HoldStepsRemaining <= 0)
+		{
+			HeldActionMask = SelectAction();
+			HoldStepsRemaining = SelectHoldSteps();
+		}
+		Action = BalancePitchAction(HeldActionMask & ~CurriculumAction::E);
+		--HoldStepsRemaining;
+	}
+
+	// An E request is issued only on a clean edge after Q was visible in the
+	// preceding stored observation. Mission continuations currently explore
+	// preview/camera/movement behavior without adding uncredited grenades.
+	if (bAllowThrows
+		&& FrameIndex >= NextThrowRequestFrame
+		&& (Action & CurriculumAction::Q) != 0
+		&& bQVisibleInLatestObservation
+		&& CooldownRemainingSteps <= 0)
+	{
+		Action |= CurriculumAction::E;
+		NextThrowRequestFrame = FrameIndex + EpisodeRandom.RandRange(30, 70);
+	}
+	return Action;
+}
+
+uint16 ACurriculumDataGenerator::SelectV2ProductionAction()
 {
 	const int32 PreviewSteps = 60;
 	const int32 FirstThrowFrame = 5 + PreviewSteps;
@@ -4014,23 +4156,46 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction() const
 		return Action;
 	};
 
+	// Physical recovery outranks Q retention and the next preview. Otherwise a
+	// scheduled aim-lock window can suppress the very movement that is trying
+	// to free the player from a wall. The immutable recipe still fails if this
+	// recovery prevents it from realizing its required throw semantics.
+	if (NaturalPlayEscapeStepsRemaining > 0
+		|| (PreviousState.bContact
+			&& NaturalPlayContactLimitSteps > 0
+			&& NaturalPlayContactSteps >= NaturalPlayContactLimitSteps))
+	{
+		return SelectV2SemiMarkovAction(false);
+	}
+
+	if (bV2PrimaryEventComplete)
+	{
+		return SelectV2SemiMarkovAction(false);
+	}
+
 	if (CurrentV2SequenceSteps.IsEmpty()
 		&& CurrentV2BehaviorFamily == TEXT("movement_interval"))
 	{
-		return (FrameIndex / FMath::Max(1, ObservationRate)) % 2 == 0
-			? CurriculumAction::W | CurriculumAction::ArrowRight
-			: CurriculumAction::D | CurriculumAction::ArrowLeft;
+		if (FrameIndex < 2 * ObservationRate)
+		{
+			return (FrameIndex / FMath::Max(1, ObservationRate)) % 2 == 0
+				? CurriculumAction::W | CurriculumAction::ArrowRight
+				: CurriculumAction::D | CurriculumAction::ArrowLeft;
+		}
+		return SelectV2SemiMarkovAction(false);
 	}
 	if (CurrentV2SequenceSteps.IsEmpty()
 		&& CurrentV2BehaviorFamily == TEXT("reject_e_without_q"))
 	{
-		return FrameIndex == 5 ? CurriculumAction::E : MovementAfterThrow();
+		return FrameIndex == 5 ? CurriculumAction::E
+			: SelectV2SemiMarkovAction(false);
 	}
 	if (CurrentV2SequenceSteps.IsEmpty()
 		&& CurrentV2BehaviorFamily == TEXT("reject_first_frame_qe"))
 	{
 		return FrameIndex == 5 ? CurriculumAction::Q | CurriculumAction::E
-			: (FrameIndex > 5 && FrameIndex < 12 ? CurriculumAction::Q : MovementAfterThrow());
+			: (FrameIndex > 5 && FrameIndex < 12 ? CurriculumAction::Q
+				: SelectV2SemiMarkovAction(false));
 	}
 	if (CurrentV2SequenceSteps.IsEmpty()
 		&& CurrentV2BehaviorFamily.Contains(TEXT("cancel")))
@@ -4039,7 +4204,7 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction() const
 		{
 			return CurriculumAction::Q | CameraAdjustment(0, FrameIndex - 5);
 		}
-		return MovementAfterThrow();
+		return SelectV2SemiMarkovAction(false);
 	}
 	if (FrameIndex < 5)
 	{
@@ -4095,11 +4260,16 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction() const
 				return CurriculumAction::Q
 					| CameraAdjustment(ThrowIndex + 1, FrameIndex - ThrowFrame - 1);
 			}
-			return FrameIndex <= ThrowFrame + RetainSteps + 2
-				? MovementAfterThrow() : 0;
+			return FrameIndex <= ThrowFrame + RetainSteps + (2 * ObservationRate)
+				? MovementAfterThrow() : SelectV2SemiMarkovAction(false);
 		}
 	}
-	return MovementAfterThrow();
+	if (CurrentV2LastThrowFrame != INDEX_NONE
+		&& FrameIndex <= CurrentV2LastThrowFrame + (2 * ObservationRate))
+	{
+		return MovementAfterThrow();
+	}
+	return SelectV2SemiMarkovAction(false);
 }
 
 void ACurriculumDataGenerator::UpdateV2RecipeProgress()
@@ -4127,14 +4297,48 @@ void ACurriculumDataGenerator::UpdateV2RecipeProgress()
 	}
 
 	const bool bNoThrowRecipe = CurrentV2ExpectedThrowCount == 0;
+	const bool bDedicatedFreePlay = CurrentV2Source == TEXT("random_play")
+		&& CurrentV2BehaviorFamily == TEXT("movement_interval");
+	const bool bEventFocusedRandom = CurrentV2Source == TEXT("random_play")
+		&& !bDedicatedFreePlay;
 	const bool bEventComplete = bNoThrowRecipe
-		? FrameIndex >= CurrentV2NominalTransitions
+		? (bEventFocusedRandom
+			? ValidateV2RecipeSemantics()
+			: FrameIndex >= CurrentV2NominalTransitions)
 		: CurrentV2AcceptedThrowCount >= CurrentV2ExpectedThrowCount
 			&& bAllGrenadesResting
 			&& CurrentV2RestTailSteps >= CurrentV2RequiredRestTailSteps;
-	const bool bDurationSatisfied = CurrentV2Source != TEXT("random_play")
-		|| FrameIndex >= CurrentV2NominalTransitions;
-	if (bEventComplete && bDurationSatisfied)
+	if ((CurrentV2Source != TEXT("random_play") || bEventFocusedRandom)
+		&& bEventComplete
+		&& !bV2PrimaryEventComplete)
+	{
+		if (ValidateV2RecipeSemantics())
+		{
+			bV2PrimaryEventComplete = true;
+			CurrentV2ContinuationStartFrame = FrameIndex;
+			// Start the continuation with a freshly sampled semi-Markov segment,
+			// not whatever fixed mission action happened to be held at contact.
+			HoldStepsRemaining = 0;
+			ActionScriptMasks.Reset();
+			ActionScriptHoldSteps.Reset();
+			ActionScriptIndex = 0;
+			ActionScriptStepsRemaining = 0;
+		}
+		else
+		{
+			bV2SemanticFailure = true;
+		}
+		return;
+	}
+	if (bV2PrimaryEventComplete
+		&& CurrentV2ContinuationStartFrame != INDEX_NONE
+		&& FrameIndex - CurrentV2ContinuationStartFrame
+			>= CurrentV2RequiredContinuationSteps)
+	{
+		bV2SemanticSuccess = true;
+		return;
+	}
+	if (bDedicatedFreePlay && bEventComplete)
 	{
 		if (ValidateV2RecipeSemantics())
 		{
@@ -6733,7 +6937,10 @@ void ACurriculumDataGenerator::UpdateCoverageMetrics(
 	CurrentCoveragePositionDistanceBand = INDEX_NONE;
 	CurrentMovementCameraYawDeltaDegrees = 0.0f;
 
-	if (CoverageMission == ECoverageMission::SemiMarkov)
+	if (CoverageMission == ECoverageMission::SemiMarkov
+		|| (bV2ProductionRecipe
+			&& (CurrentV2Source == TEXT("random_play")
+				|| bV2PrimaryEventComplete)))
 	{
 		if (State.bContact)
 		{

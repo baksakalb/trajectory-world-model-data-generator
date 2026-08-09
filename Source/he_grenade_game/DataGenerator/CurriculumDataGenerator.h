@@ -325,7 +325,8 @@ private:
 	uint16 SelectTrajectoryShowcaseAction() const;
 	uint16 SelectV2RuntimeSmokeAction() const;
 	uint16 SelectV2TrajectoryHoldMissionAction() const;
-	uint16 SelectV2ProductionAction() const;
+	uint16 SelectV2ProductionAction();
+	uint16 SelectV2SemiMarkovAction(bool bAllowThrows);
 	bool ConfigureV2RecipeSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch);
 	void ConfigureV2SequenceStepAim(int32 StepIndex);
 	void UpdateV2RecipeProgress();
@@ -496,6 +497,8 @@ private:
 	int32 CurrentV2RequiredRestTailSteps = 20;
 	int32 CurrentV2NominalTransitions = 0;
 	int32 CurrentV2MaximumTransitions = 0;
+	int32 CurrentV2ContinuationStartFrame = INDEX_NONE;
+	int32 CurrentV2RequiredContinuationSteps = 0;
 	int32 CurrentV2SequenceGrenadeCount = 0;
 	int32 CurrentV2LastThrowFrame = INDEX_NONE;
 	int32 CurrentV2ERequestCount = 0;
@@ -648,6 +651,7 @@ private:
 	bool bV2RequiresReaimDifference = false;
 	bool bV2SemanticSuccess = false;
 	bool bV2SemanticFailure = false;
+	bool bV2PrimaryEventComplete = false;
 	float CurrentV2MinimumCameraDeltaDegrees = 0.0f;
 	bool bCoverageGuided = true;
 	bool bPrescribedRecipes = false;

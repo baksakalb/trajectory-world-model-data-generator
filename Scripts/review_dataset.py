@@ -916,6 +916,12 @@ def validate_v2_runtime_contract(
             raise DatasetValidationError(
                 f"{episode_id}: production V2 metadata is missing {', '.join(missing)}."
             )
+        if str(episode.get("plan_version", "")) == "trajectory-throw-v2-local-3" and not str(
+            episode.get("v2_contract_version", "")
+        ).startswith("v2-data-generation-spec-3"):
+            raise DatasetValidationError(
+                f"{episode_id}: plan/runtime V2 contract versions do not match."
+            )
         expected_throw_count = int(episode.get("v2_expected_throw_count", 0))
         accepted_throw_count = int(episode.get("v2_accepted_throw_count", 0))
         throw_rows = episode.get("v2_throws") or []
@@ -964,6 +970,120 @@ def validate_v2_runtime_contract(
             raise DatasetValidationError(
                 f"{episode_id}: V2 semantic success and credit decision differ."
             )
+
+        # Contract 3 rejects the visually dead tails which the earlier semantic
+        # checks allowed: zero input after a short event, one fixed action into a
+        # wall, or a mission ending without its bounded active continuation.
+        if str(episode.get("v2_contract_version", "")).startswith(
+            "v2-data-generation-spec-3"
+        ):
+            primary_event_frame = episode.get("v2_primary_event_complete_frame")
+            required_continuation = episode.get("v2_required_continuation_steps")
+            if not cell_id.startswith("R01-") and primary_event_frame is None:
+                raise DatasetValidationError(
+                    f"{episode_id}: bounded recipe lacks its primary-event frame."
+                )
+            if required_continuation is None or int(required_continuation) < 0:
+                raise DatasetValidationError(
+                    f"{episode_id}: invalid required continuation metadata."
+                )
+            observation_rate = int(dataset.get("observation_rate_hz", 20))
+            inactive_zero_run = 0
+            maximum_inactive_zero_run = 0
+            fixed_mask_run = 0
+            maximum_fixed_mask_run = 0
+            previous_mask: int | None = None
+            contact_run = 0
+            maximum_contact_run = 0
+            for transition in transitions:
+                source_index = int(transition["source_frame_index"])
+                source = frames[source_index]
+                mask = int(transition["action_mask"])
+                world_inactive = (
+                    int(source.get("flying_grenade_count") or 0) == 0
+                    and int(source.get("cooldown_remaining_steps") or 0) == 0
+                )
+                inactive_zero_run = (
+                    inactive_zero_run + 1 if mask == 0 and world_inactive else 0
+                )
+                maximum_inactive_zero_run = max(
+                    maximum_inactive_zero_run, inactive_zero_run
+                )
+                fixed_mask_run = (
+                    fixed_mask_run + 1
+                    if world_inactive and mask == previous_mask
+                    else 1
+                )
+                maximum_fixed_mask_run = max(maximum_fixed_mask_run, fixed_mask_run)
+                previous_mask = mask
+                contact_run = contact_run + 1 if bool(source.get("contact")) else 0
+                maximum_contact_run = max(maximum_contact_run, contact_run)
+
+            if maximum_inactive_zero_run > 5 * observation_rate:
+                raise DatasetValidationError(
+                    f"{episode_id}: inactive zero-input run exceeds five seconds."
+                )
+            if maximum_fixed_mask_run > 5 * observation_rate:
+                raise DatasetValidationError(
+                    f"{episode_id}: unchanged inactive action run exceeds five seconds."
+                )
+            if maximum_contact_run > observation_rate:
+                raise DatasetValidationError(
+                    f"{episode_id}: continuous contact exceeds one second."
+                )
+
+            source = str(episode.get("v2_source", ""))
+            if source == "random_play":
+                masks = {int(item["action_mask"]) for item in transitions}
+                if len(masks) < 4:
+                    raise DatasetValidationError(
+                        f"{episode_id}: random play contains fewer than four action states."
+                    )
+                if not any(int(item["action_mask"]) & 0xF0 for item in transitions):
+                    raise DatasetValidationError(
+                        f"{episode_id}: random play contains no camera activity."
+                    )
+                if not any(
+                    item.get("q_rising_edge") for item in transitions
+                ) or not any(item.get("q_falling_edge") for item in transitions):
+                    raise DatasetValidationError(
+                        f"{episode_id}: random play lacks trajectory acquire/cancel activity."
+                    )
+                if not cell_id.startswith("R01-"):
+                    after_event = len(frames) - 1 - int(primary_event_frame)
+                    if after_event < int(required_continuation):
+                        raise DatasetValidationError(
+                            f"{episode_id}: event-focused continuation ended early."
+                        )
+                    if after_event > int(required_continuation) + 1:
+                        raise DatasetValidationError(
+                            f"{episode_id}: event-focused continuation exceeded its bound."
+                        )
+            elif throw_rows:
+                after_event = len(frames) - 1 - int(primary_event_frame)
+                if after_event < int(required_continuation):
+                    raise DatasetValidationError(
+                        f"{episode_id}: mission lacks its bounded active continuation."
+                    )
+                if after_event > int(required_continuation) + 1:
+                    raise DatasetValidationError(
+                        f"{episode_id}: mission continuation exceeded its bound."
+                    )
+                last_rest = max(int(item["rest_frame"]) for item in throw_rows)
+                continuation = [
+                    item
+                    for item in transitions
+                    if int(item["source_frame_index"]) >= last_rest + observation_rate
+                ]
+                continuation_masks = {
+                    int(item["action_mask"]) for item in continuation
+                }
+                if len(continuation_masks) < 2 or not any(
+                    int(item["action_mask"]) & 0x1FF for item in continuation
+                ):
+                    raise DatasetValidationError(
+                        f"{episode_id}: post-mission continuation lacks active variation."
+                    )
 
         for index, (throw, transition) in enumerate(zip(throw_rows, accepted_transitions)):
             throw_frame = int(throw["authoritative_pre_throw_frame"])

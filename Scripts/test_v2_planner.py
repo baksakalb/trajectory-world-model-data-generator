@@ -186,6 +186,10 @@ class V2PlannerTests(unittest.TestCase):
     def test_production_quantum_and_qualification_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            stale = args(root / "stale-contract", 1_000_000)
+            stale.allow_unqualified_calibration = False
+            with self.assertRaisesRegex(ValueError, "qualified local duration calibration"):
+                controller.create_plan(stale)
             invalid = args(root / "invalid", 1_000_001)
             with self.assertRaisesRegex(ValueError, "divisible by 100"):
                 controller.create_plan(invalid)
