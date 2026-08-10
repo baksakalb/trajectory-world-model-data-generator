@@ -4170,7 +4170,21 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction()
 
 	if (bV2PrimaryEventComplete)
 	{
-		return SelectV2SemiMarkovAction(false);
+		uint16 Action = SelectV2SemiMarkovAction(false);
+		// Even the shortest continuation must contain an observable transition.
+		// Preserve its sampled movement/Q state while sweeping right, then left.
+		// Physical escape has already returned above and remains unmodified.
+		const int32 ContinuationStep = FMath::Max(
+			0,
+			FrameIndex - CurrentV2ContinuationStartFrame);
+		const int32 SweepBoundary = FMath::Max(
+			1,
+			CurrentV2RequiredContinuationSteps / 2);
+		Action &= ~(CurriculumAction::ArrowLeft | CurriculumAction::ArrowRight);
+		Action |= ContinuationStep < SweepBoundary
+			? CurriculumAction::ArrowRight
+			: CurriculumAction::ArrowLeft;
+		return Action;
 	}
 
 	if (CurrentV2SequenceSteps.IsEmpty()

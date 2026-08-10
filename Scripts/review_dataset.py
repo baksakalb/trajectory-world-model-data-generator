@@ -1073,7 +1073,7 @@ def validate_v2_runtime_contract(
                 continuation = [
                     item
                     for item in transitions
-                    if int(item["source_frame_index"]) >= last_rest + observation_rate
+                    if int(item["source_frame_index"]) >= int(primary_event_frame)
                 ]
                 continuation_masks = {
                     int(item["action_mask"]) for item in continuation

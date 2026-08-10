@@ -2162,8 +2162,11 @@ zero/fixed input, more than one second of continuous player contact, random
 episodes without action/camera/Q variation, and missions without the active
 continuation. A focused 384x384 contract-3 run at
 `Artifacts/V2RandomContinuationFix384Contract3d` validates R02, R13, R18, and a
-direct rectangle mission; the full catalog, calibration, and 128-slot audit
-remain to be regenerated and reviewed.
+direct rectangle mission. A later 137-video audit was generated and structurally
+validated, but human review rejected several camera-framing, action-duration,
+post-throw movement, floor-physics, and semantic-visibility cases. The detailed
+seed-level findings and next implementation contract are recorded in
+`V2_AUDIT_FINDINGS_AND_NEXT_WORK.txt`.
 
 Measured from the authoritative contract-2 shards, the 1,112 ordinary missions
 lasted 6.92 seconds on average (6.80 median, 4.45 minimum, 9.00 maximum). That
@@ -2368,22 +2371,29 @@ or encoder.
 
 ### Active implementation checkpoint
 
-Movement V1 remains unchanged. Combined V2 contract 3 is under requalification
-after human review rejected the contract-2 random tails. The corrected focused
-384x384 run proves active V1-style semi-Markov continuation, trajectory
-acquire/cancel activity, and Q-free collision escape for four representative
-cells. A fresh event-relative capture at
-`Artifacts/V2EventRelativeDuration384` validates the same four cells at 4.45,
-11.75, 19.10, and 8.90 seconds total, with 3.50, 4.95, 2.40, and 2.70 seconds
-of recorded active continuation respectively. This does not restore production
-readiness by itself.
+Movement V1 remains unchanged. Contract 3 fixed the dead-tail problem and a
+137-video 384x384 audit at `Artifacts/V2Contract3FullVisualAudit384b` passed the
+current structural validator (137/137 episodes, 27,107 transitions, 27,244
+observations). Human review then found defects that structural checks missed:
+missing prescribed post-throw displacement, sub-human action dwell, sky/ground-
+only openings, failure to keep required outcomes visible, artificial direct-settle
+damping, an out-of-bounds grenade receiving ordinary mission credit, and an unclear
+lateral cross-over. Therefore V2 remains not production-ready. The authoritative
+handoff is `V2_AUDIT_FINDINGS_AND_NEXT_WORK.txt`.
+
+Future work also proposes a third, long-play data source comprising roughly one
+third of final observations after calibration. It will combine V1 movement and V2
+grenade mechanics in coherent extended play with eye-level/center-map bias,
+repeated throw-release-relocate-reacquire loops, persistent grenades, collision
+escape, and natural out-of-bounds events. An explicit deliberate out-of-bounds
+mission will be added; all other prescribed missions must reject arena exits.
 
 No remote or cloud generation is required by this workflow. Before any final X
-can be selected or planned, contract 3 must rerun the full 1,184-cell/21-sequence
-qualification, derive a new duration calibration and feasibility floor, rebuild
-the realized distribution report, and regenerate the 128-slot 384x384 audit for
-human review. The former 402,200 minimum is not valid for the changed episode
-durations.
+can be selected, the seed-level human-audit defects must be fixed and accepted in
+a focused review. Then the changed catalog must rerun complete qualification,
+derive new duration calibration and feasibility floors, rebuild the realized
+distribution report, and regenerate the complete visual audit. The former
+402,200 minimum is not valid for the changed episode durations or catalog.
 
 Deferred work which is not a V2 data-generation gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple
