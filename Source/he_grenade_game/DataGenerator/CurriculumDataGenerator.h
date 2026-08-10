@@ -192,6 +192,7 @@ private:
 		FString PostThrowMovementProfile;
 		FString PostThrowCameraProfile;
 		FString Target;
+		FString TargetRegion;
 		FString Outcome;
 		FString ApproachSector;
 		FString DistanceBand;
@@ -220,6 +221,7 @@ private:
 		int32 HoopPassFrame = INDEX_NONE;
 		int32 ArenaExitFrame = INDEX_NONE;
 		int32 PredictedFirstContactStep = INDEX_NONE;
+		int32 PredictedHoopPassStep = INDEX_NONE;
 		int32 PredictedRestStep = INDEX_NONE;
 		int32 VisibleObservationCount = 0;
 		int32 VisibleEventObservationCount = 0;
@@ -229,6 +231,8 @@ private:
 		float HoopCrossingZ = 0.0f;
 		float FirstContactTraveledDistanceCm = 0.0f;
 		float MaximumSignedDisplacementCm = 0.0f;
+		float FirstContactDeflectionDegrees = 0.0f;
+		float FirstContactSpeedRetention = 0.0f;
 		FRotator ThrowCamera = FRotator::ZeroRotator;
 		FVector ThrowPlayerPosition = FVector::ZeroVector;
 		FVector PredictedRestPosition = FVector::ZeroVector;
@@ -239,6 +243,7 @@ private:
 		FString IntendedFamily;
 		FString IntendedContactSequence;
 		FString IntendedDirection;
+		FString IntendedApproach;
 		FString AimAcquisitionProfile;
 		FString QRetentionProfile;
 		FString PostThrowMovementProfile;
@@ -247,6 +252,7 @@ private:
 		FString ArenaExitDirection;
 		FString PredictedExitDirection;
 		TArray<FString> ContactOrder;
+		TArray<FString> PredictedContactOrder;
 	};
 
 	struct FPrescribedRecipe
@@ -269,6 +275,7 @@ private:
 		FString PostThrowMovementProfile;
 		FString PostThrowCameraProfile;
 		FString Target;
+		FString TargetRegion;
 		FString Outcome;
 		FString ApproachSector;
 		FString DistanceBand;
@@ -346,6 +353,18 @@ private:
 	int32 SelectV2PersistentHoldSteps();
 	bool ConfigureV2RecipeSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch);
 	void ConfigureV2SequenceStepAim(int32 StepIndex);
+	bool CertifyV2Aim(
+		const FVector& PlayerLocation,
+		const FVector& DesiredTarget,
+		const FString& Family,
+		const FString& Target,
+		const FString& Outcome,
+		const FString& ContactSequence,
+		const FString& Direction,
+		const FString& Approach,
+		bool bHighArc,
+		float& OutYaw,
+		float& OutPitch) const;
 	void UpdateV2RecipeProgress();
 	bool ValidateV2RecipeSemantics() const;
 	bool ValidateV2ThrowSemantics(const FGeneratedGrenade& Grenade) const;
@@ -455,6 +474,7 @@ private:
 	FString CurrentV2PostThrowMovementProfile;
 	FString CurrentV2PostThrowCameraProfile;
 	FString CurrentV2Target;
+	FString CurrentV2TargetRegion;
 	FString CurrentV2Outcome;
 	FString CurrentV2ApproachSector;
 	FString CurrentV2DistanceBand;
@@ -530,6 +550,7 @@ private:
 	int32 CurrentV2PostThrowAttentionMode = 0;
 	int32 CurrentV2PostThrowAttentionStepsRemaining = 0;
 	int32 CurrentV2PostThrowLookBackDelaySteps = 0;
+	int32 CurrentV2InactiveFixedActionSteps = 0;
 	int32 CurrentV2CameraSteeringStepsRemaining = 0;
 	int32 CurrentV2CameraNeutralStepsRemaining = 0;
 	int32 CurrentEpisodeRampTraversals = 0;
@@ -568,6 +589,7 @@ private:
 	uint16 HeldActionMask = 0;
 	uint16 LastAppliedActionMask = 0;
 	uint16 CurrentV2CameraSteeringMask = 0;
+	uint16 CurrentV2InactiveFixedActionMask = 0;
 	bool bCurrentV2PendingStressEEdge = false;
 	uint16 PostSuccessBaseActionMask = 0;
 	uint16 CurrentEpisodeViewBinsMask = 0;

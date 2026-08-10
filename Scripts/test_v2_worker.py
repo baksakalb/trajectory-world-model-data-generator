@@ -7,10 +7,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dataset_worker import bind_execution_build
+from dataset_worker import bind_execution_build, command_for
 
 
 class V2WorkerBuildBindingTests(unittest.TestCase):
+    def test_editor_command_opens_the_project_in_game_mode(self) -> None:
+        command = command_for(
+            Path("UnrealEditor-Cmd.exe"),
+            Path("request.json"),
+            Path("output"),
+        )
+        self.assertEqual(Path(command[1]).name, "he_grenade_game.uproject")
+        self.assertEqual(command[2], "-game")
+
+    def test_packaged_command_does_not_add_an_editor_project(self) -> None:
+        command = command_for(Path("he_grenade_game.exe"), Path("request.json"), Path("output"))
+        self.assertEqual(command[1], "-GenerateDataset")
+
     def test_collection_rejects_a_different_packaged_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

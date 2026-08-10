@@ -62,6 +62,8 @@ V2_THROW = pa.struct(
         pa.field("hoop_crossing_y", pa.float32(), nullable=False),
         pa.field("hoop_crossing_z", pa.float32(), nullable=False),
         pa.field("post_contact_travel_cm", pa.float32(), nullable=False),
+        pa.field("first_contact_deflection_degrees", pa.float32(), nullable=False),
+        pa.field("first_contact_speed_retention", pa.float32(), nullable=False),
         pa.field("arena_exit_frame", pa.int32()),
         pa.field("arena_exit_direction", pa.string()),
         pa.field("intended_exit_direction", pa.string()),

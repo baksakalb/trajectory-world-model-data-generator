@@ -726,48 +726,44 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
     if family in {"trajectory_view", "temporal"}:
         return bool(throw.get("preview_to_realized_flight_parity"))
     if family == "solid_object":
-        if outcome == "near_miss":
-            return target_index < 0
-        if outcome == "floor_bounce_then_contact":
-            return 0 <= floor_index < target_index
-        return target_index == 0
+        return target_index == 0 and (
+            outcome != "glancing_contact"
+            or (
+                float(throw.get("first_contact_deflection_degrees") or 180.0) <= 35.0
+                and float(throw.get("first_contact_speed_retention") or 0.0) >= 0.40
+            )
+        )
     if family == "wall_corner":
         sequence = str(throw.get("intended_contact_sequence", ""))
-        if sequence == "floor_then_wall":
-            return 0 <= floor_index < target_index
-        if sequence == "wall_then_floor":
-            return 0 <= target_index < floor_index
-        if sequence == "adjacent_corner":
-            return target_index >= 0 and any(
+        if sequence == "adjacent_wall_bank":
+            return target_index == 0 and any(
                 item.startswith("CurriculumWall_") and item != target
                 for item in contacts
             )
-        return target_index == 0
+        return target_index == 0 and (
+            not sequence.startswith("glance_")
+            or (
+                float(throw.get("first_contact_deflection_degrees") or 180.0) <= 45.0
+                and float(throw.get("first_contact_speed_retention") or 0.0) >= 0.35
+            )
+        )
     if family == "floor_observe":
         return floor_index >= 0
     if family == "ramp":
-        if outcome == "side_miss":
-            return target_index < 0
         if outcome == "cross_over":
             return bool(throw.get("geometric_crossing_pass"))
-        if outcome == "floor_then_ramp":
-            return 0 <= floor_index < target_index
-        if outcome == "ramp_then_floor":
-            return 0 <= target_index < floor_index
-        return target_index == 0
+        return target_index == 0 and (
+            outcome != "glancing_contact"
+            or (
+                float(throw.get("first_contact_deflection_degrees") or 180.0) <= 45.0
+                and float(throw.get("first_contact_speed_retention") or 0.0) >= 0.35
+            )
+        )
     if family == "hoop":
         pass_frame = throw.get("hoop_pass_frame")
-        if outcome == "near_miss":
-            return target_index < 0 and pass_frame is None
         if outcome == "rim_contact":
             return target_index >= 0
-        if outcome == "floor_bounce_then_hoop":
-            return (
-                floor_index >= 0
-                and pass_frame is not None
-                and int(throw["first_contact_frame"]) < int(pass_frame)
-            )
-        return pass_frame is not None
+        return pass_frame is not None and target_index < 0
     return False
 
 
@@ -1011,9 +1007,14 @@ def validate_v2_runtime_contract(
         free_play = source in {"random_play", "semi_markov"}
         throw_rows = episode.get("v2_throws") or []
         accepted_transitions = [item for item in transitions if item["e_accepted"]]
-        if not free_play and accepted_throw_count != expected_throw_count:
+        credited_episode = bool(episode.get("accepted_for_balancing"))
+        if not free_play and credited_episode and accepted_throw_count != expected_throw_count:
             raise DatasetValidationError(
-                f"{episode_id}: expected/accepted throw counts differ."
+                f"{episode_id}: credited expected/accepted throw counts differ."
+            )
+        if not free_play and accepted_throw_count > expected_throw_count:
+            raise DatasetValidationError(
+                f"{episode_id}: accepted more throws than the recipe expected."
             )
         if len(throw_rows) != accepted_throw_count or len(accepted_transitions) != accepted_throw_count:
             raise DatasetValidationError(

@@ -65,25 +65,41 @@ class V2CatalogTests(unittest.TestCase):
     def test_catalog_counts_ids_and_fingerprints_are_stable(self) -> None:
         cells = base_cells()
         self.assertEqual(Counter(cell["family"] for cell in cells), Counter(BASE_FAMILY_COUNTS))
-        self.assertEqual(len(cells), 520)
-        self.assertEqual(len({cell["cell_id"] for cell in cells}), 520)
-        self.assertEqual(catalog_fingerprint(cells), "0e2571f97409c0d1612a7d7a31751a7399d05cd072fe984ba39f0151152ad6a8")
-        self.assertEqual(sequence_fingerprint(), "8fed827b9bdeec2a93145836edb4fe3a7ba156b8bbaa87b89eb171ec21657ddb")
+        self.assertEqual(len(cells), 312)
+        self.assertEqual(len({cell["cell_id"] for cell in cells}), 312)
+        self.assertEqual(catalog_fingerprint(cells), "61fc9d8f6fb886f77a443bd8aa8cc10810d13560c2a40057bfa33996dfccf151")
+        self.assertEqual(sequence_fingerprint(), "8b2201b6d9ca8aa75584e133ee3128dfbbd910cc808d10642fc71d2e162793f1")
 
     def test_every_sequence_and_visual_audit_slot_is_unique(self) -> None:
         self.assertEqual(len(SEQUENCE_TEMPLATES), 8)
         self.assertEqual(len({item.template_id for item in SEQUENCE_TEMPLATES}), 8)
-        self.assertEqual(len(audit_slots()), 84)
-        self.assertEqual(len({item["slot_id"] for item in audit_slots()}), 84)
+        slots = audit_slots()
+        self.assertEqual(len(slots), 99)
+        self.assertEqual(len({item["slot_id"] for item in slots}), 99)
+        self.assertEqual(Counter(item["family"] for item in slots), Counter({
+            "semi_markov": 12, "trajectory_view": 12,
+            "solid_object": 15, "wall_corner": 8, "floor_observe": 6,
+            "ramp": 8, "hoop": 18, "temporal": 8,
+            "out_of_bounds": 4, "sequence": 8,
+        }))
 
     def test_solid_variations_cover_all_distance_and_arc_bands(self) -> None:
         solids = [cell for cell in base_cells() if cell["family"] == "solid_object"]
-        grouped: dict[tuple[str, str], list[dict]] = {}
+        grouped: dict[str, list[dict]] = {}
         for cell in solids:
-            grouped.setdefault((cell["target"], cell["approach_sector"]), []).append(cell)
+            grouped.setdefault(cell["target"], []).append(cell)
         for values in grouped.values():
             self.assertEqual({cell["distance_band"] for cell in values}, {"near", "medium", "far"})
-            self.assertEqual({cell["arc_band"] for cell in values}, {"low", "medium", "high"})
+            self.assertEqual({cell["arc_band"] for cell in values}, {"low", "medium"})
+            self.assertEqual({cell["interaction_mode"] for cell in values}, {"contact"})
+            self.assertEqual({cell["target_region"] for cell in values}, {
+                "center", "upper", "lower", "left_edge", "right_edge",
+            })
+
+    def test_misses_and_ambiguous_outcomes_are_not_mission_cells(self) -> None:
+        payload = json.dumps(base_cells(), sort_keys=True)
+        for removed in ("near_miss", "side_miss", "open_path", "corner_or_miss"):
+            self.assertNotIn(removed, payload)
 
 
 class V2PlannerTests(unittest.TestCase):
@@ -149,8 +165,8 @@ class V2PlannerTests(unittest.TestCase):
                 recipes_per_assignment=64,
             ))
             recipes = read_jsonl(root / "plan" / "recipes.jsonl")
-            self.assertEqual(len(recipes), 520 + len(SEQUENCE_TEMPLATES))
-            self.assertEqual(len(list((root / "assignments").glob("*.json"))), 9)
+            self.assertEqual(len(recipes), 312 + len(SEQUENCE_TEMPLATES))
+            self.assertEqual(len(list((root / "assignments").glob("*.json"))), 5)
 
     def test_qualification_plan_can_select_the_frozen_audit_cells(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -159,10 +175,15 @@ class V2PlannerTests(unittest.TestCase):
                 root, audit_cells=True, recipes_per_assignment=128,
             ))
             recipes = read_jsonl(root / "plan" / "recipes.jsonl")
-            self.assertEqual(len(recipes), 84)
-            self.assertEqual({item["cell_id"] for item in recipes}, {
-                item["cell_id"] for item in audit_slots()
-            })
+            self.assertEqual(len(recipes), 99)
+            self.assertEqual(
+                len([item for item in recipes if item.get("sequence_template_id")]),
+                8,
+            )
+            self.assertEqual(
+                len([item for item in recipes if not item.get("sequence_template_id")]),
+                91,
+            )
 
     def test_sequence_recipes_materialize_every_executable_step(self) -> None:
         calibration = controller.load_calibration()
@@ -193,9 +214,9 @@ class V2PlannerTests(unittest.TestCase):
             })
             self.assertEqual(distribution["family_frames"], {
                 "semi_markov": 700000,
-                "trajectory_view": 70000, "solid_object": 60000,
-                "wall_corner": 40000, "floor_observe": 30000,
-                "ramp": 30000, "hoop": 30000, "temporal": 30000,
+                "trajectory_view": 60000, "solid_object": 60000,
+                "wall_corner": 40000, "floor_observe": 10000,
+                "ramp": 40000, "hoop": 50000, "temporal": 30000,
                 "out_of_bounds": 10000,
             })
             frozen_plan = json.loads((first / "plan" / "collection-plan.json").read_text(encoding="utf-8"))
@@ -247,17 +268,14 @@ class V2PlannerTests(unittest.TestCase):
             self.assertTrue(evaluation)
             self.assertFalse(train & evaluation)
 
-    def test_every_primary_has_two_bounded_reserves(self) -> None:
+    def test_certified_missions_have_no_seed_mining_reserves(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "plan"
             controller.create_plan(args(root, controller.minimum_feasible_frame_budget()))
             recipes = read_jsonl(root / "plan" / "recipes.jsonl")
-            active = [item for item in recipes if item["active"]]
-            reserves = Counter(item["reserve_for"] for item in recipes if item["reserve_for"])
-            self.assertEqual(set(reserves), {item["recipe_id"] for item in active})
-            self.assertTrue(all(count == 2 for count in reserves.values()))
+            self.assertFalse([item for item in recipes if item["reserve_for"]])
 
-    def test_inventory_reconstruction_activates_only_bounded_reserves(self) -> None:
+    def test_semantic_failure_cannot_activate_seed_mining_reserves(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "plan"
             controller.create_plan(args(root, controller.minimum_feasible_frame_budget()))
@@ -285,19 +303,13 @@ class V2PlannerTests(unittest.TestCase):
             inventory = controller.build_inventory(root)
             self.assertEqual(inventory["semantic_failure_recipe_ids"], [primary["recipe_id"]])
             first = controller.activate_reserves(root, 7)
-            second = controller.activate_reserves(root, 7)
-            third = controller.activate_reserves(root, 7)
-            self.assertEqual((first["activated"], second["activated"], third["activated"]), (1, 1, 0))
+            self.assertEqual(first["activated"], 0)
+            self.assertIn("no unresolved semantic failure", first["reason"])
             reserve_assignments = [
                 json.loads(path.read_text(encoding="utf-8"))
                 for path in (root / "assignments").glob("assignment-v2reserve-*.json")
             ]
-            self.assertEqual(len(reserve_assignments), 2)
-            self.assertTrue(all(item["logical_worker_id"] == 7 for item in reserve_assignments))
-            self.assertTrue(all(
-                item["recipes"][0]["reserve_for"] == primary["recipe_id"]
-                for item in reserve_assignments
-            ))
+            self.assertFalse(reserve_assignments)
 
 
 if __name__ == "__main__":

@@ -214,8 +214,11 @@ def build_validated_result(
 
 
 def command_for(executable: Path, runtime_manifest: Path, output: Path) -> list[str]:
-    return [
-        str(executable),
+    command = [str(executable)]
+    if "unrealeditor" in executable.name.lower():
+        project = Path(__file__).resolve().parent.parent / "he_grenade_game.uproject"
+        command.extend([str(project), "-game"])
+    command.extend([
         "-GenerateDataset",
         f"-RecipeManifest={runtime_manifest}",
         f"-Output={output}",
@@ -224,7 +227,8 @@ def command_for(executable: Path, runtime_manifest: Path, output: Path) -> list[
         "-nosound",
         "-NoSplash",
         "-NoVSync",
-    ]
+    ])
+    return command
 
 
 def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:

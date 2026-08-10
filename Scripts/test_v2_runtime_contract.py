@@ -12,6 +12,7 @@ from Scripts.review_dataset import (
     validate_v2_human_action_dwell,
     validate_v2_runtime_contract,
 )
+from Scripts.finalize_production_dataset import V2_THROW
 
 
 def frame(
@@ -41,6 +42,11 @@ def frame(
 
 
 class V2RuntimeContractTests(unittest.TestCase):
+
+    def test_parquet_preserves_glancing_contact_evidence(self) -> None:
+        names = {field.name for field in V2_THROW}
+        self.assertIn("first_contact_deflection_degrees", names)
+        self.assertIn("first_contact_speed_retention", names)
 
     def test_mission_rejects_bracketed_one_frame_camera_reversal(self) -> None:
         masks = ([1 << 6] * 5) + [1 << 7] + ([1 << 6] * 5)

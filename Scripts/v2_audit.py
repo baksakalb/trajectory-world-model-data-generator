@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select and export the frozen 128-slot V2 visual audit from local results."""
+"""Select and export the frozen positive-event V2 visual audit."""
 
 from __future__ import annotations
 
@@ -54,6 +54,8 @@ def result_candidates(collections: Iterable[Path]) -> list[dict[str, Any]]:
                     raise ValueError(f"{shard} omits episodes.parquet")
                 episodes = pq.read_table(extracted).to_pylist()
             for episode in episodes:
+                # A failed realization is diagnostic evidence, never a valid
+                # substitute for a required human-review slot.
                 if not bool(episode.get("accepted_for_balancing")):
                     continue
                 recipe = recipes.get(str(episode.get("recipe_id") or ""), {})
@@ -93,10 +95,16 @@ def select_examples(
     slots: Iterable[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     by_cell: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_sequence: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for candidate in candidates:
-        if candidate.get("semantic_success"):
+        if not bool(candidate.get("semantic_success")):
+            continue
+        sequence_id = str(candidate.get("sequence_template_id") or "")
+        if sequence_id:
+            by_sequence[sequence_id].append(candidate)
+        else:
             by_cell[str(candidate["cell_id"])].append(candidate)
-    for values in by_cell.values():
+    for values in [*by_cell.values(), *by_sequence.values()]:
         values.sort(key=lambda item: (
             str(item.get("replay_identity") or ""), int(item["seed"]),
             str(item["episode_id"]), str(item["output_directory"]),
@@ -104,7 +112,11 @@ def select_examples(
     selected: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
     for slot in slots or audit_slots():
-        matches = by_cell.get(str(slot["cell_id"]), [])
+        sequence_id = str(slot.get("sequence_template_id") or "")
+        matches = (
+            by_sequence.get(sequence_id, []) if sequence_id
+            else by_cell.get(str(slot["cell_id"]), [])
+        )
         if not matches:
             missing.append(dict(slot))
             continue
@@ -213,12 +225,13 @@ def coverage(selected: list[dict[str, Any]], missing: list[dict[str, Any]]) -> d
     counts: dict[str, int] = defaultdict(int)
     for item in selected:
         counts[str(item["family"])] += 1
+    required = len(audit_slots())
     return {
-        "required_slot_count": 128,
+        "required_slot_count": required,
         "selected_slot_count": len(selected),
         "missing_slot_count": len(missing),
         "selected_by_family": dict(sorted(counts.items())),
-        "complete": not missing and len(selected) == 128,
+        "complete": not missing and len(selected) == required,
         "missing_slots": missing,
     }
 
@@ -242,7 +255,7 @@ def main() -> int:
     report = coverage(selected, missing)
     manifest = {
         "schema_version": 1,
-        "selection_contract": "v2-visual-audit-128-1",
+        "selection_contract": "v2-certified-positive-event-audit-1",
         "selection_sha256": hashlib.sha256(json.dumps(
             [(item["slot_id"], item["replay_identity"]) for item in selected],
             separators=(",", ":"), sort_keys=True,
@@ -252,7 +265,11 @@ def main() -> int:
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (output / "coverage-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    lines = ["# V2 visual audit", "", f"Selected {len(selected)} of 128 frozen slots.", ""]
+    required = len(audit_slots())
+    lines = [
+        "# V2 semantic visual audit", "",
+        f"Selected {len(selected)} of {required} frozen slots.", "",
+    ]
     for item in selected:
         lines.append(f"- `{item['slot_id']}` - {item['title']} - `{item['cell_id']}` - `{item.get('video', 'selection only')}`")
     if missing:

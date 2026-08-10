@@ -805,6 +805,15 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 		}
 		return;
 	}
+	if (bV2ProductionRecipe && !bCoverageMissionConfigurationValid)
+	{
+		FinishRun(
+			false,
+			LastError.IsEmpty()
+				? TEXT("A prescribed V2 mission became uncertifiable during execution.")
+				: LastError);
+		return;
+	}
 
 	AdvanceGrenades();
 
@@ -1481,6 +1490,7 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 			&& CellObject && CellObject->IsValid())
 		{
 			(*CellObject)->TryGetStringField(TEXT("target"), Recipe.Target);
+			(*CellObject)->TryGetStringField(TEXT("target_region"), Recipe.TargetRegion);
 			(*CellObject)->TryGetStringField(TEXT("outcome"), Recipe.Outcome);
 			if (Recipe.Outcome.IsEmpty())
 			{
@@ -1566,6 +1576,7 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 					(*StepCell)->TryGetStringField(TEXT("source"), Step.Source);
 					(*StepCell)->TryGetStringField(TEXT("family"), Step.Family);
 					(*StepCell)->TryGetStringField(TEXT("target"), Step.Target);
+					(*StepCell)->TryGetStringField(TEXT("target_region"), Step.TargetRegion);
 					(*StepCell)->TryGetStringField(TEXT("outcome"), Step.Outcome);
 					if (Step.Outcome.IsEmpty())
 					{
@@ -1736,6 +1747,7 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		CurrentV2PostThrowMovementProfile = Recipe.PostThrowMovementProfile;
 		CurrentV2PostThrowCameraProfile = Recipe.PostThrowCameraProfile;
 		CurrentV2Target = Recipe.Target;
+		CurrentV2TargetRegion = Recipe.TargetRegion;
 		CurrentV2Outcome = Recipe.Outcome;
 		CurrentV2ApproachSector = Recipe.ApproachSector;
 		CurrentV2DistanceBand = Recipe.DistanceBand;
@@ -1873,6 +1885,8 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	CurrentV2PostThrowAttentionMode = 0;
 	CurrentV2PostThrowAttentionStepsRemaining = 0;
 	CurrentV2PostThrowLookBackDelaySteps = 0;
+	CurrentV2InactiveFixedActionSteps = 0;
+	CurrentV2InactiveFixedActionMask = 0;
 	bCurrentV2PendingStressEEdge = false;
 	FMemory::Memzero(CurrentV2PositionBinFrames);
 	FMemory::Memzero(CurrentV2ViewBinFrames);
@@ -1884,6 +1898,12 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		const bool bFreePlay = CurrentV2Source == TEXT("semi_markov");
 		CurrentV2ExpectedThrowCount = bFreePlay
 			? 0 : FMath::Max(1, CurrentV2SequenceGrenadeCount);
+		if (CurrentV2Source == TEXT("mission")
+			&& CurrentV2BehaviorFamily == TEXT("preview_cancel")
+			&& CurrentV2SequenceSteps.IsEmpty())
+		{
+			CurrentV2ExpectedThrowCount = 0;
+		}
 		if (!CurrentV2SequenceSteps.IsEmpty())
 		{
 			CurrentV2ExpectedThrowCount = CurrentV2SequenceSteps.Num();
@@ -2321,7 +2341,7 @@ void ACurriculumDataGenerator::EndEpisode()
 			? *FString::Printf(TEXT("\"%s\""), *CurrentRecipeId.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-			? TEXT("\"v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1\"")
+			? TEXT("\"v2-canonical-physics-1+certified-missions-1+persistent-semi-markov-1\"")
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 			? (bV2ProductionRecipe
@@ -4062,6 +4082,55 @@ uint16 ACurriculumDataGenerator::SelectV2SemiMarkovAction(
 		Action |= CurriculumAction::E;
 		NextThrowRequestFrame = FrameIndex + EpisodeRandom.RandRange(60, 160);
 	}
+
+	// A sampled hold may be followed by the same sampled mask. Bound the
+	// realized unchanged run while the world is inactive, rather than assuming
+	// each internal decision is visually distinct. Four seconds leaves room for
+	// an intentional human pause or sustained input without producing a dead
+	// five-second tail in the recorded episode.
+	bool bHasFlyingGrenade = false;
+	for (const FGeneratedGrenade& Grenade : Grenades)
+	{
+		if (!Grenade.State.bMotionStopped)
+		{
+			bHasFlyingGrenade = true;
+			break;
+		}
+	}
+	const bool bWorldInactive = !bHasFlyingGrenade && CooldownRemainingSteps <= 0;
+	if (bWorldInactive)
+	{
+		if (Action == CurrentV2InactiveFixedActionMask)
+		{
+			++CurrentV2InactiveFixedActionSteps;
+		}
+		else
+		{
+			CurrentV2InactiveFixedActionMask = Action;
+			CurrentV2InactiveFixedActionSteps = 1;
+		}
+		if (CurrentV2InactiveFixedActionSteps >= 4 * ObservationRate)
+		{
+			const uint16 ForcedAction = (Action & CurriculumAction::CameraMask) != 0
+				? CurriculumAction::W
+				: CurriculumAction::ArrowRight;
+			Action = ForcedAction;
+			HeldActionMask = ForcedAction;
+			HoldStepsRemaining = EpisodeRandom.RandRange(10, 30);
+			ActionScriptMasks.Reset();
+			ActionScriptHoldSteps.Reset();
+			ActionScriptIndex = 0;
+			ActionScriptStepsRemaining = 0;
+			bCurrentV2PendingStressEEdge = false;
+			CurrentV2InactiveFixedActionMask = ForcedAction;
+			CurrentV2InactiveFixedActionSteps = 1;
+		}
+	}
+	else
+	{
+		CurrentV2InactiveFixedActionMask = Action;
+		CurrentV2InactiveFixedActionSteps = 0;
+	}
 	return Action;
 }
 
@@ -4400,7 +4469,18 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction()
 			&& NaturalPlayContactLimitSteps > 0
 			&& NaturalPlayContactSteps >= NaturalPlayContactLimitSteps))
 	{
-		return SelectV2SemiMarkovAction(false);
+		uint16 RecoveryAction = SelectV2SemiMarkovAction(false);
+		// Collision recovery may replace locomotion immediately, but it must not
+		// chop a deliberate camera gesture into one- or two-frame fragments.
+		// Finish the already-started camera dwell during the escape, then allow
+		// the next mission framing decision to begin normally.
+		if (CurrentV2Source == TEXT("mission")
+			&& CurrentV2CameraSteeringStepsRemaining > 0)
+		{
+			RecoveryAction |= SelectStableV2CameraBitsToward(
+				CurrentV2SequenceAimTarget);
+		}
+		return RecoveryAction;
 	}
 
 	if (CurrentV2Source == TEXT("semi_markov"))
@@ -4456,7 +4536,7 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction()
 		{
 			return CurriculumAction::Q | CameraAdjustment(0, FrameIndex - 5);
 		}
-		return SelectV2SemiMarkovAction(false);
+		return SelectV2SemiMarkovAction(false) & ~CurriculumAction::E;
 	}
 	if (FrameIndex < EstablishSteps)
 	{
@@ -4477,10 +4557,8 @@ uint16 ACurriculumDataGenerator::SelectV2ProductionAction()
 			const uint16 Adjustment = PreviewStep < ObservationRate
 				? CameraAdjustment(ThrowIndex, PreviewStep)
 				: (bCurrentV2SequenceAimTargetValid
-					&& (CurrentV2CameraSteeringMask != 0
-						|| CurrentV2CameraSteeringStepsRemaining > 0
-						|| PreviewStep <= PreviewSteps - MinimumGestureSteps)
-					? SelectStableV2CameraBitsToward(CurrentV2SequenceAimTarget) : 0);
+					&& PreviewStep <= PreviewSteps - MinimumGestureSteps
+					? CameraBitsToward(CurrentV2SequenceAimTarget) : 0);
 			if (AimProfile == TEXT("prelook_q_off") && PreviewStep < 2)
 			{
 				return Adjustment;
@@ -4690,7 +4768,10 @@ bool ACurriculumDataGenerator::ValidateV2RecipeSemantics() const
 				&& CurrentV2QFallingCount > 0
 				&& CurrentV2AcceptedThrowCount > 0;
 		}
-		return false;
+		return CurrentV2BehaviorFamily == TEXT("preview_cancel")
+			&& CurrentV2AcceptedThrowCount == 0
+			&& CurrentV2QRisingCount > 0
+			&& CurrentV2QFallingCount > 0;
 	}
 	if ((CurrentV2BehaviorFamily == TEXT("reject_e_cooldown")
 			|| CurrentV2SequenceTemplateId == TEXT("SQ17"))
@@ -4759,6 +4840,24 @@ bool ACurriculumDataGenerator::ValidateV2ThrowSemantics(
 			&& FVector::Dist(Grenade.PredictedRestPosition, Grenade.State.Position) <= 5.0f;
 		if (!bRestParity) return false;
 	}
+	if (!Grenade.PredictedContactOrder.IsEmpty())
+	{
+		if (Grenade.ContactOrder.IsEmpty()
+			|| Grenade.PredictedContactOrder[0] != Grenade.ContactOrder[0])
+		{
+			return false;
+		}
+		if (Grenade.State.bMotionStopped
+			&& Grenade.PredictedContactOrder != Grenade.ContactOrder)
+		{
+			return false;
+		}
+	}
+	if ((Grenade.PredictedHoopPassStep != INDEX_NONE)
+		!= (Grenade.HoopPassFrame != INDEX_NONE))
+	{
+		return false;
+	}
 	if (Grenade.PrescribedMovementSteps > 0
 		&& Grenade.PostThrowMovementProfile != TEXT("stationary")
 		&& Grenade.PostThrowMovementProfile != TEXT("ordinary_semi_markov")
@@ -4783,34 +4882,15 @@ bool ACurriculumDataGenerator::ValidateV2ThrowSemantics(
 
 	if (Grenade.IntendedFamily == TEXT("solid_object"))
 	{
-		if (Grenade.IntendedOutcome == TEXT("near_miss"))
-		{
-			return TargetIndex == INDEX_NONE;
-		}
-		if (Grenade.IntendedOutcome == TEXT("floor_bounce_then_contact"))
-		{
-			return FloorIndex != INDEX_NONE
-				&& TargetIndex != INDEX_NONE
-				&& FloorIndex < TargetIndex;
-		}
-		return TargetIndex == 0;
+		return TargetIndex == 0
+			&& (Grenade.IntendedOutcome != TEXT("glancing_contact")
+				|| (Grenade.FirstContactDeflectionDegrees <= 35.0f
+					&& Grenade.FirstContactSpeedRetention >= 0.40f));
 	}
 
 	if (Grenade.IntendedFamily == TEXT("wall_corner"))
 	{
-		if (Grenade.IntendedContactSequence == TEXT("floor_then_wall"))
-		{
-			return FloorIndex != INDEX_NONE
-				&& TargetIndex != INDEX_NONE
-				&& FloorIndex < TargetIndex;
-		}
-		if (Grenade.IntendedContactSequence == TEXT("wall_then_floor"))
-		{
-			return TargetIndex != INDEX_NONE
-				&& FloorIndex != INDEX_NONE
-				&& TargetIndex < FloorIndex;
-		}
-		if (Grenade.IntendedContactSequence == TEXT("adjacent_corner"))
+		if (Grenade.IntendedContactSequence == TEXT("adjacent_wall_bank"))
 		{
 			const bool bAdjacentWallContact = Algo::AnyOf(
 				Grenade.ContactOrder,
@@ -4819,9 +4899,12 @@ bool ACurriculumDataGenerator::ValidateV2ThrowSemantics(
 					return Contact.StartsWith(TEXT("CurriculumWall_"))
 						&& Contact != Target;
 				});
-			return TargetIndex != INDEX_NONE && bAdjacentWallContact;
+			return TargetIndex == 0 && bAdjacentWallContact;
 		}
-		return TargetIndex == 0;
+		return TargetIndex == 0
+			&& (!Grenade.IntendedContactSequence.StartsWith(TEXT("glance_"))
+				|| (Grenade.FirstContactDeflectionDegrees <= 45.0f
+					&& Grenade.FirstContactSpeedRetention >= 0.35f));
 	}
 
 	if (Grenade.IntendedFamily == TEXT("floor_observe"))
@@ -4833,35 +4916,30 @@ bool ACurriculumDataGenerator::ValidateV2ThrowSemantics(
 	{
 		if (Grenade.IntendedOutcome == TEXT("cross_over"))
 		{
-			if (CurrentV2ApproachSector == TEXT("lateral_left_to_right")
-				|| CurrentV2ApproachSector == TEXT("lateral_right_to_left"))
+			if (Grenade.IntendedApproach == TEXT("lateral_left_to_right")
+				|| Grenade.IntendedApproach == TEXT("lateral_right_to_left"))
 			{
 				return FMath::Abs(Grenade.State.Position.Y) > 200.0f
 					&& Grenade.ThrowPlayerPosition.Y * Grenade.State.Position.Y < 0.0f;
 			}
 			return Grenade.ThrowPlayerPosition.X * Grenade.State.Position.X < 0.0f;
 		}
-		if (Grenade.IntendedOutcome == TEXT("side_miss")) return TargetIndex == INDEX_NONE;
-		return TargetIndex != INDEX_NONE;
+		// Surface and glancing-contact missions describe a ramp-first event.
+		// A later ramp touch after an initial floor bounce is recorded, but it is
+		// not credited as realization of that semantic class.
+		return TargetIndex == 0
+			&& (Grenade.IntendedOutcome != TEXT("glancing_contact")
+				|| (Grenade.FirstContactDeflectionDegrees <= 45.0f
+					&& Grenade.FirstContactSpeedRetention >= 0.35f));
 	}
 
 	if (Grenade.IntendedFamily == TEXT("hoop"))
 	{
-		if (Grenade.IntendedOutcome == TEXT("near_miss"))
-		{
-			return TargetIndex == INDEX_NONE && Grenade.HoopPassFrame == INDEX_NONE;
-		}
 		if (Grenade.IntendedOutcome == TEXT("rim_contact"))
 		{
 			return TargetIndex != INDEX_NONE;
 		}
-		if (Grenade.IntendedOutcome == TEXT("floor_bounce_then_hoop"))
-		{
-			return FloorIndex != INDEX_NONE
-				&& Grenade.HoopPassFrame != INDEX_NONE
-				&& Grenade.FirstContactFrame < Grenade.HoopPassFrame;
-		}
-		return Grenade.HoopPassFrame != INDEX_NONE;
+		return Grenade.HoopPassFrame != INDEX_NONE && TargetIndex == INDEX_NONE;
 	}
 
 	return false;
@@ -8035,13 +8113,13 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 		{
 			TargetPoint = FVector(-700.0f, -700.0f, 120.0f);
 		}
-		if (CurrentV2Outcome == TEXT("direct_upper"))
+		if (CurrentV2TargetRegion == TEXT("upper"))
 		{
-			TargetPoint.Z += 70.0f;
+			TargetPoint.Z += 65.0f;
 		}
-		else if (CurrentV2Outcome == TEXT("direct_lower"))
+		else if (CurrentV2TargetRegion == TEXT("lower"))
 		{
-			TargetPoint.Z -= 55.0f;
+			TargetPoint.Z -= 50.0f;
 		}
 		// The approach sector and distance are defined relative to the landmark,
 		// not to the deliberately offset impact point.  Deriving the player start
@@ -8050,10 +8128,12 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 		// valid (for example rectangle/S1/far).
 		OutLocation = TargetPoint + Sector * RequestedDistance;
 		OutLocation.Z = 100.0f;
-		const float GlanceOffset = CurrentV2Target == TEXT("pyramid") ? 45.0f : 85.0f;
-		const float SideOffset = CurrentV2Outcome == TEXT("glance_left") ? -GlanceOffset
-			: (CurrentV2Outcome == TEXT("glance_right") ? GlanceOffset
-				: (CurrentV2Outcome == TEXT("near_miss") ? 400.0f : 0.0f));
+		const float EdgeOffset = CurrentV2Target == TEXT("sphere") ? 75.0f
+			: (CurrentV2Target == TEXT("pyramid") ? 60.0f
+				: (FMath::Abs(Sector.X) > 0.5f ? 110.0f : 60.0f));
+		const float SideOffset = CurrentV2TargetRegion == TEXT("left_edge")
+			? -EdgeOffset
+			: (CurrentV2TargetRegion == TEXT("right_edge") ? EdgeOffset : 0.0f);
 		const FVector Tangent(-Sector.Y, Sector.X, 0.0f);
 		TargetPoint += Tangent * SideOffset;
 		if (CurrentV2Outcome == TEXT("floor_bounce_then_contact"))
@@ -8086,7 +8166,7 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 		}
 		TargetPoint.Z = CurrentV2HeightBand == TEXT("high") ? 330.0f
 			: (CurrentV2HeightBand == TEXT("low") ? 60.0f : 180.0f);
-		if (CurrentV2ContactSequence == TEXT("adjacent_corner"))
+		if (CurrentV2ContactSequence == TEXT("adjacent_wall_bank"))
 		{
 			const FVector WallTangent(-Inward.Y, Inward.X, 0.0f);
 			const float Side = CurrentV2ApproachSector == TEXT("glance_left")
@@ -8094,7 +8174,7 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 			TargetPoint += WallTangent * Side * 1480.0f;
 		}
 		OutLocation = TargetPoint + Inward * RequestedDistance;
-		if (CurrentV2ContactSequence == TEXT("adjacent_corner"))
+		if (CurrentV2ContactSequence == TEXT("adjacent_wall_bank"))
 		{
 			const FVector WallTangent(-Inward.Y, Inward.X, 0.0f);
 			const float Side = CurrentV2ApproachSector == TEXT("glance_left")
@@ -8102,10 +8182,16 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 			OutLocation -= WallTangent * Side * 280.0f;
 		}
 		OutLocation.Z = 100.0f;
-		if (CurrentV2ContactSequence == TEXT("floor_then_wall"))
+		if (CurrentV2ContactSequence == TEXT("glance_left")
+			|| CurrentV2ContactSequence == TEXT("glance_right"))
 		{
-			TargetPoint += Inward * 300.0f;
-			TargetPoint.Z = 8.0f;
+			const FVector WallTangent(-Inward.Y, Inward.X, 0.0f);
+			const float Sign = CurrentV2ContactSequence == TEXT("glance_left")
+				? -1.0f : 1.0f;
+			// A wall glance is a shallow approach along the wall, not a nearly
+			// perpendicular bounce with a decorative endpoint offset.
+			TargetPoint += WallTangent * Sign * 550.0f;
+			OutLocation -= WallTangent * Sign * 750.0f;
 		}
 	}
 	else if (MissionOverride == TEXT("floor_observe"))
@@ -8139,10 +8225,11 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 		OutLocation = TargetPoint - Approach * 600.0f;
 		OutLocation.Z = 100.0f;
 		const FVector RampTangent(-Approach.Y, Approach.X, 0.0f);
-		if (CurrentV2Outcome == TEXT("near_miss_side"))
+		if (CurrentV2Outcome == TEXT("glancing_contact"))
 		{
-			TargetPoint += RampTangent * 340.0f;
-			OutLocation += RampTangent * 340.0f;
+			const float Sign = ((CurrentRepetitionIndex + CurrentPrescribedScenarioIndex) & 1)
+				!= 0 ? -1.0f : 1.0f;
+			TargetPoint += RampTangent * Sign * 115.0f;
 		}
 		else if (CurrentV2Outcome == TEXT("cross_over"))
 		{
@@ -8169,18 +8256,23 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 	else if (MissionOverride == TEXT("hoop"))
 	{
 		TargetPoint = FVector(700.0f, -700.0f, 145.0f);
-		if (CurrentV2PathProfile == TEXT("horizontal_left")) TargetPoint.Y -= 45.0f;
-		if (CurrentV2PathProfile == TEXT("horizontal_right")) TargetPoint.Y += 45.0f;
-		if (CurrentV2PathProfile == TEXT("vertical_above")) TargetPoint.Z += 45.0f;
-		if (CurrentV2PathProfile == TEXT("vertical_below")) TargetPoint.Z -= 45.0f;
-		if (CurrentV2Outcome == TEXT("near_miss")) TargetPoint.Y += 240.0f;
+		if (CurrentV2PathProfile == TEXT("left")) TargetPoint.Y -= 42.0f;
+		if (CurrentV2PathProfile == TEXT("right")) TargetPoint.Y += 42.0f;
+		if (CurrentV2PathProfile == TEXT("upper")) TargetPoint.Z += 42.0f;
+		if (CurrentV2PathProfile == TEXT("lower")) TargetPoint.Z -= 42.0f;
 		if (CurrentV2Outcome == TEXT("rim_contact"))
 		{
-			TargetPoint.Z += CurrentV2PathProfile == TEXT("vertical_above") ? 75.0f
-				: (CurrentV2PathProfile == TEXT("vertical_below") ? -75.0f : 120.0f);
+			if (CurrentV2PathProfile == TEXT("upper")) TargetPoint.Z = 250.0f;
+			else if (CurrentV2PathProfile == TEXT("lower")) TargetPoint.Z = 40.0f;
+			else if (CurrentV2PathProfile == TEXT("left")) TargetPoint.Y = -805.0f;
+			else TargetPoint.Y = -595.0f;
 		}
 		const float Side = CurrentV2Direction == TEXT("positive_x_to_negative_x") ? 1.0f : -1.0f;
 		OutLocation = FVector(TargetPoint.X + Side * 650.0f, TargetPoint.Y, 100.0f);
+		if (CurrentV2ApproachSector == TEXT("oblique"))
+		{
+			OutLocation.Y += ((CurrentRepetitionIndex & 1) != 0 ? -1.0f : 1.0f) * 260.0f;
+		}
 		if (CurrentV2Outcome == TEXT("floor_bounce_then_hoop"))
 		{
 			TargetPoint = FMath::Lerp(OutLocation, TargetPoint, 0.40f);
@@ -8226,29 +8318,264 @@ bool ACurriculumDataGenerator::ConfigureV2RecipeSpawn(
 	}
 	const FVector ApproximateLaunch = OutLocation + FVector(0.0f, 0.0f, 64.0f);
 	const FVector AimDelta = TargetPoint - ApproximateLaunch;
-	OutYaw = AimDelta.Rotation().Yaw;
-	const bool bHighArc = CurrentV2ArcBand == TEXT("high");
-	const float ThrowSpeed = CurriculumThrowSpeedCmPerSecond;
-	float BallisticPitch = AimDelta.Rotation().Pitch;
-	if (!SolveBallisticPitchDegrees(
-		ApproximateLaunch, TargetPoint, bHighArc, ThrowSpeed, BallisticPitch))
+	float CertifiedYaw = AimDelta.Rotation().Yaw;
+	float CertifiedPitch = AimDelta.Rotation().Pitch;
+	const FString CertificationTarget = MissionOverride == TEXT("wall_corner")
+		|| MissionOverride == TEXT("out_of_bounds") ? CurrentV2Wall : CurrentV2Target;
+	const bool bNoThrowMission = MissionOverride == TEXT("temporal")
+		&& CurrentV2BehaviorFamily == TEXT("preview_cancel");
+	if (!bNoThrowMission && !CertifyV2Aim(
+		OutLocation, TargetPoint, MissionOverride, CertificationTarget,
+		CurrentV2Outcome, CurrentV2ContactSequence, CurrentV2Direction,
+		CurrentV2ApproachSector, CurrentV2ArcBand == TEXT("high"),
+		CertifiedYaw, CertifiedPitch))
 	{
-		BallisticPitch = AimDelta.Rotation().Pitch;
+		bCoverageMissionConfigurationValid = false;
+		return false;
 	}
-	if (CurrentV2ArcBand == TEXT("medium")
-		&& CurrentV2Outcome != TEXT("floor_bounce_then_contact")
-		&& MissionOverride != TEXT("solid_object")
-		&& MissionOverride != TEXT("floor_observe"))
-	{
-		BallisticPitch = FMath::Max(BallisticPitch, 18.0f);
-	}
+	OutYaw = CertifiedYaw;
 	// Observation zero is an eye-level scene-establishing view. The ballistic
 	// direction is reached later by recorded arrow-key actions.
 	OutPitch = FMath::Clamp(AimDelta.Rotation().Pitch, -12.0f, 12.0f);
 	CurrentV2SequenceAimTarget = ApproximateLaunch
-		+ FRotator(BallisticPitch, OutYaw, 0.0f).Vector() * 100000.0f;
+		+ FRotator(CertifiedPitch, CertifiedYaw, 0.0f).Vector() * 100000.0f;
 	bCurrentV2SequenceAimTargetValid = true;
 	return true;
+}
+
+bool ACurriculumDataGenerator::CertifyV2Aim(
+	const FVector& PlayerLocation,
+	const FVector& DesiredTarget,
+	const FString& Family,
+	const FString& Target,
+	const FString& Outcome,
+	const FString& ContactSequence,
+	const FString& Direction,
+	const FString& Approach,
+	const bool bHighArc,
+	float& OutYaw,
+	float& OutPitch) const
+{
+	if (!GetWorld())
+	{
+		return false;
+	}
+
+	auto IntendedTargetSlug = [&]() -> FString
+	{
+		if (Family == TEXT("solid_object"))
+		{
+			return FString::Printf(TEXT("CurriculumObject_%s"),
+				*Target.Left(1).ToUpper().Append(Target.Mid(1)));
+		}
+		if (Family == TEXT("wall_corner"))
+		{
+			return FString::Printf(TEXT("CurriculumWall_%s"),
+				*Target.Left(1).ToUpper().Append(Target.Mid(1)));
+		}
+		if (Family == TEXT("floor_observe")) return TEXT("CurriculumFloor");
+		if (Family == TEXT("ramp")) return TEXT("CurriculumObject_Ramp");
+		if (Family == TEXT("hoop")) return TEXT("CurriculumObject_Hoop");
+		return FString();
+	};
+	const FString RequiredTarget = IntendedTargetSlug();
+	const FVector CameraLocation = PlayerLocation + FVector(0.0f, 0.0f, 64.0f);
+	const FVector AimDelta = DesiredTarget - CameraLocation;
+	float BallisticPitch = AimDelta.Rotation().Pitch;
+	if (!SolveBallisticPitchDegrees(
+		CameraLocation, DesiredTarget, bHighArc,
+		CurriculumThrowSpeedCmPerSecond, BallisticPitch))
+	{
+		return false;
+	}
+	const float BaseYaw = AimDelta.Rotation().Yaw;
+	const float EstablishmentPitch = FMath::Clamp(
+		AimDelta.Rotation().Pitch, -12.0f, 12.0f);
+	const float CameraPitchStep = 75.0f
+		/ static_cast<float>(FMath::Max(1, ObservationRate));
+	static const float SearchOffsets[] = {0.0f, -1.0f, 1.0f, -2.0f, 2.0f, -3.0f, 3.0f};
+	static const FVector2D RobustOffsets[] = {
+		FVector2D(0.0f, 0.0f), FVector2D(-0.10f, 0.0f),
+		FVector2D(0.10f, 0.0f), FVector2D(0.0f, -0.10f),
+		FVector2D(0.0f, 0.10f),
+	};
+	int32 TargetFirstCandidateCount = 0;
+	float BestTargetFirstDeflection = 180.0f;
+	float BestTargetFirstRetention = 0.0f;
+
+	auto Matches = [&](const float Yaw, const float Pitch) -> bool
+	{
+		const FRotator Rotation(Pitch, Yaw, 0.0f);
+		const FVector Forward = Rotation.Vector();
+		const FVector Right = FRotationMatrix(Rotation).GetUnitAxis(EAxis::Y);
+		const FVector Up = FRotationMatrix(Rotation).GetUnitAxis(EAxis::Z);
+		const FVector Spawn = CameraLocation
+			+ Forward * 30.0f + Right * 10.0f - Up * 10.0f;
+		FGrenadeSimState State;
+		FGrenadeSim::InitializeState(
+			State, Spawn, Forward * CurriculumThrowSpeedCmPerSecond, 3600.0f);
+		TArray<FString> Contacts;
+		bool bHoopPass = false;
+		bool bRampCross = false;
+		FString ExitDirection;
+		float FirstDeflection = 180.0f;
+		float FirstRetention = 0.0f;
+		const float StartRampAxis = Approach.StartsWith(TEXT("lateral_"))
+			? PlayerLocation.Y : PlayerLocation.X;
+		for (int32 StepIndex = 0; StepIndex < 1200 && !State.bMotionStopped; ++StepIndex)
+		{
+			const FVector StepStart = State.Position;
+			const FVector IncomingVelocity = State.Velocity;
+			const FGrenadeSimStepResult StepResult = FGrenadeSim::Step(
+				GetWorld(), GrenadeSimConfig, State,
+				FMath::Max(0.001f, GrenadeSimConfig.FixedStepSeconds),
+				Character,
+				[](const FHitResult&) { return static_cast<ABreakableTile*>(nullptr); });
+			if (Family == TEXT("hoop"))
+			{
+				const bool bForward = Direction == TEXT("negative_x_to_positive_x")
+					&& StepStart.X < 700.0f && State.Position.X >= 700.0f;
+				const bool bReverse = Direction == TEXT("positive_x_to_negative_x")
+					&& StepStart.X > 700.0f && State.Position.X <= 700.0f;
+				if (bForward || bReverse)
+				{
+					const float Alpha = (700.0f - StepStart.X)
+						/ (State.Position.X - StepStart.X);
+					const FVector Crossing = FMath::Lerp(StepStart, State.Position, Alpha);
+					bHoopPass = FMath::Abs(Crossing.Y + 700.0f) <= 82.0f
+						&& FMath::Abs(Crossing.Z - 145.0f) <= 82.0f;
+				}
+			}
+			if (Family == TEXT("ramp"))
+			{
+				const float Axis = Approach.StartsWith(TEXT("lateral_"))
+					? State.Position.Y : State.Position.X;
+				bRampCross = bRampCross
+					|| (FMath::Abs(Axis) > 200.0f && StartRampAxis * Axis < 0.0f);
+			}
+			if (StepResult.bHadHit)
+			{
+				FString Slug = TEXT("unknown");
+				if (const AActor* HitActor = StepResult.Hit.GetActor())
+				{
+					for (const FName Tag : HitActor->Tags)
+					{
+						const FString Text = Tag.ToString();
+						if (Text.StartsWith(TEXT("Curriculum"))
+							&& Text != TEXT("CurriculumArena"))
+						{
+							Slug = Text;
+							break;
+						}
+					}
+				}
+				if (Contacts.IsEmpty() || Contacts.Last() != Slug)
+				{
+					Contacts.Add(Slug);
+					if (Contacts.Num() == 1)
+					{
+						const float IncomingSpeed = IncomingVelocity.Size();
+						const float OutgoingSpeed = State.Velocity.Size();
+						FirstRetention = IncomingSpeed > KINDA_SMALL_NUMBER
+							? OutgoingSpeed / IncomingSpeed : 0.0f;
+						FirstDeflection = FMath::RadiansToDegrees(FMath::Acos(
+							FMath::Clamp(FVector::DotProduct(
+								IncomingVelocity.GetSafeNormal(), State.Velocity.GetSafeNormal()),
+								-1.0f, 1.0f)));
+					}
+				}
+			}
+			const FVector& P = State.Position;
+			if (P.X > 1650.0f) ExitDirection = TEXT("north");
+			else if (P.X < -1650.0f) ExitDirection = TEXT("south");
+			else if (P.Y > 1650.0f) ExitDirection = TEXT("east");
+			else if (P.Y < -1650.0f) ExitDirection = TEXT("west");
+			if (!ExitDirection.IsEmpty()) break;
+		}
+
+		if (Family == TEXT("out_of_bounds")) return ExitDirection == Target;
+		if (!ExitDirection.IsEmpty()) return false;
+		const int32 TargetIndex = Contacts.IndexOfByKey(RequiredTarget);
+		if (TargetIndex == 0)
+		{
+			++TargetFirstCandidateCount;
+			BestTargetFirstDeflection = FMath::Min(
+				BestTargetFirstDeflection, FirstDeflection);
+			BestTargetFirstRetention = FMath::Max(
+				BestTargetFirstRetention, FirstRetention);
+		}
+		if (Family == TEXT("trajectory_view") || Family == TEXT("temporal")) return true;
+		if (Family == TEXT("floor_observe")) return TargetIndex >= 0;
+		if (Family == TEXT("solid_object"))
+		{
+			if (TargetIndex != 0) return false;
+			return Outcome != TEXT("glancing_contact")
+				|| (FirstDeflection <= 35.0f && FirstRetention >= 0.40f);
+		}
+		if (Family == TEXT("wall_corner"))
+		{
+			if (TargetIndex != 0) return false;
+			if (ContactSequence == TEXT("adjacent_wall_bank"))
+			{
+				return Algo::AnyOf(Contacts, [&](const FString& Contact)
+				{
+					return Contact.StartsWith(TEXT("CurriculumWall_"))
+						&& Contact != RequiredTarget;
+				});
+			}
+			return !ContactSequence.StartsWith(TEXT("glance_"))
+				|| (FirstDeflection <= 45.0f && FirstRetention >= 0.35f);
+		}
+		if (Family == TEXT("ramp"))
+		{
+			if (Outcome == TEXT("cross_over")) return bRampCross;
+			if (TargetIndex != 0) return false;
+			return Outcome != TEXT("glancing_contact")
+				|| (FirstDeflection <= 45.0f && FirstRetention >= 0.35f);
+		}
+		if (Family == TEXT("hoop"))
+		{
+			return Outcome == TEXT("rim_contact") ? TargetIndex >= 0
+				: bHoopPass && TargetIndex < 0;
+		}
+		return false;
+	};
+
+	for (const float PitchOffset : SearchOffsets)
+	{
+		for (const float YawOffset : SearchOffsets)
+		{
+			const float CandidateYaw = BaseYaw + YawOffset;
+			const float UnsnappedPitch = BallisticPitch + PitchOffset;
+			const float CandidatePitch = EstablishmentPitch
+				+ FMath::RoundToFloat(
+					(UnsnappedPitch - EstablishmentPitch) / CameraPitchStep)
+					* CameraPitchStep;
+			bool bRobust = true;
+			for (const FVector2D& Offset : RobustOffsets)
+			{
+				if (!Matches(CandidateYaw + Offset.X, CandidatePitch + Offset.Y))
+				{
+					bRobust = false;
+					break;
+				}
+			}
+			if (bRobust)
+			{
+				OutYaw = CandidateYaw;
+				OutPitch = CandidatePitch;
+				return true;
+			}
+		}
+	}
+	UE_LOG(LogTemp, Error,
+		TEXT("V2 certification failed: family=%s target=%s outcome=%s sequence=%s "
+			"approach=%s target_first_candidates=%d best_deflection=%.2f "
+			"best_retention=%.3f"),
+		*Family, *Target, *Outcome, *ContactSequence, *Approach,
+		TargetFirstCandidateCount, BestTargetFirstDeflection,
+		BestTargetFirstRetention);
+	return false;
 }
 
 void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
@@ -8294,19 +8621,14 @@ void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
 			: (Step.Target == TEXT("pyramid")
 				? FVector(700.0f, 700.0f, 115.0f)
 				: FVector(-700.0f, -700.0f, 120.0f));
-		if (Step.Outcome == TEXT("direct_upper")) TargetPoint.Z += 70.0f;
-		if (Step.Outcome == TEXT("direct_lower")) TargetPoint.Z -= 55.0f;
+		if (Step.TargetRegion == TEXT("upper")) TargetPoint.Z += 65.0f;
+		if (Step.TargetRegion == TEXT("lower")) TargetPoint.Z -= 50.0f;
 		FVector Tangent(-Sector.Y, Sector.X, 0.0f);
-		if (Step.Outcome == TEXT("near_miss"))
-		{
-			const FVector AimDirection = (TargetPoint
-				- PlayerCamera->GetComponentLocation()).GetSafeNormal2D();
-			Tangent = FVector(-AimDirection.Y, AimDirection.X, 0.0f);
-		}
-		const float GlanceOffset = Step.Target == TEXT("pyramid") ? 45.0f : 85.0f;
-		if (Step.Outcome == TEXT("glance_left")) TargetPoint += Tangent * -GlanceOffset;
-		if (Step.Outcome == TEXT("glance_right")) TargetPoint += Tangent * GlanceOffset;
-		if (Step.Outcome == TEXT("near_miss")) TargetPoint += Tangent * 400.0f;
+		const float EdgeOffset = Step.Target == TEXT("sphere") ? 75.0f
+			: (Step.Target == TEXT("pyramid") ? 60.0f
+				: (FMath::Abs(Sector.X) > 0.5f ? 110.0f : 60.0f));
+		if (Step.TargetRegion == TEXT("left_edge")) TargetPoint -= Tangent * EdgeOffset;
+		if (Step.TargetRegion == TEXT("right_edge")) TargetPoint += Tangent * EdgeOffset;
 		if (Step.Outcome == TEXT("floor_bounce_then_contact"))
 		{
 			TargetPoint = FMath::Lerp(PlayerCamera->GetComponentLocation(), TargetPoint, 0.45f);
@@ -8322,16 +8644,18 @@ void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
 		if (Step.Wall == TEXT("west")) { TargetPoint = FVector(0.0f, -1600.0f, 180.0f); Inward = FVector(0.0f, 1.0f, 0.0f); }
 		TargetPoint.Z = Step.HeightBand == TEXT("high") ? 330.0f
 			: (Step.HeightBand == TEXT("low") ? 60.0f : 180.0f);
-		if (Step.ContactSequence == TEXT("adjacent_corner"))
+		if (Step.ContactSequence == TEXT("adjacent_wall_bank"))
 		{
 			const FVector WallTangent(-Inward.Y, Inward.X, 0.0f);
 			const float Side = Step.ApproachSector == TEXT("glance_left") ? -1.0f : 1.0f;
 			TargetPoint += WallTangent * Side * 1480.0f;
 		}
-		if (Step.ContactSequence == TEXT("floor_then_wall"))
+		if (Step.ContactSequence == TEXT("glance_left")
+			|| Step.ContactSequence == TEXT("glance_right"))
 		{
-			TargetPoint += Inward * 300.0f;
-			TargetPoint.Z = 8.0f;
+			const FVector WallTangent(-Inward.Y, Inward.X, 0.0f);
+			TargetPoint += WallTangent
+				* (Step.ContactSequence == TEXT("glance_left") ? -550.0f : 550.0f);
 		}
 	}
 	else if (Step.Family == TEXT("floor_observe"))
@@ -8348,13 +8672,11 @@ void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
 		if (Step.ApproachSector == TEXT("downhill")) Approach = FVector(1.0f, 0.0f, 0.0f);
 		if (Step.ApproachSector == TEXT("lateral_left_to_right")) Approach = FVector(0.0f, -1.0f, 0.0f);
 		if (Step.ApproachSector == TEXT("lateral_right_to_left")) Approach = FVector(0.0f, 1.0f, 0.0f);
-		if (Step.Outcome == TEXT("near_miss_side"))
+		if (Step.Outcome == TEXT("glancing_contact"))
 		{
-			// Sequence launches share a fixed neighborhood south of the ramp.
-			// Aim east of the complete footprint so the whole ray, not only its
-			// endpoint, remains a genuine side miss.
-			TargetPoint.X = 500.0f;
-			TargetPoint.Y = 0.0f;
+			const FVector Tangent(-Approach.Y, Approach.X, 0.0f);
+			TargetPoint += Tangent
+				* (((CurrentRepetitionIndex + StepIndex) & 1) != 0 ? -115.0f : 115.0f);
 		}
 		if (Step.Outcome == TEXT("cross_over"))
 		{
@@ -8379,15 +8701,16 @@ void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
 	else if (Step.Family == TEXT("hoop"))
 	{
 		TargetPoint = FVector(700.0f, -700.0f, 145.0f);
-		if (Step.PathProfile == TEXT("horizontal_left")) TargetPoint.Y -= 45.0f;
-		if (Step.PathProfile == TEXT("horizontal_right")) TargetPoint.Y += 45.0f;
-		if (Step.PathProfile == TEXT("vertical_above")) TargetPoint.Z += 45.0f;
-		if (Step.PathProfile == TEXT("vertical_below")) TargetPoint.Z -= 45.0f;
-		if (Step.Outcome == TEXT("near_miss")) TargetPoint.Y += 240.0f;
+		if (Step.PathProfile == TEXT("left")) TargetPoint.Y -= 42.0f;
+		if (Step.PathProfile == TEXT("right")) TargetPoint.Y += 42.0f;
+		if (Step.PathProfile == TEXT("upper")) TargetPoint.Z += 42.0f;
+		if (Step.PathProfile == TEXT("lower")) TargetPoint.Z -= 42.0f;
 		if (Step.Outcome == TEXT("rim_contact"))
 		{
-			TargetPoint.Z += Step.PathProfile == TEXT("vertical_above") ? 75.0f
-				: (Step.PathProfile == TEXT("vertical_below") ? -75.0f : 120.0f);
+			if (Step.PathProfile == TEXT("upper")) TargetPoint.Z = 250.0f;
+			else if (Step.PathProfile == TEXT("lower")) TargetPoint.Z = 40.0f;
+			else if (Step.PathProfile == TEXT("left")) TargetPoint.Y = -805.0f;
+			else TargetPoint.Y = -595.0f;
 		}
 		if (Step.Outcome == TEXT("floor_bounce_then_hoop"))
 		{
@@ -8406,20 +8729,24 @@ void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
 	// fully derivable from the stored action stream.
 	const FVector LaunchPoint = PlayerCamera->GetComponentLocation();
 	const FVector Delta = TargetPoint - LaunchPoint;
+	float Yaw = Delta.Rotation().Yaw;
 	float Pitch = Delta.Rotation().Pitch;
-	if (!SolveBallisticPitchDegrees(
-		LaunchPoint, TargetPoint, Step.ArcBand == TEXT("high"),
-		GetV2SequenceThrowSpeedCmPerSecond(
-			Step.Family, Step.Outcome, Step.ArcBand), Pitch))
+	const FString CertificationTarget = Step.Family == TEXT("wall_corner")
+		|| Step.Family == TEXT("out_of_bounds") ? Step.Wall : Step.Target;
+	if (!CertifyV2Aim(
+		Character ? Character->GetActorLocation() : LaunchPoint - FVector(0.0f, 0.0f, 64.0f),
+		TargetPoint, Step.Family, CertificationTarget, Step.Outcome,
+		Step.ContactSequence, Step.Direction, Step.ApproachSector,
+		Step.ArcBand == TEXT("high"), Yaw, Pitch))
 	{
-		Pitch = Delta.Rotation().Pitch;
-	}
-	if (Step.ArcBand == TEXT("medium")
-		&& Step.Outcome != TEXT("floor_bounce_then_contact")
-		&& Step.Family != TEXT("solid_object")
-		&& Step.Family != TEXT("floor_observe"))
-	{
-		Pitch = FMath::Max(Pitch, 18.0f);
+		bCoverageMissionConfigurationValid = false;
+		LastError = FString::Printf(
+			TEXT("Sequence %s step %d (%s/%s) is not robustly reachable from the realized player position."),
+			*CurrentV2SequenceTemplateId,
+			StepIndex,
+			*Step.Family,
+			*Step.CellId);
+		return;
 	}
 	const bool bSameAimSemantics = StepIndex > 0
 		&& CurrentV2SequenceSteps.IsValidIndex(StepIndex - 1)
@@ -8430,7 +8757,7 @@ void ACurriculumDataGenerator::ConfigureV2SequenceStepAim(const int32 StepIndex)
 		? (((CurrentRepetitionIndex + StepIndex) & 1) != 0 ? 3.25f : -3.25f)
 		: 0.0f;
 	CurrentV2SequenceAimTarget = LaunchPoint
-		+ FRotator(Pitch, Delta.Rotation().Yaw + ReaimYawOffset, 0.0f).Vector()
+		+ FRotator(Pitch, Yaw + ReaimYawOffset, 0.0f).Vector()
 			* 100000.0f;
 	bCurrentV2SequenceAimTargetValid = true;
 }
@@ -8857,6 +9184,7 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 		? SequenceStep->ContactSequence : CurrentV2ContactSequence;
 	Grenade.IntendedDirection = SequenceStep
 		? SequenceStep->Direction : CurrentV2Direction;
+	Grenade.IntendedApproach = StepApproachSector;
 	Grenade.AimAcquisitionProfile = SequenceStep
 		? SequenceStep->AimAcquisitionProfile : CurrentV2AimAcquisitionProfile;
 	Grenade.QRetentionProfile = SequenceStep
@@ -8908,6 +9236,7 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 		PredictionIndex < 3600 && !PredictedState.bMotionStopped;
 		++PredictionIndex)
 	{
+		const FVector PredictionStart = PredictedState.Position;
 		const FGrenadeSimStepResult PredictionResult = FGrenadeSim::Step(
 			GetWorld(), Grenade.SimConfig, PredictedState, PredictionStep,
 			Character,
@@ -8916,6 +9245,50 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 			&& Grenade.PredictedFirstContactStep == INDEX_NONE)
 		{
 			Grenade.PredictedFirstContactStep = PredictionIndex + 1;
+		}
+		if (PredictionResult.bHadHit)
+		{
+			FString ContactSlug = TEXT("unknown");
+			if (const AActor* HitActor = PredictionResult.Hit.GetActor())
+			{
+				for (const FName Tag : HitActor->Tags)
+				{
+					const FString TagText = Tag.ToString();
+					if (TagText.StartsWith(TEXT("Curriculum"))
+						&& TagText != TEXT("CurriculumArena"))
+					{
+						ContactSlug = TagText;
+						break;
+					}
+				}
+			}
+			if (Grenade.PredictedContactOrder.IsEmpty()
+				|| Grenade.PredictedContactOrder.Last() != ContactSlug)
+			{
+				Grenade.PredictedContactOrder.Add(ContactSlug);
+			}
+		}
+		if (StepFamily == TEXT("hoop")
+			&& Grenade.PredictedHoopPassStep == INDEX_NONE)
+		{
+			const bool bForward = Grenade.IntendedDirection
+				== TEXT("negative_x_to_positive_x")
+				&& PredictionStart.X < 700.0f && PredictedState.Position.X >= 700.0f;
+			const bool bReverse = Grenade.IntendedDirection
+				== TEXT("positive_x_to_negative_x")
+				&& PredictionStart.X > 700.0f && PredictedState.Position.X <= 700.0f;
+			if (bForward || bReverse)
+			{
+				const float Alpha = (700.0f - PredictionStart.X)
+					/ (PredictedState.Position.X - PredictionStart.X);
+				const FVector Crossing = FMath::Lerp(
+					PredictionStart, PredictedState.Position, Alpha);
+				if (FMath::Abs(Crossing.Y + 700.0f) < 90.0f
+					&& FMath::Abs(Crossing.Z - 145.0f) < 90.0f)
+				{
+					Grenade.PredictedHoopPassStep = PredictionIndex + 1;
+				}
+			}
 		}
 		const FVector& P = PredictedState.Position;
 		if (Grenade.PredictedExitDirection.IsEmpty())
@@ -9001,6 +9374,7 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 			for (int32 Substep = 0; Substep < SubstepCount; ++Substep)
 			{
 				const FVector StepStart = Grenade.State.Position;
+				const FVector StepStartVelocity = Grenade.State.Velocity;
 				const FGrenadeSimStepResult StepResult = FGrenadeSim::Step(
 					GetWorld(),
 					Grenade.SimConfig,
@@ -9063,6 +9437,16 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 						Grenade.RealizedTarget = ContactSlug;
 						Grenade.FirstContactTraveledDistanceCm =
 							Grenade.State.TraveledDistanceCm;
+						const float IncomingSpeed = StepStartVelocity.Size();
+						const float OutgoingSpeed = Grenade.State.Velocity.Size();
+						Grenade.FirstContactSpeedRetention = IncomingSpeed > KINDA_SMALL_NUMBER
+							? OutgoingSpeed / IncomingSpeed : 0.0f;
+						Grenade.FirstContactDeflectionDegrees =
+							FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(
+								FVector::DotProduct(
+									StepStartVelocity.GetSafeNormal(),
+									Grenade.State.Velocity.GetSafeNormal()),
+								-1.0f, 1.0f)));
 					}
 				}
 				if (Grenade.State.bMotionStopped)
@@ -9255,14 +9639,34 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 			{
 				bPreviewParity = Grenade.FirstContactFrame != INDEX_NONE
 					&& FMath::Abs(
-						Grenade.FirstContactFrame - PredictedContactFrame) <= 2;
+						Grenade.FirstContactFrame - PredictedContactFrame) <= 2
+					&& !Grenade.PredictedContactOrder.IsEmpty()
+					&& !Grenade.ContactOrder.IsEmpty()
+					&& Grenade.PredictedContactOrder[0] == Grenade.ContactOrder[0];
 			}
+		}
+		if (Grenade.PredictedHoopPassStep != INDEX_NONE)
+		{
+			const int32 PredictedPassFrame = Grenade.ThrowSourceFrame
+				+ FMath::RoundToInt(Grenade.PredictedHoopPassStep
+					* Grenade.SimConfig.FixedStepSeconds * ObservationRate);
+			if (PredictedPassFrame + 2 <= FrameIndex)
+			{
+				bPreviewParity = bPreviewParity
+					&& Grenade.HoopPassFrame != INDEX_NONE
+					&& FMath::Abs(Grenade.HoopPassFrame - PredictedPassFrame) <= 2;
+			}
+		}
+		else if (Grenade.HoopPassFrame != INDEX_NONE)
+		{
+			bPreviewParity = false;
 		}
 		if (Grenade.State.bMotionStopped)
 		{
 			bPreviewParity = bPreviewParity
 				&& Grenade.PredictedRestStep != INDEX_NONE
 				&& Grenade.PredictedBounceCount == Grenade.State.BounceCount
+				&& Grenade.PredictedContactOrder == Grenade.ContactOrder
 				&& FVector::Dist(
 					Grenade.PredictedRestPosition,
 					Grenade.State.Position) <= 5.0f;
@@ -9274,7 +9678,7 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 		}
 		const bool bGeometricCrossingPass = Grenade.IntendedFamily == TEXT("ramp")
 			&& Grenade.IntendedOutcome == TEXT("cross_over")
-			&& (CurrentV2ApproachSector.StartsWith(TEXT("lateral_"))
+			&& (Grenade.IntendedApproach.StartsWith(TEXT("lateral_"))
 				? (FMath::Abs(Grenade.State.Position.Y) > 200.0f
 					&& Grenade.ThrowPlayerPosition.Y * Grenade.State.Position.Y < 0.0f)
 				: Grenade.ThrowPlayerPosition.X * Grenade.State.Position.X < 0.0f);
@@ -9292,6 +9696,8 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 			TEXT("\"bounce_count\":%d,\"rest_frame\":%s,\"post_rest_tail_steps\":%d,")
 			TEXT("\"hoop_pass_frame\":%s,\"hoop_crossing_y\":%s,\"hoop_crossing_z\":%s,")
 			TEXT("\"post_contact_travel_cm\":%s,")
+			TEXT("\"first_contact_deflection_degrees\":%s,")
+			TEXT("\"first_contact_speed_retention\":%s,")
 			TEXT("\"arena_exit_frame\":%s,\"arena_exit_direction\":%s,")
 			TEXT("\"intended_exit_direction\":%s,")
 			TEXT("\"visible_observation_count\":%d,")
@@ -9341,6 +9747,8 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 			*JsonNumber(Grenade.HoopCrossingZ),
 			*JsonNumber(Grenade.State.TraveledDistanceCm
 				- Grenade.FirstContactTraveledDistanceCm),
+			*JsonNumber(Grenade.FirstContactDeflectionDegrees),
+			*JsonNumber(Grenade.FirstContactSpeedRetention),
 			Grenade.ArenaExitFrame == INDEX_NONE
 				? TEXT("null") : *FString::FromInt(Grenade.ArenaExitFrame),
 			Grenade.ArenaExitDirection.IsEmpty()

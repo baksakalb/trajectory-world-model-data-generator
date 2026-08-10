@@ -34,6 +34,9 @@ class CanonicalV2RegressionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = GENERATOR.read_text(encoding="utf-8")
 
+    def test_runtime_metadata_matches_controller_contract(self) -> None:
+        self.assertIn(CONTRACT_VERSION, self.source)
+
     def test_named_human_audit_cases_remain_frozen(self) -> None:
         self.assertEqual(len(set(FAILED_SEEDS.values())), len(FAILED_SEEDS))
         self.assertEqual(POSITIVE_CONTROL_SEEDS["post_throw_strafe_right"], 920015)

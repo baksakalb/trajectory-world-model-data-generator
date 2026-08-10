@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
 
-CATALOG_VERSION = "trajectory-throw-v2-persistent-semi-markov-catalog-2"
-SEQUENCE_VERSION = "trajectory-throw-v2-canonical-sequences-1"
+CATALOG_VERSION = "trajectory-throw-v2-certified-positive-events-3"
+SEQUENCE_VERSION = "trajectory-throw-v2-certified-sequences-2"
 HOLD_BANDS = ("short", "medium", "long", "very_long")
 SECTORS = tuple(f"S{index}" for index in range(8))
 DISTANCE_BANDS = ("near", "medium", "far")
@@ -33,13 +33,13 @@ SEMI_MARKOV_FAMILIES = (
 )
 
 MISSION_FAMILY_COUNTS = {
-    "trajectory_view": 96,
-    "solid_object": 144,
-    "wall_corner": 64,
-    "floor_observe": 48,
-    "ramp": 48,
-    "hoop": 40,
-    "temporal": 16,
+    "trajectory_view": 64,
+    "solid_object": 60,
+    "wall_corner": 32,
+    "floor_observe": 24,
+    "ramp": 24,
+    "hoop": 36,
+    "temporal": 8,
     "out_of_bounds": 16,
 }
 BASE_FAMILY_COUNTS = {
@@ -130,6 +130,7 @@ SEQUENCE_TEMPLATES = (
               aims=("static_hold", "prelook_q_off"),
               movement=("relocation_before_next_throw",),
               camera=("target_region", "ordinary_survey"),
+              families=("floor_observe", "floor_observe"),
               reaim=True, relocation=True),
     _sequence(5, "mixed_q_retention", 2,
               q=("immediate_release", "short_retain"), reaim=True),
@@ -142,7 +143,7 @@ SEQUENCE_TEMPLATES = (
               aims=("static_hold", "yaw_adjust", "pitch_adjust"),
               movement=("forward", "strafe_right", "backward"),
               camera=("landing_region", "target_region", "ordinary_survey"),
-              families=("solid_object", "wall_corner", "floor_observe"),
+              families=("floor_observe", "floor_observe", "floor_observe"),
               reaim=True, relocation=True),
 )
 
@@ -163,19 +164,19 @@ def semi_markov_cells() -> Iterator[dict[str, Any]]:
 def trajectory_view_cells() -> Iterator[dict[str, Any]]:
     targets = (
         "rectangle", "pyramid", "sphere", "ramp", "hoop", "floor",
-        "north_boundary", "south_boundary", "east_boundary", "west_boundary",
         "arena_center", "open_corridor",
     )
     modes = ("static_hold", "yaw_adjust", "pitch_adjust", "cancel_reacquire")
     scenario = 0
     for target_index, target in enumerate(targets):
-        for sector_index in range(2):
+        sectors = ("S0", "S4")
+        for sector_index, sector in enumerate(sectors):
             for mode_index, mode in enumerate(modes):
                 yield {
                     "source": "mission", "family": "trajectory_view",
-                    "cell_id": f"TV-{target}-S{sector_index * 4}-{mode}",
+                    "cell_id": f"TV-{target}-{sector}-{mode}",
                     "scenario_index": scenario, "target": target,
-                    "approach_sector": f"S{sector_index * 4}",
+                    "approach_sector": sector,
                     "interaction_mode": mode,
                     "distance_band": DISTANCE_BANDS[(target_index + mode_index) % 3],
                     "arc_band": ARC_BANDS[(target_index + sector_index + mode_index) % 3],
@@ -185,41 +186,45 @@ def trajectory_view_cells() -> Iterator[dict[str, Any]]:
 
 def solid_object_cells() -> Iterator[dict[str, Any]]:
     targets = ("rectangle", "pyramid", "sphere")
-    regions = ("center", "upper", "lower")
-    intents = ("direct", "glance", "near_miss")
+    regions = ("center", "upper", "lower", "left_edge", "right_edge")
+    # Four well-separated launch sectors plus bounded per-repetition mutations
+    # cover all sides without pretending eight exact rays are eight semantics.
+    sectors = ("S0", "S2", "S4", "S6")
     scenario = 0
-    for target_index, target in enumerate(targets):
-        for sector_index, sector in enumerate(SECTORS):
-            for region_index, region in enumerate(regions):
-                for intent_index in range(2):
-                    intent = intents[(sector_index + region_index + intent_index) % 3]
-                    yield {
-                        "source": "mission", "family": "solid_object",
-                        "cell_id": f"SO-{target}-{sector}-{region}-{intent}-v{intent_index}",
-                        "scenario_index": scenario, "target": target,
-                        "approach_sector": sector, "target_region": region,
-                        "interaction_mode": intent,
-                        "distance_band": DISTANCE_BANDS[(sector_index + region_index + intent_index) % 3],
-                        "arc_band": ARC_BANDS[(2 * sector_index + region_index + intent_index) % 3],
-                    }
-                    scenario += 1
+    for target in targets:
+        for sector in sectors:
+            for region in regions:
+                yield {
+                    "source": "mission", "family": "solid_object",
+                    "cell_id": f"SO-{target}-{sector}-{region}-contact",
+                    "scenario_index": scenario, "target": target,
+                    "approach_sector": sector, "target_region": region,
+                    "interaction_mode": "contact",
+                    "distance_band": DISTANCE_BANDS[scenario % 3],
+                    # High lob arcs are too pitch-sensitive for robust broad
+                    # object-region certification.  They remain covered by
+                    # trajectory-view and floor motion; contacts use low/medium.
+                    "arc_band": ("low", "medium")[(scenario // 3) % 2],
+                }
+                scenario += 1
 
 
 def wall_corner_cells() -> Iterator[dict[str, Any]]:
     walls = ("north", "south", "east", "west")
-    approaches = ("direct", "glance_left", "glance_right", "near_parallel")
     heights = ("low", "high")
-    intents = ("wall_contact", "corner_or_miss")
+    intents = (
+        "direct_contact", "glance_left", "glance_right",
+        "adjacent_wall_bank",
+    )
     scenario = 0
     for wall in walls:
-        for approach in approaches:
-            for height in heights:
-                for intent in intents:
+        for height in heights:
+            for intent in intents:
                     yield {
                         "source": "mission", "family": "wall_corner",
-                        "cell_id": f"WA-{wall}-{approach}-{height}-{intent}",
+                        "cell_id": f"WA-{wall}-{height}-{intent}",
                         "scenario_index": scenario, "wall": wall,
-                        "approach_profile": approach, "height_band": height,
+                        "approach_profile": intent, "height_band": height,
                         "contact_sequence": intent,
                     }
                     scenario += 1
@@ -227,7 +232,7 @@ def wall_corner_cells() -> Iterator[dict[str, Any]]:
 
 def floor_observe_cells() -> Iterator[dict[str, Any]]:
     scenario = 0
-    for sector_index, sector in enumerate(SECTORS):
+    for sector_index, sector in enumerate(("S0", "S2", "S4", "S6")):
         for distance_index, distance in enumerate(DISTANCE_BANDS):
             for arc_index, arc in enumerate(("low", "high")):
                 yield {
@@ -246,7 +251,7 @@ def ramp_cells() -> Iterator[dict[str, Any]]:
         "lateral_right_to_left",
     )
     regions = ("lower", "middle", "upper")
-    intents = ("surface_contact", "glancing_contact", "cross_over", "side_miss")
+    intents = ("surface_contact", "cross_over")
     scenario = 0
     for approach in approaches:
         for region in regions:
@@ -262,17 +267,28 @@ def ramp_cells() -> Iterator[dict[str, Any]]:
 
 def hoop_cells() -> Iterator[dict[str, Any]]:
     directions = ("negative_x_to_positive_x", "positive_x_to_negative_x")
-    paths = ("center", "horizontal_left", "horizontal_right", "vertical", "oblique")
-    intents = ("clean_pass", "rim_contact", "near_miss", "open_path")
+    approaches = ("direct", "oblique")
+    pass_regions = ("center", "left", "right", "upper", "lower")
+    rim_regions = ("upper", "lower", "left", "right")
     scenario = 0
     for direction in directions:
-        for path in paths:
-            for intent in intents:
+        for approach in approaches:
+            for path in pass_regions:
                 yield {
                     "source": "mission", "family": "hoop",
-                    "cell_id": f"HO-{direction}-{path}-{intent}",
+                    "cell_id": f"HO-{direction}-{approach}-{path}-clean_pass",
                     "scenario_index": scenario, "direction": direction,
-                    "path_profile": path, "outcome": intent,
+                    "approach_profile": approach,
+                    "path_profile": path, "outcome": "clean_pass",
+                }
+                scenario += 1
+            for region in rim_regions:
+                yield {
+                    "source": "mission", "family": "hoop",
+                    "cell_id": f"HO-{direction}-{approach}-{region}-rim_contact",
+                    "scenario_index": scenario, "direction": direction,
+                    "approach_profile": approach,
+                    "path_profile": region, "outcome": "rim_contact",
                 }
                 scenario += 1
 
@@ -285,14 +301,12 @@ def temporal_cells() -> Iterator[dict[str, Any]]:
     )
     scenario = 0
     for behavior in behaviors:
-        for variation in range(2):
-            yield {
-                "source": "mission", "family": "temporal",
-                "cell_id": f"TP-{behavior}-v{variation}",
-                "scenario_index": scenario, "behavior_family": behavior,
-                "variation": variation,
-            }
-            scenario += 1
+        yield {
+            "source": "mission", "family": "temporal",
+            "cell_id": f"TP-{behavior}",
+            "scenario_index": scenario, "behavior_family": behavior,
+        }
+        scenario += 1
 
 
 def out_of_bounds_cells() -> Iterator[dict[str, Any]]:
@@ -357,28 +371,180 @@ def validate_catalog(cells: list[dict[str, Any]]) -> None:
 
 
 def audit_slots() -> list[dict[str, Any]]:
-    """Small deterministic structural audit; named failures are added separately."""
+    """Return one human-review slot per meaningfully distinct positive event.
+
+    Direction, distance, and bounded geometric mutations are distributed across
+    the slots.  Misses are natural semi-Markov observations and never receive a
+    prescribed label or an audit quota.
+    """
     cells = base_cells()
-    grouped = {
+    by_family = {
         family: [cell for cell in cells if cell["family"] == family]
         for family in BASE_FAMILY_COUNTS
     }
-    requested = {
-        "semi_markov": 12, "trajectory_view": 12,
-        "solid_object": 12, "wall_corner": 8, "floor_observe": 8,
-        "ramp": 8, "hoop": 8, "temporal": 8, "out_of_bounds": 8,
-    }
+
+    def choose(family: str, **criteria: Any) -> dict[str, Any]:
+        matches = [
+            cell for cell in by_family[family]
+            if all(cell.get(key) == value for key, value in criteria.items())
+        ]
+        if not matches:
+            raise ValueError(f"no {family} audit cell matches {criteria}")
+        return matches[0]
+
     slots: list[dict[str, Any]] = []
-    for family, count in requested.items():
-        values = grouped[family]
-        for ordinal in range(count):
-            index = 0 if count == 1 else round(ordinal * (len(values) - 1) / (count - 1))
-            cell = values[index]
-            slots.append({
-                "slot_id": f"AUD-{family.upper()}-{ordinal:02d}",
-                "family": family, "title": cell["cell_id"],
-                "cell_id": cell["cell_id"],
-            })
+
+    def add(family: str, cell: dict[str, Any], purpose: str) -> None:
+        ordinal = sum(slot["family"] == family for slot in slots)
+        slots.append({
+            "slot_id": f"AUD-{family.upper()}-{ordinal:02d}",
+            "family": family,
+            "title": purpose,
+            "audit_purpose": purpose,
+            "cell_id": cell["cell_id"],
+        })
+
+    # 12 persistent-play openings. The two-to-three-minute controller after
+    # the opening is shared, so duration bands are rotated rather than crossed.
+    for index, behavior in enumerate(SEMI_MARKOV_FAMILIES):
+        band = HOLD_BANDS[index % len(HOLD_BANDS)]
+        add("semi_markov", choose(
+            "semi_markov", behavior_family=behavior, hold_band=band,
+        ), f"Persistent play opening: {behavior}; {band} episode")
+
+    # Every target context and every preview gesture is represented without a
+    # Cartesian target x gesture review explosion.
+    trajectory_targets = (
+        "rectangle", "pyramid", "sphere", "ramp", "hoop", "floor",
+        "arena_center", "open_corridor",
+    )
+    trajectory_modes = (
+        "static_hold", "yaw_adjust", "pitch_adjust", "cancel_reacquire",
+    )
+    for index, target in enumerate(trajectory_targets):
+        mode = trajectory_modes[index % len(trajectory_modes)]
+        sector = ("S0", "S4")[index % 2]
+        add("trajectory_view", choose(
+            "trajectory_view", target=target, interaction_mode=mode,
+            approach_sector=sector,
+        ), f"Trajectory view of {target}: {mode}")
+    for index, mode in enumerate(trajectory_modes):
+        target = ("rectangle", "ramp", "hoop", "open_corridor")[index]
+        sector = ("S4", "S0")[index % 2]
+        add("trajectory_view", choose(
+            "trajectory_view", target=target, interaction_mode=mode,
+            approach_sector=sector,
+        ), f"Trajectory gesture control: {mode}; {target}")
+
+    # Audit each object x broad contact region.  Off-center contacts create
+    # varied bounce angles without inventing a fragile "glance" class.
+    objects = ("rectangle", "pyramid", "sphere")
+    regions = ("center", "upper", "lower", "left_edge", "right_edge")
+    for target in objects:
+        for region in regions:
+            add("solid_object", choose(
+                "solid_object", target=target, interaction_mode="contact",
+                target_region=region,
+            ), f"{target} contact at broad {region} region")
+
+    wall_intents = (
+        "direct_contact", "glance_left", "glance_right",
+        "adjacent_wall_bank",
+    )
+    walls = ("north", "south", "east", "west")
+    for intent_index, intent in enumerate(wall_intents):
+        for height_index, height in enumerate(("low", "high")):
+            wall = walls[(intent_index + 2 * height_index) % len(walls)]
+            add("wall_corner", choose(
+                "wall_corner", wall=wall,
+                height_band=height, contact_sequence=intent,
+            ), f"Wall trajectory: {intent}; {wall}; {height}")
+
+    for distance_index, distance in enumerate(DISTANCE_BANDS):
+        for arc_index, arc in enumerate(("low", "high")):
+            sector = ("S0", "S2", "S4", "S6")[(distance_index + arc_index) % 4]
+            add("floor_observe", choose(
+                "floor_observe", azimuth_sector=sector,
+                distance_band=distance, arc_band=arc,
+            ), f"Natural floor motion: {distance} distance, {arc} arc")
+
+    ramp_approaches = (
+        "uphill", "downhill", "lateral_left_to_right",
+        "lateral_right_to_left",
+    )
+    ramp_intents = ("surface_contact", "cross_over")
+    ramp_regions = ("lower", "middle", "upper")
+    for approach_index, approach in enumerate(ramp_approaches):
+        for intent_index, intent in enumerate(ramp_intents):
+            region = ramp_regions[(approach_index + intent_index) % len(ramp_regions)]
+            add("ramp", choose(
+                "ramp", approach=approach, ramp_region=region,
+                interaction_mode=intent,
+            ), f"Ramp {approach}: {intent}; {region} region")
+
+    hoop_pass_regions = ("center", "left", "right", "upper", "lower")
+    hoop_rim_regions = ("upper", "lower", "left", "right")
+    hoop_approaches = ("direct", "oblique")
+    hoop_directions = ("negative_x_to_positive_x", "positive_x_to_negative_x")
+    for approach_index, approach in enumerate(hoop_approaches):
+        for path_index, path in enumerate(hoop_pass_regions):
+            direction = hoop_directions[(approach_index + path_index) % 2]
+            add("hoop", choose(
+                "hoop", direction=direction, approach_profile=approach,
+                path_profile=path, outcome="clean_pass",
+            ), f"Hoop clean pass: {path}; {approach}; {direction}")
+        for region_index, region in enumerate(hoop_rim_regions):
+            direction = hoop_directions[(approach_index + region_index) % 2]
+            add("hoop", choose(
+                "hoop", direction=direction, approach_profile=approach,
+                path_profile=region, outcome="rim_contact",
+            ), f"Hoop rim contact: {region}; {approach}; {direction}")
+
+    temporal_behaviors = (
+        "preview_cancel", "preview_adjust", "throw_release", "throw_retain",
+        "throw_move", "throw_relocate_reacquire", "cooldown_recovery",
+        "persistent_revisit",
+    )
+    for index, behavior in enumerate(temporal_behaviors):
+        add("temporal", choose(
+            "temporal", behavior_family=behavior,
+        ), f"Temporal behavior: {behavior}")
+
+    oob_profiles = (
+        ("north", "direct", "middle"),
+        ("south", "oblique", "high"),
+        ("east", "direct", "high"),
+        ("west", "oblique", "middle"),
+    )
+    for boundary, angle, height in oob_profiles:
+        add("out_of_bounds", choose(
+            "out_of_bounds", boundary=boundary,
+            approach_profile=angle, height_band=height,
+        ), f"Deliberate {boundary} exit: {angle}, {height}")
+
+    # Connected sequences are semantic audit slots in their own right. Their
+    # first base cell is recorded so the qualification planner can materialize
+    # the executable sequence deterministically.
+    cell_lookup = {cell["cell_id"]: cell for cell in cells}
+    family_pattern_first = {
+        family: next(cell for cell in cells if cell["family"] == family)
+        for family in MISSION_FAMILY_COUNTS
+    }
+    for template in SEQUENCE_TEMPLATES:
+        first = family_pattern_first[template.base_family_pattern[0]]
+        slots.append({
+            "slot_id": f"AUD-SEQUENCE-{template.template_id}",
+            "family": "sequence",
+            "title": f"Connected sequence: {template.slug}",
+            "audit_purpose": f"Connected sequence: {template.slug}",
+            "cell_id": cell_lookup[first["cell_id"]]["cell_id"],
+            "sequence_template_id": template.template_id,
+        })
+
+    if len(slots) != 99:
+        raise ValueError(f"positive-event audit must contain exactly 99 slots, got {len(slots)}")
+    if len({slot["cell_id"] for slot in slots if "sequence_template_id" not in slot}) != 91:
+        raise ValueError("positive-event audit base-cell selections must be unique")
     return slots
 
 

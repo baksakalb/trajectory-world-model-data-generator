@@ -65,9 +65,9 @@ through curriculum filters over that common latent representation.
 | Environment | one fixed, deterministic arena layout for an entire episode |
 | Completed production source | automated Movement V1, 500,000 frames; human capture remains deferred |
 | V2 production size | user-selected credited frame target X above its calibrated feasibility floor; one million frames is the current planning reference, not a hard-coded requirement |
-| V2 production mixture | 55% coherent semi-Markov random play and 45% prescribed trajectory/throw missions, balanced by credited observations rather than episode count |
-| Evaluation reserve | assigned before collection through disjoint prescribed recipe identities |
-| Automated behavior | frame-balanced semi-Markov play plus object, contact, ramp, and hoop missions |
+| V2 production mixture | 70% persistent human-biased semi-Markov play and 30% certified prescribed trajectory/throw missions, balanced by credited observations rather than episode count |
+| Evaluation identities | disjoint deterministic train/evaluation recipe identities; no semantic-failure reserve or seed mining |
+| Automated behavior | persistent semi-Markov play plus certified positive-event trajectory, object, wall, floor, ramp, hoop, temporal, and deliberate-OOB missions |
 | Replay | exact replay keys, explicit categorical scenario cells, stratified continuous values, and stateless jitter |
 | Production scheduling | one central controller creates a global budget-driven recipe plan before worker assignment; workers do not select production missions independently |
 | Budget semantics | X counts only semantically credited training observations; production plans require complete discrete coverage and reject infeasible budgets, while an explicit below-floor diagnostic plan is labeled diagnostic-only and never claims distribution or coverage completeness |
@@ -83,7 +83,7 @@ through curriculum filters over that common latent representation.
 | Mission ending | success is latched, followed by 0.75-1.50 seconds of coherent, varied continuation |
 | Ordinary collision | useful contact remains, but continuous contact is bounded and followed by a world-space escape |
 | Balancing | successful pre-success observation frames, not episode counts |
-| Failed missions | a valid semantic failure resolves its recipe, remains diagnostic, receives no intended coverage credit, and never causes an infinite retry loop |
+| Prescribed mission admission | every positive-event mission is certified with canonical physics before capture; an uncertifiable recipe aborts collection and is never replaced by seed mining or failed fallback |
 | Review video | derived only from authoritative stored observations; MP4 is never the training source |
 | Trajectory supervision | RGB frames are the sole visual target; no trajectory mask, polyline, simulator-point series, launch velocity, or engineered trajectory target is stored |
 | Capture implementation | retain synchronous GPU readback for the first dataset; asynchronous readback is not a production gate |
@@ -241,8 +241,8 @@ trajectory-and-throw V2 collection at 384x384 RGB and 20 Hz. Its current plannin
 reference is one million credited observations, but the V2 controller must
 retain V1's budget semantics: the user supplies X, the planner rejects a
 production X below the calibrated complete-coverage floor, and larger values
-extend the same canonical recipe schedule and preserve 55% random play / 45%
-prescribed missions.
+extend the same canonical recipe schedule and preserve 70% persistent
+semi-Markov play / 30% certified prescribed missions.
 
 Development, focused capture, visual review, toy coverage, replay validation,
 and duration calibration happen on the Windows development computer. Only after
@@ -2170,8 +2170,8 @@ continuation. A focused 384x384 contract-3 run at
 direct rectangle mission. A later 137-video audit was generated and structurally
 validated, but human review rejected several camera-framing, action-duration,
 post-throw movement, floor-physics, and semantic-visibility cases. The detailed
-seed-level findings and next implementation contract are recorded in
-`V2_AUDIT_FINDINGS_AND_NEXT_WORK.txt`.
+seed-level findings and superseding implementation contract are consolidated in
+the active checkpoint below.
 
 Measured from the authoritative contract-2 shards, the 1,112 ordinary missions
 lasted 6.92 seconds on average (6.80 median, 4.45 minimum, 9.00 maximum). That
@@ -2187,8 +2187,9 @@ python Scripts/v2_dataset_controller.py plan Artifacts/V2ProductionPlan `
 ```
 
 The planner verifies the qualified calibration, complete mandatory coverage,
-exact frozen shares, stable prefix, evaluation separation, bounded reserves,
-and assignment boundaries before writing an immutable plan. The old
+exact frozen shares, stable prefix, evaluation separation, and assignment
+boundaries before writing an immutable plan. Certified V2 has no semantic
+reserve or failed-seed replacement path. The old
 `Artifacts/V2ProductionMinimumQA` proof at X=402,200 belongs to contract 2 and
 must not be executed or treated as a contract-3 feasibility result. A new proof
 can be created only after complete contract-3 calibration.
@@ -2298,8 +2299,8 @@ Automatic reports must include:
 - shard sizes and checksums
 - replay-test results
 
-V2 development and rollout (items 1-8 are complete; items 9-10 wait only for
-the user-selected final X):
+Historical contract-2 development checklist (superseded; retained only as an
+audit trail):
 
 1. Preserve the completed 500,000-frame Movement V1 collection unchanged.
 2. Implement combined V2 aim lock, Q-before-E gating, always-green trajectory,
@@ -2376,43 +2377,103 @@ or encoder.
 
 ### Active implementation checkpoint
 
-Movement V1 remains unchanged. Contract 3 fixed the dead-tail problem and a
-137-video 384x384 audit at `Artifacts/V2Contract3FullVisualAudit384b` passed the
-current structural validator (137/137 episodes, 27,107 transitions, 27,244
-observations). Human review then found defects that structural checks missed:
-missing prescribed post-throw displacement, sub-human action dwell, sky/ground-
-only openings, failure to keep required outcomes visible, artificial direct-settle
-damping, an out-of-bounds grenade receiving ordinary mission credit, and an unclear
-lateral cross-over. Therefore V2 remains not production-ready. The authoritative
-handoff is `V2_AUDIT_FINDINGS_AND_NEXT_WORK.txt`.
+Movement V1 is preserved. V1 and V2 share one canonical ten-bit action layout:
+W, A, S, D, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Q, E occupy bits 0-9.
+Both stages use the same transition columns and derived forward/right/pitch/yaw
+axes. Their dataset version strings intentionally differ: current Movement V1
+uses `movement_v1-production-1`; combined V2 uses
+`trajectory_throw_v2-production-11`. V2 adds nullable grenade, preview,
+cooldown, contact, sequence, and semantic evidence to the common typed
+WebP/Parquet representation. While Q is held in V2, requested W/A/S/D bits may
+remain present but realized planar axes are zero because aim lock suppresses
+movement. This is V2 game semantics, not a different key mapping.
 
-The separate long-play source has now been removed. Long duration is a property
-of the persistent semi-Markov source rather than a second controller. The active
-V2 source allocation is 70% persistent semi-Markov play and 30% prescribed
-missions. Semi-Markov episodes last 120, 140, 160, or 180 seconds, keep all
-grenades until episode reset, and use one weighted, state-aware action policy.
-It favors ordinary movement, combined movement/camera control, eye-level views,
-the arena center, and under-visited 3x3 map and eight-way viewing sectors while
-retaining explicit probabilities for wall-parallel travel, wall approaches,
-opposing inputs, higher-order stress masks, and the all-buttons mask. Q/E still
-obey the canonical preview, rising-edge, and cooldown gates.
+The 137-video contract-3 audit passed its old structural validator but failed
+human review. Confirmed defects included missing prescribed displacement,
+sub-human action dwell, sky/ground-only openings, required impacts leaving the
+frame, artificial direct-settle damping, preview/realized evidence gaps,
+ordinary missions receiving credit after arena exit, and unclear lateral ramp
+cross-over. Structural validation is never equivalent to human approval.
 
-Each accepted semi-Markov throw independently samples a post-throw attention
-mode: ignore, initial-flight watch, first-contact watch, longer observation, or
-delayed look-back. No impact, bounce, roll, exit, or rest is required to remain
-visible in persistent play. Required visibility remains a mission-only rule.
-The active catalog is version
-`trajectory-throw-v2-persistent-semi-markov-catalog-2` with 520 base cells and
-eight connected-sequence templates. The active plan/runtime versions are
-`trajectory-throw-v2-persistent-semi-markov-local-2` and
-`v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1`.
+The corrected design uses 70% persistent, human-biased semi-Markov frames and
+30% prescribed missions. Long play is not a separate source: persistent
+semi-Markov episodes last 120, 140, 160, or 180 seconds, keep all grenades until
+episode reset, and use weighted state-aware actions. They favor ordinary
+movement, combined movement/camera control, eye-level and arena-center views,
+and under-visited spatial/view sectors while retaining wall hugging, opposing
+inputs, unusual combinations, and the all-buttons mask. Each throw may be
+ignored, watched initially, watched through first contact, observed longer, or
+revisited later. Natural misses and arena exits are legal and unlabeled here.
 
-No remote or cloud generation is required by this workflow. Before any final X
-can be selected, the seed-level human-audit defects must be fixed and accepted in
-a focused review. Then the changed catalog must rerun complete qualification,
-derive new duration calibration and feasibility floors, rebuild the realized
-distribution report, and regenerate the complete visual audit. The former
-402,200 minimum is not valid for the changed episode durations or catalog.
+Prescribed missions now contain only useful positive or explicit events that
+semi-Markov play is unlikely to balance. Near miss, fine miss, side miss,
+open-path, and ambiguous corner-or-miss labels have been removed. The active
+catalog is `trajectory-throw-v2-certified-positive-events-3`: 312 base cells
+and eight bounded connected-action templates. The 312 cells comprise 48
+semi-Markov, 64 trajectory-view, 60 solid-object, 32 wall, 24 floor, 24 ramp,
+36 hoop, eight temporal, and 16 deliberate out-of-bounds cells.
+The immutable plan version is
+`trajectory-throw-v2-certified-positive-events-local-3`; both controller and
+runtime emit contract
+`v2-canonical-physics-1+certified-missions-1+persistent-semi-markov-1`.
+
+Every prescribed physical event is admitted before capture by the exact
+contact-aware canonical grenade simulator. All throws retain the canonical
+1400 cm/s launch speed and common gravity, restitution, friction, damping, and
+unlimited-natural-bounce configuration. Mission code may search only a bounded
+set of camera geometries and requires the outcome to survive small neighboring
+camera perturbations. It may not alter physics, mine seeds, activate a reserve,
+or substitute a failed episode. An uncertifiable cell aborts qualification or
+collection and is treated as a catalog/implementation defect.
+
+Runtime and independent validation gate requested first contact, full contact
+order after settling, hoop crossing, bounce/rest state, arena-exit direction,
+preview-versus-realized parity, visible-event dwell, prescribed movement dwell,
+and realized signed displacement. Ordinary missions reject every arena exit;
+only semi-Markov play and the explicit directional OOB family permit it. The
+camera begins prescribed missions with an eye-level scene-establishing view and
+uses recorded human-speed actions rather than snaps. Required contacts,
+crossings, bounces, rolls, and settling must remain visible for their mission
+contract. Connected relocation sequences use broad floor trajectories instead
+of pretending that a precision object collision remains guaranteed after
+unconstrained realized movement.
+
+The typed Parquet `v2_throws` structure includes first-contact deflection and
+speed-retention fields used to distinguish shallow wall glances. An earlier
+finalizer revision omitted those two new raw-JSON fields from the explicit
+Parquet struct; Parquet itself did not fail. The schema now preserves them and a
+regression test freezes their presence. The editor worker also supplies the
+`.uproject` and `-game` arguments when launched through an Unreal Editor binary.
+
+The human audit has 99 representative slots rather than requiring review of all
+312 geometric cells: 12 semi-Markov controls, 12 trajectory-view, 15 solid
+object, eight wall, six floor, eight ramp, 18 hoop, eight temporal, four OOB,
+and eight connected-sequence representatives. Audit export never fills a slot
+with a semantic failure. A complete 99-episode 384×384 capture produced 50,901
+observations, but its fail-fast validation exposed the now-fixed Parquet field
+omission at episode 41. The eight affected wall representatives were regenerated
+at 384×384 and passed independent validation (1,326 observations); all eight
+connected templates separately passed the complete worker/finalizer/validator
+path (1,798 observations). Python V2 regression tests pass 51/51 and the Unreal
+Editor target builds successfully. These results are machine qualification, not
+human acceptance.
+
+Remaining gates before production are deliberately explicit:
+
+1. Regenerate one complete 99-slot 384×384 audit with the corrected Parquet
+   schema and current source fingerprint.
+2. Independently validate every episode and export MP4s only from stored
+   authoritative observations.
+3. Obtain human visual acceptance for all 99 representatives; correct the
+   catalog or implementation if any representative is visually unclear.
+4. Rerun complete low-resolution catalog qualification and duration calibration
+   after acceptance.
+5. Select final frame budget X and create a new immutable 70/30 production plan.
+6. Start production only after all prior gates pass. Do not reuse the historical
+   402,200-frame or 480,000/600,000 diagnostic feasibility values.
+
+No remote or cloud generation is required by this workflow. The old standalone
+V2 audit/TODO handoff has been consolidated into this checkpoint and removed.
 
 Deferred work which is not a V2 data-generation gate includes asynchronous GPU
 readback, in-process multi-shard rollover, partial-shard salvage, multiple

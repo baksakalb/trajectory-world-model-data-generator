@@ -33,17 +33,17 @@ from v2_catalog import (
 )
 
 
-PLAN_VERSION = "trajectory-throw-v2-persistent-semi-markov-local-2"
-CONTRACT_VERSION = "v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1"
+PLAN_VERSION = "trajectory-throw-v2-certified-positive-events-local-3"
+CONTRACT_VERSION = "v2-canonical-physics-1+certified-missions-1+persistent-semi-markov-1"
 DEFAULT_CALIBRATION = Path(__file__).with_name("movement_v2_duration_calibration.json")
 FAMILY_FRAME_SHARES = {
     "semi_markov": Fraction(70, 100),
-    "trajectory_view": Fraction(7, 100),
+    "trajectory_view": Fraction(6, 100),
     "solid_object": Fraction(6, 100),
     "wall_corner": Fraction(4, 100),
-    "floor_observe": Fraction(3, 100),
-    "ramp": Fraction(3, 100),
-    "hoop": Fraction(3, 100),
+    "floor_observe": Fraction(1, 100),
+    "ramp": Fraction(4, 100),
+    "hoop": Fraction(5, 100),
     "temporal": Fraction(3, 100),
     "out_of_bounds": Fraction(1, 100),
 }
@@ -52,7 +52,9 @@ SOURCE_FRAME_SHARES = {
     "mission": Fraction(30, 100),
 }
 PRODUCTION_BUDGET_QUANTUM = 100
-RESERVES_PER_RECIPE = 2
+# Prescribed positive-event recipes are certified before capture.  Production
+# does not mine alternative seeds after semantic failures.
+RESERVES_PER_RECIPE = 0
 GENERATOR_PIPELINE_FILES = (
     "Scripts/dataset_worker.py",
     "Scripts/finalize_production_dataset.py",
@@ -544,10 +546,18 @@ def create_qualification_plan(args: argparse.Namespace) -> None:
     }
     requested_cells = list(by_cell_id) if args.all_base_cells else list(args.cell_id)
     if args.audit_cells:
-        requested_cells.extend(slot["cell_id"] for slot in audit_slots())
+        requested_cells.extend(
+            slot["cell_id"] for slot in audit_slots()
+            if not slot.get("sequence_template_id")
+        )
     requested_sequences = (
         list(by_template_id) if args.all_sequences else list(args.sequence_template_id)
     )
+    if args.audit_cells:
+        requested_sequences.extend(
+            str(slot["sequence_template_id"]) for slot in audit_slots()
+            if slot.get("sequence_template_id")
+        )
     unknown_cells = sorted(set(requested_cells) - set(by_cell_id))
     unknown_sequences = sorted(set(requested_sequences) - set(by_template_id))
     if unknown_cells:
