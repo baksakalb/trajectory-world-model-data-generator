@@ -954,6 +954,11 @@ Grenades:
 
 #### Current V2 implementation checkpoint (schema 11, runtime contract 3)
 
+> Historical note: the contract-3 random/mission description immediately below
+> records the pre-audit implementation. It is superseded by the active
+> canonical-physics checkpoint near the end of this README and must not be used
+> to plan new generation.
+
 The combined runtime, storage, planner, and local worker boundary is implemented
 as plan version `trajectory-throw-v2-local-3` with runtime contract
 `v2-data-generation-spec-3+temporal-2`. It includes Q-priority stationary aim,
@@ -2381,12 +2386,26 @@ damping, an out-of-bounds grenade receiving ordinary mission credit, and an uncl
 lateral cross-over. Therefore V2 remains not production-ready. The authoritative
 handoff is `V2_AUDIT_FINDINGS_AND_NEXT_WORK.txt`.
 
-Future work also proposes a third, long-play data source comprising roughly one
-third of final observations after calibration. It will combine V1 movement and V2
-grenade mechanics in coherent extended play with eye-level/center-map bias,
-repeated throw-release-relocate-reacquire loops, persistent grenades, collision
-escape, and natural out-of-bounds events. An explicit deliberate out-of-bounds
-mission will be added; all other prescribed missions must reject arena exits.
+The separate long-play source has now been removed. Long duration is a property
+of the persistent semi-Markov source rather than a second controller. The active
+V2 source allocation is 70% persistent semi-Markov play and 30% prescribed
+missions. Semi-Markov episodes last 120, 140, 160, or 180 seconds, keep all
+grenades until episode reset, and use one weighted, state-aware action policy.
+It favors ordinary movement, combined movement/camera control, eye-level views,
+the arena center, and under-visited 3x3 map and eight-way viewing sectors while
+retaining explicit probabilities for wall-parallel travel, wall approaches,
+opposing inputs, higher-order stress masks, and the all-buttons mask. Q/E still
+obey the canonical preview, rising-edge, and cooldown gates.
+
+Each accepted semi-Markov throw independently samples a post-throw attention
+mode: ignore, initial-flight watch, first-contact watch, longer observation, or
+delayed look-back. No impact, bounce, roll, exit, or rest is required to remain
+visible in persistent play. Required visibility remains a mission-only rule.
+The active catalog is version
+`trajectory-throw-v2-persistent-semi-markov-catalog-2` with 520 base cells and
+eight connected-sequence templates. The active plan/runtime versions are
+`trajectory-throw-v2-persistent-semi-markov-local-2` and
+`v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1`.
 
 No remote or cloud generation is required by this workflow. Before any final X
 can be selected, the seed-level human-audit defects must be fixed and accepted in

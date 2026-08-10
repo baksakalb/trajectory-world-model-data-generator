@@ -235,3 +235,33 @@ Implementation and validation order for the next session
 
 Do not start production planning or reuse the historical 402,200-frame contract-2
 floor. The current 137-video audit is diagnostic evidence, not production approval.
+
+Superseding persistent-play decision (2026-08-10)
+-------------------------------------------------
+Human review accepted the focused canonical-physics and temporal-grammar set.
+The proposed separate long-play controller was subsequently rejected as an
+unnecessary duplicate of a sufficiently persistent semi-Markov controller.
+
+The active design is now:
+- 70% persistent semi-Markov frames and 30% prescribed V2 mission frames.
+- No `long_play` source and no repeating five-second long-play loop.
+- Semi-Markov episodes last 120, 140, 160, or 180 seconds.
+- The world and all grenades persist for the entire episode.
+- One human-weighted policy covers ordinary actions, combined movement/camera,
+  trajectory acquire/cancel/throw, rare opposing inputs, higher-order stress
+  masks, and an explicit all-buttons edge.
+- A 3x3 position-coverage memory and eight-way viewing memory bias play toward
+  under-covered regions. Eye-level/arena-center attention dominates, but wall
+  approaches and wall-parallel travel retain nonzero probability.
+- Every accepted throw independently samples ignore, initial watch, contact
+  watch, longer watch, or delayed-look-back attention. Persistent play has no
+  per-throw impact-visibility requirement.
+
+The active catalog/plan/runtime versions are:
+- `trajectory-throw-v2-persistent-semi-markov-catalog-2`
+- `trajectory-throw-v2-persistent-semi-markov-local-2`
+- `v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1`
+
+This changes the qualification catalog and episode durations again. Production
+remains blocked until focused persistent-play video review, full catalog
+qualification, new duration calibration, and a new complete visual audit.

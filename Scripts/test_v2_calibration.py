@@ -32,21 +32,26 @@ class V2CalibrationTests(unittest.TestCase):
         value = derive_calibration(records)
         self.assertTrue(value["qualified"])
         self.assertEqual(value["expected_credited_frames_by_family"]["solid_object"], 120)
-        self.assertEqual(value["qualification_evidence"]["accepted_base_cell_count"], 1184)
+        self.assertEqual(
+            value["qualification_evidence"]["accepted_base_cell_count"],
+            len(base_cells()),
+        )
 
     def test_partial_evidence_never_claims_qualification(self) -> None:
+        families = sorted({cell["family"] for cell in base_cells()})
         records = [
-            {"v2_source": family == "random_play" and "random_play" or "mission",
+            {"v2_source": family if family == "semi_markov" else "mission",
              "v2_cell_id": family, "v2_sequence_template_id": None,
              "v2_throws": [{"intended_family": family}], "observation_count": 100,
-             "accepted_for_balancing": True}
-            for family in ("random_play", "solid_object", "wall_corner", "floor_bounce_rest", "ramp", "hoop")
+             "accepted_for_balancing": True, "v2_contract_version": CONTRACT_VERSION}
+            for family in families
         ]
         records.extend({
             "v2_source": "mission", "v2_cell_id": "s", "v2_sequence_template_id": f"S{count}",
             "v2_expected_throw_count": count, "v2_throws": [{"intended_family": "solid_object"}],
             "observation_count": 200, "accepted_for_balancing": True,
-        } for count in (2, 3, 4, 5))
+            "v2_contract_version": CONTRACT_VERSION,
+        } for count in sorted({template.grenade_count for template in SEQUENCE_TEMPLATES}))
         self.assertFalse(derive_calibration(records)["qualified"])
 
 

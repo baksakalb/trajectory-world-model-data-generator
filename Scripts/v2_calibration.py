@@ -55,8 +55,9 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         str(episode.get("v2_contract_version") or "missing") for episode in values
     }
     for episode in values:
-        family = str(episode.get("v2_source") == "random_play" and "random_play"
-                     or (episode.get("v2_throws") or [{}])[0].get("intended_family")
+        source = str(episode.get("v2_source") or "")
+        family = str(source if source == "semi_markov"
+                     else (episode.get("v2_throws") or [{}])[0].get("intended_family")
                      or episode.get("v2_cell_id", "").split("-", 1)[0])
         template_id = episode.get("v2_sequence_template_id")
         observation_count = int(episode["observation_count"])
@@ -79,11 +80,14 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     missing_families = sorted(set(FAMILY_FRAME_SHARES) - set(durations))
     if missing_families:
         raise ValueError(f"calibration has no accepted samples for families: {missing_families}")
-    missing_counts = sorted(set((2, 3, 4, 5)) - set(sequence_durations))
+    required_counts = {template.grenade_count for template in SEQUENCE_TEMPLATES}
+    missing_counts = sorted(required_counts - set(sequence_durations))
     if missing_counts:
         raise ValueError(f"calibration has no accepted samples for sequence counts: {missing_counts}")
     family_caps = {family: min(samples) for family, samples in durations.items()}
-    sequence_caps = {str(count): min(sequence_durations[count]) for count in (2, 3, 4, 5)}
+    sequence_caps = {
+        str(count): min(sequence_durations[count]) for count in sorted(required_counts)
+    }
     identity = {
         "family_caps": family_caps, "sequence_caps": sequence_caps,
         "credited_cells": sorted(credited_cells & expected_cells),
@@ -104,7 +108,7 @@ def derive_calibration(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "qualification_evidence": {
             "accepted_episode_count": len(values),
             "accepted_base_cell_count": len(credited_cells & expected_cells),
-            "required_base_cell_count": 1184,
+            "required_base_cell_count": len(expected_cells),
             "accepted_sequence_template_count": len(credited_sequences & expected_sequences),
             "required_sequence_template_count": len(expected_sequences),
             "observed_contract_versions": sorted(observed_contract_versions),

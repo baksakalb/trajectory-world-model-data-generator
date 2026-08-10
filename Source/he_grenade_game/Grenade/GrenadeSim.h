@@ -43,7 +43,7 @@ struct FGrenadeSimConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation|Rest", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 SupportRequiredConsecutiveSteps = 2;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation", meta = (ClampMin = "1", ClampMax = "64"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation", meta = (ClampMin = "0", ClampMax = "64"))
 	int32 MaxBounces = 8;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Simulation", meta = (ClampMin = "10.0", Units = "cm"))

@@ -1,43 +1,33 @@
 {
-  "calibration_version": "v2-local-qualified-3a4fd61cf86f9e06",
-  "contract_version": "v2-data-generation-spec-2+temporal-2",
+  "calibration_version": "v2-persistent-semi-markov-unqualified-1",
+  "contract_version": "v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1",
   "expected_credited_frames_by_family": {
-    "floor_bounce_rest": 90,
-    "hoop": 116,
-    "ramp": 105,
-    "random_play": 901,
-    "solid_object": 110,
-    "wall_corner": 108
+    "floor_observe": 180,
+    "hoop": 180,
+    "out_of_bounds": 180,
+    "ramp": 180,
+    "semi_markov": 3000,
+    "solid_object": 180,
+    "temporal": 240,
+    "trajectory_view": 180,
+    "wall_corner": 180
   },
   "expected_credited_frames_by_sequence_grenade_count": {
-    "2": 233,
-    "3": 330,
-    "4": 437,
-    "5": 1501
+    "1": 240,
+    "2": 480,
+    "3": 720,
+    "4": 960,
+    "5": 1200
   },
-  "notes": "Conservative minimum accepted observation counts; qualified only after complete base-cell and sequence-template evidence.",
+  "notes": "Planning estimates only. This new contract must be locally rendered, human-reviewed, and recalibrated before production.",
   "observation_rate_hz": 20,
   "qualification_evidence": {
-    "accepted_base_cell_count": 1184,
-    "accepted_episode_count": 1205,
-    "accepted_sequence_template_count": 21,
-    "required_base_cell_count": 1184,
-    "required_sequence_template_count": 21,
-    "sample_count_by_family": {
-      "floor_bounce_rest": 288,
-      "hoop": 56,
-      "ramp": 72,
-      "random_play": 72,
-      "solid_object": 504,
-      "wall_corner": 192
-    },
-    "sample_count_by_sequence_grenade_count": {
-      "2": 13,
-      "3": 6,
-      "4": 1,
-      "5": 1
-    }
+    "accepted_base_cell_count": 0,
+    "accepted_episode_count": 0,
+    "accepted_sequence_template_count": 0,
+    "required_base_cell_count": 520,
+    "required_sequence_template_count": 8
   },
-  "qualified": true,
+  "qualified": false,
   "schema_version": 2
 }

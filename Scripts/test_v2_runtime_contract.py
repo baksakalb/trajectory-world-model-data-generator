@@ -9,6 +9,7 @@ import unittest
 from Scripts.review_dataset import (
     DatasetValidationError,
     v2_realized_throw_success,
+    validate_v2_human_action_dwell,
     validate_v2_runtime_contract,
 )
 
@@ -41,6 +42,28 @@ def frame(
 
 class V2RuntimeContractTests(unittest.TestCase):
 
+    def test_mission_rejects_bracketed_one_frame_camera_reversal(self) -> None:
+        masks = ([1 << 6] * 5) + [1 << 7] + ([1 << 6] * 5)
+        with self.assertRaisesRegex(DatasetValidationError, "opposite-direction pulse"):
+            validate_v2_human_action_dwell("episode", "mission", masks)
+
+    def test_mission_accepts_sustained_direct_reversal(self) -> None:
+        masks = ([1 << 6] * 10) + ([1 << 7] * 10)
+        validate_v2_human_action_dwell("episode", "mission", masks)
+
+    def test_semi_markov_retains_micro_transition_coverage(self) -> None:
+        masks = ([1 << 6] * 5) + [1 << 7] + ([1 << 6] * 5)
+        validate_v2_human_action_dwell("episode", "semi_markov", masks)
+
+    def test_mission_rejects_repeated_camera_fragments(self) -> None:
+        with self.assertRaisesRegex(DatasetValidationError, "fragmented"):
+            validate_v2_human_action_dwell(
+                "episode",
+                "mission",
+                [0] * 4 + [1 << 6] + [0] * 4 + [1 << 6]
+                + [0] * 4 + [1 << 6] + [0] * 4,
+            )
+
     def test_realized_outcomes_are_derived_from_evidence(self) -> None:
         direct = {
             "intended_family": "solid_object",
@@ -53,15 +76,16 @@ class V2RuntimeContractTests(unittest.TestCase):
         self.assertFalse(v2_realized_throw_success(wrong_target))
 
         floor = {
-            "intended_family": "floor_bounce_rest",
-            "intended_outcome": "one_bounce",
+            "intended_family": "floor_observe",
+            "intended_outcome": "natural_floor_motion",
             "intended_target": "CurriculumFloor",
             "realized_contact_order": ["CurriculumFloor"],
             "bounce_count": 2,
             "post_contact_travel_cm": 120.0,
         }
         self.assertTrue(v2_realized_throw_success(floor))
-        self.assertFalse(v2_realized_throw_success({**floor, "bounce_count": 8}))
+        self.assertTrue(v2_realized_throw_success({**floor, "bounce_count": 8}))
+        self.assertFalse(v2_realized_throw_success({**floor, "realized_contact_order": []}))
 
         hoop = {
             "intended_family": "hoop",
@@ -319,6 +343,30 @@ class V2RuntimeContractTests(unittest.TestCase):
         validate_v2_runtime_contract(
             dataset, "episode", frames, transitions, episode
         )
+
+    def test_contact_while_sliding_is_not_a_stalled_contact_tail(self) -> None:
+        masks = [(1 << 8), 0, (1 << 4), 1] * 10
+        dataset, frames, transitions, episode = self.make_contract3_random_records(
+            masks
+        )
+        for index, item in enumerate(frames):
+            item["contact"] = True
+            item["position"]["x"] = float(index * 10)
+        validate_v2_runtime_contract(
+            dataset, "episode", frames, transitions, episode
+        )
+
+    def test_stationary_contact_tail_is_rejected(self) -> None:
+        masks = [(1 << 8), 0, (1 << 4), 1] * 10
+        dataset, frames, transitions, episode = self.make_contract3_random_records(
+            masks
+        )
+        for item in frames:
+            item["contact"] = True
+        with self.assertRaisesRegex(DatasetValidationError, "stalled contact"):
+            validate_v2_runtime_contract(
+                dataset, "episode", frames, transitions, episode
+            )
 
     def test_contract3_accepts_bounded_event_random_continuation(self) -> None:
         masks = [(1 << 8), 0] + ([1, (1 << 4), (1 << 8), 0] * 10)

@@ -65,28 +65,57 @@ class V2CatalogTests(unittest.TestCase):
     def test_catalog_counts_ids_and_fingerprints_are_stable(self) -> None:
         cells = base_cells()
         self.assertEqual(Counter(cell["family"] for cell in cells), Counter(BASE_FAMILY_COUNTS))
-        self.assertEqual(len(cells), 1184)
-        self.assertEqual(len({cell["cell_id"] for cell in cells}), 1184)
-        self.assertEqual(catalog_fingerprint(cells), "e05135fa4ff9b02a5b669e3c301a385e65e46756baf26d18e95da88ab1869a30")
-        self.assertEqual(sequence_fingerprint(), "725cb365748f657ffc464591f63d2914a5f431ec45d6e208595f6ab14fb5b182")
+        self.assertEqual(len(cells), 520)
+        self.assertEqual(len({cell["cell_id"] for cell in cells}), 520)
+        self.assertEqual(catalog_fingerprint(cells), "0e2571f97409c0d1612a7d7a31751a7399d05cd072fe984ba39f0151152ad6a8")
+        self.assertEqual(sequence_fingerprint(), "8fed827b9bdeec2a93145836edb4fe3a7ba156b8bbaa87b89eb171ec21657ddb")
 
     def test_every_sequence_and_visual_audit_slot_is_unique(self) -> None:
-        self.assertEqual(len(SEQUENCE_TEMPLATES), 21)
-        self.assertEqual(len({item.template_id for item in SEQUENCE_TEMPLATES}), 21)
-        self.assertEqual(len(audit_slots()), 128)
-        self.assertEqual(len({item["slot_id"] for item in audit_slots()}), 128)
+        self.assertEqual(len(SEQUENCE_TEMPLATES), 8)
+        self.assertEqual(len({item.template_id for item in SEQUENCE_TEMPLATES}), 8)
+        self.assertEqual(len(audit_slots()), 84)
+        self.assertEqual(len({item["slot_id"] for item in audit_slots()}), 84)
 
     def test_solid_variations_cover_all_distance_and_arc_bands(self) -> None:
         solids = [cell for cell in base_cells() if cell["family"] == "solid_object"]
-        grouped: dict[tuple[str, str, str], list[dict]] = {}
+        grouped: dict[tuple[str, str], list[dict]] = {}
         for cell in solids:
-            grouped.setdefault((cell["target"], cell["approach_sector"], cell["interaction_mode"]), []).append(cell)
+            grouped.setdefault((cell["target"], cell["approach_sector"]), []).append(cell)
         for values in grouped.values():
             self.assertEqual({cell["distance_band"] for cell in values}, {"near", "medium", "far"})
             self.assertEqual({cell["arc_band"] for cell in values}, {"low", "medium", "high"})
 
 
 class V2PlannerTests(unittest.TestCase):
+
+    def test_persistent_semi_markov_duration_bands_are_two_to_three_minutes(self) -> None:
+        calibration = controller.load_calibration()
+        expected = {
+            "short": 120 * 20 + 1,
+            "medium": 140 * 20 + 1,
+            "long": 160 * 20 + 1,
+            "very_long": 180 * 20 + 1,
+        }
+        cells = [item for item in base_cells() if item["family"] == "semi_markov"]
+        for cell in cells:
+            self.assertEqual(
+                controller.expected_frames(calibration, "semi_markov", cell=cell),
+                expected[cell["hold_band"]],
+            )
+
+    def test_trajectory_view_keeps_its_named_acquisition_gesture(self) -> None:
+        cell = next(
+            item for item in base_cells()
+            if item["family"] == "trajectory_view"
+            and item["interaction_mode"] == "pitch_adjust"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "qualification"
+            controller.create_qualification_plan(qualification_args(
+                root, cell_id=[cell["cell_id"]], workers=1,
+            ))
+            recipe = read_jsonl(root / "plan" / "recipes.jsonl")[0]
+            self.assertEqual(recipe["aim_acquisition_profile"], "pitch_adjust")
 
     def test_controller_rejects_capture_sizes_the_runtime_would_clamp(self) -> None:
         invalid = qualification_args(Path("unused"), width=32, height=64)
@@ -98,14 +127,14 @@ class V2PlannerTests(unittest.TestCase):
             root = Path(temporary) / "qualification"
             selected_cell = base_cells()[0]["cell_id"]
             controller.create_qualification_plan(qualification_args(
-                root, cell_id=[selected_cell], sequence_template_id=["SQ20"],
+                root, cell_id=[selected_cell], sequence_template_id=["SQ08"],
             ))
             recipes = read_jsonl(root / "plan" / "recipes.jsonl")
             self.assertEqual(len(recipes), 2)
             self.assertTrue(all(recipe["qualification_only"] for recipe in recipes))
             self.assertEqual(recipes[0]["cell_id"], selected_cell)
-            self.assertEqual(recipes[1]["sequence_template_id"], "SQ20")
-            self.assertEqual(len(recipes[1]["sequence"]["steps"]), 4)
+            self.assertEqual(recipes[1]["sequence_template_id"], "SQ08")
+            self.assertEqual(len(recipes[1]["sequence"]["steps"]), 3)
             plan = json.loads((root / "plan" / "collection-plan.json").read_text(encoding="utf-8"))
             self.assertTrue(plan["qualification_only"])
             self.assertEqual(plan["generator_source_sha256"], controller.generator_source_fingerprint())
@@ -120,8 +149,8 @@ class V2PlannerTests(unittest.TestCase):
                 recipes_per_assignment=64,
             ))
             recipes = read_jsonl(root / "plan" / "recipes.jsonl")
-            self.assertEqual(len(recipes), 1184 + len(SEQUENCE_TEMPLATES))
-            self.assertEqual(len(list((root / "assignments").glob("*.json"))), 19)
+            self.assertEqual(len(recipes), 520 + len(SEQUENCE_TEMPLATES))
+            self.assertEqual(len(list((root / "assignments").glob("*.json"))), 9)
 
     def test_qualification_plan_can_select_the_frozen_audit_cells(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,7 +159,7 @@ class V2PlannerTests(unittest.TestCase):
                 root, audit_cells=True, recipes_per_assignment=128,
             ))
             recipes = read_jsonl(root / "plan" / "recipes.jsonl")
-            self.assertEqual(len(recipes), 128)
+            self.assertEqual(len(recipes), 84)
             self.assertEqual({item["cell_id"] for item in recipes}, {
                 item["cell_id"] for item in audit_slots()
             })
@@ -159,11 +188,15 @@ class V2PlannerTests(unittest.TestCase):
             report = controller.verify_plan(first)
             self.assertTrue(report["valid"])
             distribution = report["planned_distribution"]
-            self.assertEqual(distribution["source_frames"], {"mission": 450000, "random_play": 550000})
+            self.assertEqual(distribution["source_frames"], {
+                "semi_markov": 700000, "mission": 300000,
+            })
             self.assertEqual(distribution["family_frames"], {
-                "random_play": 550000, "solid_object": 150000,
-                "wall_corner": 100000, "floor_bounce_rest": 80000,
-                "ramp": 60000, "hoop": 60000,
+                "semi_markov": 700000,
+                "trajectory_view": 70000, "solid_object": 60000,
+                "wall_corner": 40000, "floor_observe": 30000,
+                "ramp": 30000, "hoop": 30000, "temporal": 30000,
+                "out_of_bounds": 10000,
             })
             frozen_plan = json.loads((first / "plan" / "collection-plan.json").read_text(encoding="utf-8"))
             self.assertEqual(frozen_plan["generator_source_sha256"], controller.generator_source_fingerprint())

@@ -33,24 +33,23 @@ from v2_catalog import (
 )
 
 
-PLAN_VERSION = "trajectory-throw-v2-local-3"
-CONTRACT_VERSION = "v2-data-generation-spec-3+temporal-2"
+PLAN_VERSION = "trajectory-throw-v2-persistent-semi-markov-local-2"
+CONTRACT_VERSION = "v2-canonical-physics-1+human-actions-2+persistent-semi-markov-1"
 DEFAULT_CALIBRATION = Path(__file__).with_name("movement_v2_duration_calibration.json")
 FAMILY_FRAME_SHARES = {
-    "random_play": Fraction(55, 100),
-    "solid_object": Fraction(15, 100),
-    "wall_corner": Fraction(10, 100),
-    "floor_bounce_rest": Fraction(8, 100),
-    "ramp": Fraction(6, 100),
-    "hoop": Fraction(6, 100),
+    "semi_markov": Fraction(70, 100),
+    "trajectory_view": Fraction(7, 100),
+    "solid_object": Fraction(6, 100),
+    "wall_corner": Fraction(4, 100),
+    "floor_observe": Fraction(3, 100),
+    "ramp": Fraction(3, 100),
+    "hoop": Fraction(3, 100),
+    "temporal": Fraction(3, 100),
+    "out_of_bounds": Fraction(1, 100),
 }
-RANDOM_PHASE_SHARES = {
-    "traverse": Fraction(15, 100),
-    "preview_adjust_cancel": Fraction(20, 100),
-    "preview_to_throw": Fraction(25, 100),
-    "rejected_request": Fraction(5, 100),
-    "post_throw": Fraction(25, 100),
-    "multi_throw": Fraction(10, 100),
+SOURCE_FRAME_SHARES = {
+    "semi_markov": Fraction(70, 100),
+    "mission": Fraction(30, 100),
 }
 PRODUCTION_BUDGET_QUANTUM = 100
 RESERVES_PER_RECIPE = 2
@@ -144,7 +143,8 @@ def load_calibration(path: Path = DEFAULT_CALIBRATION) -> dict[str, Any]:
     if any(int(frames) <= 0 for frames in durations.values()):
         raise ValueError("V2 duration calibration contains a non-positive duration")
     sequences = value.get("expected_credited_frames_by_sequence_grenade_count", {})
-    if any(str(count) not in sequences for count in (2, 3, 4, 5)):
+    required_counts = {template.grenade_count for template in SEQUENCE_TEMPLATES}
+    if any(str(count) not in sequences for count in required_counts):
         raise ValueError("V2 duration calibration omits sequence grenade counts")
     return value
 
@@ -171,40 +171,6 @@ def sequence_connections(template_index: int) -> list[str]:
     for cell in cells:
         grouped[cell["family"]].append(cell)
 
-    def pick(family: str, **fields: Any) -> str:
-        return next(
-            cell["cell_id"] for cell in grouped[family]
-            if all(cell.get(key) == value for key, value in fields.items())
-        )
-
-    solid_a = pick("solid_object", target="rectangle", approach_sector="S0", interaction_mode="direct_center", variation=0)
-    solid_b = pick("solid_object", target="sphere", approach_sector="S4", interaction_mode="direct_center", variation=0)
-    floor_a = pick("floor_bounce_rest", azimuth_sector="S0", distance_band="near", arc_band="low", outcome="one_bounce")
-    wall_a = pick("wall_corner", wall="north", approach_profile="direct", height_band="middle", contact_sequence="wall_then_floor")
-    ramp_a = pick("ramp", approach="uphill", ramp_region="middle", interaction_mode="ramp_then_floor")
-    hoop_a = pick("hoop", direction="negative_x_to_positive_x", path_profile="center", outcome="clean_pass")
-    curated: dict[str, list[str]] = {
-        "SQ08": [
-            pick("solid_object", target="rectangle", approach_sector="S0", interaction_mode="direct_center", variation=0),
-            pick("solid_object", target="rectangle", approach_sector="S0", interaction_mode="direct_center", variation=2),
-        ],
-        "SQ09": [solid_a, pick("solid_object", target="rectangle", approach_sector="S2", interaction_mode="direct_center", variation=0)],
-        "SQ10": [solid_a, pick("solid_object", target="pyramid", approach_sector="S0", interaction_mode="direct_center", variation=0)],
-        "SQ11": [solid_a, floor_a, solid_b],
-        "SQ12": [solid_a, pick("solid_object", target="rectangle", approach_sector="S2", interaction_mode="near_miss", variation=0), wall_a],
-        "SQ13": [floor_a, hoop_a, pick("floor_bounce_rest", azimuth_sector="S4", distance_band="medium", arc_band="medium", outcome="direct_settle")],
-        "SQ18": [floor_a, solid_a],
-        "SQ19": [solid_a, wall_a, floor_a],
-        "SQ20": [solid_a, floor_a, ramp_a, hoop_a],
-        "SQ21": [
-            pick("random_play", behavior_id=behavior, hold_band="very_long")
-            for behavior in ("R06", "R07", "R08", "R12", "R18")
-        ],
-    }
-    if template.template_id in curated:
-        return curated[template.template_id]
-    if template.base_family_pattern == ("solid_object",) * template.grenade_count:
-        return [solid_a] * template.grenade_count
     connected: list[str] = []
     for step, family in enumerate(template.base_family_pattern):
         choices = grouped[family]
@@ -251,10 +217,10 @@ def expected_frames(
     sequence_index: int | None = None, cell: dict[str, Any] | None = None,
 ) -> int:
     if sequence_index is None:
-        if family == "random_play" and cell is not None:
-            seconds = {"short": 45, "medium": 55, "long": 65, "very_long": 75}[
-                str(cell["hold_band"])
-            ]
+        if family == "semi_markov" and cell is not None:
+            seconds = {
+                "short": 120, "medium": 140, "long": 160, "very_long": 180,
+            }[str(cell["hold_band"])]
             return seconds * int(calibration["observation_rate_hz"]) + 1
         return int(calibration["expected_credited_frames_by_family"][family])
     count = min(5, SEQUENCE_TEMPLATES[sequence_index].grenade_count)
@@ -305,6 +271,12 @@ def build_recipe(
         "reserve_for": reserve_for,
         "active": reserve_for is None,
     }
+    # Trajectory-view cells deliberately enumerate the visible acquisition
+    # gesture.  Do not let the generic temporal stratum silently replace that
+    # mission identity (this previously turned named pitch/yaw demonstrations
+    # into unrelated profiles).
+    if cell["family"] == "trajectory_view":
+        recipe["aim_acquisition_profile"] = cell["interaction_mode"]
     if sequence_index is not None:
         template = SEQUENCE_TEMPLATES[sequence_index]
         recipe["sequence_template_id"] = template.template_id
@@ -322,7 +294,7 @@ def target_family_frames(frame_budget: int) -> dict[str, int]:
     if frame_budget % PRODUCTION_BUDGET_QUANTUM:
         raise ValueError(
             f"production V2 frame target must be divisible by {PRODUCTION_BUDGET_QUANTUM} "
-            "for exact 55/15/10/8/6/6 integer-frame allocation"
+            "for exact 70/7/6/4/3/3/3/3/1 integer-frame allocation"
         )
     result = {family: int(frame_budget * share) for family, share in FAMILY_FRAME_SHARES.items()}
     if sum(result.values()) != frame_budget:
@@ -336,7 +308,7 @@ def minimum_feasible_frame_budget(calibration: dict[str, Any] | None = None) -> 
     for cell in mandatory_order():
         mandatory[cell["family"]] += expected_frames(calibration, cell["family"], cell=cell)
     for sequence_index, template in enumerate(SEQUENCE_TEMPLATES):
-        family = "random_play" if template.base_family_pattern == ("random_play",) * template.grenade_count else template.base_family_pattern[0]
+        family = template.base_family_pattern[0]
         mandatory[family] += expected_frames(calibration, family, sequence_index)
     floor = max(math.ceil(Fraction(mandatory[family], 1) / share) for family, share in FAMILY_FRAME_SHARES.items())
     return int(math.ceil(floor / PRODUCTION_BUDGET_QUANTUM) * PRODUCTION_BUDGET_QUANTUM)
@@ -384,7 +356,7 @@ def build_schedule(
         for cell in cells:
             append(cell, "mandatory")
         for sequence_index, template in enumerate(SEQUENCE_TEMPLATES):
-            family = "random_play" if template.base_family_pattern == ("random_play",) * template.grenade_count else template.base_family_pattern[0]
+            family = template.base_family_pattern[0]
             first_cell_id = sequence_connections(sequence_index)[0]
             cell = next(item for item in grouped[family] if item["cell_id"] == first_cell_id)
             append(cell, "mandatory_sequence", sequence_index)
@@ -515,7 +487,7 @@ def create_plan(args: argparse.Namespace) -> None:
         "catalog_version": CATALOG_VERSION, "catalog_sha256": catalog_fingerprint(),
         "sequence_version": SEQUENCE_VERSION, "sequence_sha256": sequence_fingerprint(),
         "generator_source_sha256": generator_source_fingerprint(),
-        "catalog_counts": BASE_FAMILY_COUNTS, "mandatory_base_cell_count": 1184,
+        "catalog_counts": BASE_FAMILY_COUNTS, "mandatory_base_cell_count": len(base_cells()),
         "mandatory_sequence_template_count": len(SEQUENCE_TEMPLATES),
         "audit_slot_count": len(audit_slots()),
         "duration_calibration_version": calibration["calibration_version"],
@@ -525,9 +497,8 @@ def create_plan(args: argparse.Namespace) -> None:
         "minimum_feasible_accepted_frames": minimum,
         "production_budget_quantum": PRODUCTION_BUDGET_QUANTUM,
         "diagnostic_only": diagnostic, "distribution_feasible": not diagnostic,
-        "source_frame_shares": {"random_play": 0.55, "mission": 0.45},
+        "source_frame_shares": {name: float(value) for name, value in SOURCE_FRAME_SHARES.items()},
         "family_frame_shares": {name: float(value) for name, value in FAMILY_FRAME_SHARES.items()},
-        "random_phase_shares": {name: float(value) for name, value in RANDOM_PHASE_SHARES.items()},
         "evaluation_percent": args.evaluation_percent,
         "active_recipe_count": len(active), "reserve_recipe_count": len(active) * RESERVES_PER_RECIPE,
         "assignment_count": len(assignments), "worker_count": args.workers,
@@ -684,14 +655,17 @@ def verify_plan(root: Path) -> dict[str, Any]:
     distribution = planned_distribution(active)
     valid_distribution = bool(plan.get("diagnostic_only")) or (
         distribution["total_credited_frames"] == int(plan["target_accepted_frames"])
-        and distribution["source_frames"].get("random_play", 0) == int(plan["target_accepted_frames"]) * 55 // 100
-        and distribution["source_frames"].get("mission", 0) == int(plan["target_accepted_frames"]) * 45 // 100
+        and all(
+            distribution["source_frames"].get(source, 0)
+            == int(plan["target_accepted_frames"]) * share.numerator // share.denominator
+            for source, share in SOURCE_FRAME_SHARES.items()
+        )
     )
     valid = (bool(plan.get("diagnostic_only")) or (not missing_cells and not missing_sequences)) and valid_distribution
     return {
         "valid": valid, "plan_id": plan["plan_id"],
         "active_recipes": len(active), "base_cells": len(cells & expected_cells),
-        "expected_base_cells": 1184, "sequence_templates": len(sequences),
+        "expected_base_cells": len(expected_cells), "sequence_templates": len(sequences),
         "expected_sequence_templates": len(expected_sequences),
         "missing_cells": missing_cells, "missing_sequences": missing_sequences,
         "planned_distribution": distribution,

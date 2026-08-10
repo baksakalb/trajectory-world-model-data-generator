@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import shutil
 import struct
 import subprocess
@@ -701,8 +702,29 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
     contacts = [str(value) for value in (throw.get("realized_contact_order") or [])]
     target_index = contacts.index(target) if target in contacts else -1
     floor_index = contacts.index("CurriculumFloor") if "CurriculumFloor" in contacts else -1
-    if family == "random_play":
+    if family == "semi_markov":
         return True
+    exit_direction = throw.get("arena_exit_direction")
+    if family == "out_of_bounds":
+        return bool(exit_direction) and exit_direction == throw.get("intended_exit_direction")
+    if exit_direction:
+        return False
+    if "visible_observation_count" in throw and int(
+        throw.get("visible_observation_count") or 0
+    ) < 10:
+        return False
+    if "visible_event_observation_count" in throw and int(
+        throw.get("visible_event_observation_count") or 0
+    ) < 5:
+        return False
+    movement_profile = str(throw.get("movement_before_next_throw") or "")
+    if movement_profile not in {"", "stationary", "ordinary_semi_markov"}:
+        if int(throw.get("prescribed_movement_steps") or 0) < 20:
+            return False
+        if float(throw.get("maximum_signed_displacement_cm") or 0.0) < 100.0:
+            return False
+    if family in {"trajectory_view", "temporal"}:
+        return bool(throw.get("preview_to_realized_flight_parity"))
     if family == "solid_object":
         if outcome == "near_miss":
             return target_index < 0
@@ -721,23 +743,13 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
                 for item in contacts
             )
         return target_index == 0
-    if family == "floor_bounce_rest":
-        bounces = int(throw.get("bounce_count", 0))
-        travel = float(throw.get("post_contact_travel_cm", 0.0))
-        if floor_index < 0:
-            return False
-        if outcome == "direct_settle":
-            return bounces <= 1 and travel < 100.0
-        if outcome == "one_bounce":
-            return bounces == 2
-        if outcome == "multi_bounce":
-            return bounces >= 3
-        if outcome == "long_roll":
-            return travel >= 250.0
-        return False
+    if family == "floor_observe":
+        return floor_index >= 0
     if family == "ramp":
-        if outcome in {"near_miss_side", "cross_over"}:
+        if outcome == "side_miss":
             return target_index < 0
+        if outcome == "cross_over":
+            return bool(throw.get("geometric_crossing_pass"))
         if outcome == "floor_then_ramp":
             return 0 <= floor_index < target_index
         if outcome == "ramp_then_floor":
@@ -757,6 +769,72 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
             )
         return pass_frame is not None
     return False
+
+
+def validate_v2_human_action_dwell(
+    episode_id: str,
+    source: str,
+    action_masks: list[int],
+) -> None:
+    """Reject mission twitching while preserving semi-Markov edge coverage."""
+    if source in {"semi_markov", "random_play"} or not action_masks:
+        return
+
+    axes = {
+        "forward/backward": (1 << 2, 1 << 0, False),
+        "left/right movement": (1 << 1, 1 << 3, False),
+        "left/right camera": (1 << 6, 1 << 7, True),
+        "down/up camera": (1 << 5, 1 << 4, True),
+    }
+    for label, (negative_bit, positive_bit, is_camera) in axes.items():
+        states: list[int] = []
+        for mask in action_masks:
+            negative = bool(mask & negative_bit)
+            positive = bool(mask & positive_bit)
+            states.append(0 if negative == positive else (1 if positive else -1))
+
+        runs: list[tuple[int, int]] = []
+        for state in states:
+            if runs and runs[-1][0] == state:
+                prior_state, prior_length = runs[-1]
+                runs[-1] = (prior_state, prior_length + 1)
+            else:
+                runs.append((state, 1))
+
+        # Reject A -> tiny opposite pulse -> A, including at most two neutral
+        # frames around the pulse. A sustained A -> B reversal remains valid.
+        for index, (state, length) in enumerate(runs):
+            if state == 0 or length > 3:
+                continue
+            before = index - 1
+            after = index + 1
+            if before >= 0 and runs[before][0] == 0 and runs[before][1] <= 2:
+                before -= 1
+            if after < len(runs) and runs[after][0] == 0 and runs[after][1] <= 2:
+                after += 1
+            if before < 0 or after >= len(runs):
+                continue
+            before_state, before_length = runs[before]
+            after_state, after_length = runs[after]
+            if (
+                before_state == after_state == -state
+                and before_length >= 4
+                and after_length >= 4
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: {label} contains an isolated {length}-frame "
+                    "opposite-direction pulse."
+                )
+
+        if is_camera:
+            short_runs = [
+                (state, length) for state, length in runs if state and length < 3
+            ]
+            if len(short_runs) >= 3:
+                raise DatasetValidationError(
+                    f"{episode_id}: {label} is fragmented into "
+                    f"{len(short_runs)} sub-three-frame gestures."
+                )
 
 
 def validate_v2_runtime_contract(
@@ -924,9 +1002,16 @@ def validate_v2_runtime_contract(
             )
         expected_throw_count = int(episode.get("v2_expected_throw_count", 0))
         accepted_throw_count = int(episode.get("v2_accepted_throw_count", 0))
+        source = str(episode.get("v2_source", ""))
+        validate_v2_human_action_dwell(
+            episode_id,
+            source,
+            [int(item["action_mask"]) for item in transitions],
+        )
+        free_play = source in {"random_play", "semi_markov"}
         throw_rows = episode.get("v2_throws") or []
         accepted_transitions = [item for item in transitions if item["e_accepted"]]
-        if accepted_throw_count != expected_throw_count:
+        if not free_play and accepted_throw_count != expected_throw_count:
             raise DatasetValidationError(
                 f"{episode_id}: expected/accepted throw counts differ."
             )
@@ -937,7 +1022,7 @@ def validate_v2_runtime_contract(
         cell_id = str(episode.get("v2_cell_id", ""))
         e_requests = [item for item in transitions if item.get("e_request_edge")]
         rejection_reasons = [str(item.get("e_rejection_reason", "")) for item in e_requests]
-        if expected_throw_count == 0:
+        if expected_throw_count == 0 and not free_play:
             if cell_id.startswith("R01-"):
                 if e_requests or not any(int(item["action_mask"]) & 0x0F for item in transitions):
                     raise DatasetValidationError(
@@ -975,11 +1060,12 @@ def validate_v2_runtime_contract(
         # checks allowed: zero input after a short event, one fixed action into a
         # wall, or a mission ending without its bounded active continuation.
         if str(episode.get("v2_contract_version", "")).startswith(
-            "v2-data-generation-spec-3"
+            ("v2-data-generation-spec-3", "v2-canonical-physics-1")
         ):
             primary_event_frame = episode.get("v2_primary_event_complete_frame")
             required_continuation = episode.get("v2_required_continuation_steps")
-            if not cell_id.startswith("R01-") and primary_event_frame is None:
+            credited_episode = bool(episode.get("accepted_for_balancing"))
+            if not free_play and credited_episode and primary_event_frame is None:
                 raise DatasetValidationError(
                     f"{episode_id}: bounded recipe lacks its primary-event frame."
                 )
@@ -998,6 +1084,7 @@ def validate_v2_runtime_contract(
             for transition in transitions:
                 source_index = int(transition["source_frame_index"])
                 source = frames[source_index]
+                target = frames[source_index + 1]
                 mask = int(transition["action_mask"])
                 world_inactive = (
                     int(source.get("flying_grenade_count") or 0) == 0
@@ -1016,7 +1103,19 @@ def validate_v2_runtime_contract(
                 )
                 maximum_fixed_mask_run = max(maximum_fixed_mask_run, fixed_mask_run)
                 previous_mask = mask
-                contact_run = contact_run + 1 if bool(source.get("contact")) else 0
+                source_position = source.get("position") or {}
+                target_position = target.get("position") or {}
+                planar_step_cm = (
+                    (float(target_position.get("x", 0.0))
+                     - float(source_position.get("x", 0.0))) ** 2
+                    + (float(target_position.get("y", 0.0))
+                       - float(source_position.get("y", 0.0))) ** 2
+                ) ** 0.5
+                # Contact while visibly sliding along a wall is not a dead
+                # tail. Only count contact frames in which locomotion has
+                # actually stalled.
+                stalled_contact = bool(source.get("contact")) and planar_step_cm < 5.0
+                contact_run = contact_run + 1 if stalled_contact else 0
                 maximum_contact_run = max(maximum_contact_run, contact_run)
 
             if maximum_inactive_zero_run > 5 * observation_rate:
@@ -1029,37 +1128,81 @@ def validate_v2_runtime_contract(
                 )
             if maximum_contact_run > observation_rate:
                 raise DatasetValidationError(
-                    f"{episode_id}: continuous contact exceeds one second."
+                    f"{episode_id}: stalled contact exceeds one second."
                 )
 
             source = str(episode.get("v2_source", ""))
-            if source == "random_play":
+            if source in {"random_play", "semi_markov"}:
                 masks = {int(item["action_mask"]) for item in transitions}
                 if len(masks) < 4:
                     raise DatasetValidationError(
-                        f"{episode_id}: random play contains fewer than four action states."
+                        f"{episode_id}: free play contains fewer than four action states."
                     )
                 if not any(int(item["action_mask"]) & 0xF0 for item in transitions):
                     raise DatasetValidationError(
-                        f"{episode_id}: random play contains no camera activity."
+                        f"{episode_id}: free play contains no camera activity."
                     )
                 if not any(
                     item.get("q_rising_edge") for item in transitions
                 ) or not any(item.get("q_falling_edge") for item in transitions):
                     raise DatasetValidationError(
-                        f"{episode_id}: random play lacks trajectory acquire/cancel activity."
+                        f"{episode_id}: free play lacks trajectory acquire/cancel activity."
                     )
-                if not cell_id.startswith("R01-"):
-                    after_event = len(frames) - 1 - int(primary_event_frame)
-                    if after_event < int(required_continuation):
+                if source == "semi_markov":
+                    if len(transitions) < 120 * observation_rate:
                         raise DatasetValidationError(
-                            f"{episode_id}: event-focused continuation ended early."
+                            f"{episode_id}: persistent semi-Markov episode is shorter "
+                            "than two minutes."
                         )
-                    if after_event > int(required_continuation) + 1:
+                    if len(transitions) > 180 * observation_rate + 1:
                         raise DatasetValidationError(
-                            f"{episode_id}: event-focused continuation exceeded its bound."
+                            f"{episode_id}: persistent semi-Markov episode exceeds "
+                            "three minutes."
                         )
-            elif throw_rows:
+                    position_bins: set[tuple[int, int]] = set()
+                    view_bins: set[int] = set()
+                    central_attention = 0
+                    wall_zone_frames = 0
+                    for item in frames:
+                        position = item.get("position") or {}
+                        camera = item.get("camera") or {}
+                        x = float(position.get("x", 0.0))
+                        y = float(position.get("y", 0.0))
+                        x_bin = max(0, min(2, int((x + 1600.0) / (3200.0 / 3.0))))
+                        y_bin = max(0, min(2, int((y + 1600.0) / (3200.0 / 3.0))))
+                        position_bins.add((x_bin, y_bin))
+                        yaw = float(camera.get("yaw", 0.0))
+                        view_bins.add(int(((yaw + 180.0) % 360.0) / 45.0))
+                        if max(abs(x), abs(y)) > 1450.0:
+                            wall_zone_frames += 1
+                        distance_to_center = (x * x + y * y) ** 0.5
+                        desired_yaw = 0.0 if distance_to_center < 250.0 else math.degrees(
+                            math.atan2(-y, -x)
+                        )
+                        yaw_error = abs((yaw - desired_yaw + 180.0) % 360.0 - 180.0)
+                        if yaw_error <= 60.0 and abs(float(camera.get("pitch", 0.0))) <= 30.0:
+                            central_attention += 1
+                    if len(position_bins) < 4:
+                        raise DatasetValidationError(
+                            f"{episode_id}: persistent semi-Markov play visited fewer "
+                            "than four map sectors."
+                        )
+                    if len(view_bins) < 4:
+                        raise DatasetValidationError(
+                            f"{episode_id}: persistent semi-Markov play viewed fewer "
+                            "than four yaw sectors."
+                        )
+                    if wall_zone_frames > 0.50 * len(frames):
+                        raise DatasetValidationError(
+                            f"{episode_id}: persistent semi-Markov play hugs arena walls "
+                            "for more than half the episode."
+                        )
+                    if central_attention < 0.25 * len(frames):
+                        raise DatasetValidationError(
+                            f"{episode_id}: persistent semi-Markov play lacks its "
+                            "center/eye-level attention bias."
+                        )
+            elif throw_rows and credited_episode:
                 after_event = len(frames) - 1 - int(primary_event_frame)
                 if after_event < int(required_continuation):
                     raise DatasetValidationError(
@@ -1069,7 +1212,6 @@ def validate_v2_runtime_contract(
                     raise DatasetValidationError(
                         f"{episode_id}: mission continuation exceeded its bound."
                     )
-                last_rest = max(int(item["rest_frame"]) for item in throw_rows)
                 continuation = [
                     item
                     for item in transitions
@@ -1100,13 +1242,9 @@ def validate_v2_runtime_contract(
                     f"{episode_id}: throw {index} lacks a preceding preview."
                 )
             rest_frame = throw.get("rest_frame")
-            if rest_frame is None or int(rest_frame) > len(frames) - 1:
+            if rest_frame is not None and int(rest_frame) > len(frames) - 1:
                 raise DatasetValidationError(
-                    f"{episode_id}: throw {index} was not followed through rest."
-                )
-            if int(throw.get("post_rest_tail_steps", 0)) < int(dataset.get("observation_rate_hz", 20)):
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} has less than the one-second post-rest tail."
+                    f"{episode_id}: throw {index} rest frame lies beyond the episode."
                 )
             if not bool(throw.get("preview_to_realized_flight_parity")):
                 raise DatasetValidationError(

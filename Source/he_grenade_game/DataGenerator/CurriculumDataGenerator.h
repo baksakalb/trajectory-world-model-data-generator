@@ -218,10 +218,20 @@ private:
 		int32 RestFrame = INDEX_NONE;
 		int32 PostRestTailSteps = 0;
 		int32 HoopPassFrame = INDEX_NONE;
+		int32 ArenaExitFrame = INDEX_NONE;
+		int32 PredictedFirstContactStep = INDEX_NONE;
+		int32 PredictedRestStep = INDEX_NONE;
+		int32 VisibleObservationCount = 0;
+		int32 VisibleEventObservationCount = 0;
+		int32 PrescribedMovementSteps = 0;
+		int32 PredictedBounceCount = 0;
 		float HoopCrossingY = 0.0f;
 		float HoopCrossingZ = 0.0f;
 		float FirstContactTraveledDistanceCm = 0.0f;
+		float MaximumSignedDisplacementCm = 0.0f;
 		FRotator ThrowCamera = FRotator::ZeroRotator;
+		FVector ThrowPlayerPosition = FVector::ZeroVector;
+		FVector PredictedRestPosition = FVector::ZeroVector;
 		FGrenadeSimConfig SimConfig;
 		FString BaseCellId;
 		FString IntendedTarget;
@@ -234,6 +244,8 @@ private:
 		FString PostThrowMovementProfile;
 		FString PostThrowCameraProfile;
 		FString RealizedTarget;
+		FString ArenaExitDirection;
+		FString PredictedExitDirection;
 		TArray<FString> ContactOrder;
 	};
 
@@ -327,6 +339,11 @@ private:
 	uint16 SelectV2TrajectoryHoldMissionAction() const;
 	uint16 SelectV2ProductionAction();
 	uint16 SelectV2SemiMarkovAction(bool bAllowThrows);
+	uint16 SelectV2PersistentBaseAction();
+	uint16 SelectV2PersistentMovementBits();
+	uint16 SelectV2PersistentCameraBits();
+	uint16 ApplyV2PostThrowAttention(uint16 ActionMask);
+	int32 SelectV2PersistentHoldSteps();
 	bool ConfigureV2RecipeSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch);
 	void ConfigureV2SequenceStepAim(int32 StepIndex);
 	void UpdateV2RecipeProgress();
@@ -336,6 +353,8 @@ private:
 	uint16 SelectCoverageGuidedAction();
 	uint16 WorldDirectionToMovementBits(const FVector& DesiredWorldDirection) const;
 	uint16 CameraBitsToward(const FVector& WorldTarget, float* OutYawError = nullptr) const;
+	uint16 SelectStableV2CameraBitsToward(const FVector& WorldTarget);
+	void ResetStableV2CameraSteering();
 	FVector GetLocomotionFacingDirection(const FVector& TravelDirection) const;
 	FVector SelectGuidedCameraTarget(
 		const FVector& ObjectiveTarget,
@@ -508,6 +527,11 @@ private:
 	int32 CurrentV2RejectedPreviewCount = 0;
 	int32 CurrentV2RejectedCooldownCount = 0;
 	int32 CurrentV2MovementActionCount = 0;
+	int32 CurrentV2PostThrowAttentionMode = 0;
+	int32 CurrentV2PostThrowAttentionStepsRemaining = 0;
+	int32 CurrentV2PostThrowLookBackDelaySteps = 0;
+	int32 CurrentV2CameraSteeringStepsRemaining = 0;
+	int32 CurrentV2CameraNeutralStepsRemaining = 0;
 	int32 CurrentEpisodeRampTraversals = 0;
 	int32 CurrentEpisodeHoopPasses = 0;
 	int32 OverallRampTraversals = 0;
@@ -543,6 +567,8 @@ private:
 	uint16 CurrentActionMask = 0;
 	uint16 HeldActionMask = 0;
 	uint16 LastAppliedActionMask = 0;
+	uint16 CurrentV2CameraSteeringMask = 0;
+	bool bCurrentV2PendingStressEEdge = false;
 	uint16 PostSuccessBaseActionMask = 0;
 	uint16 CurrentEpisodeViewBinsMask = 0;
 	uint16 CurrentEpisodeVisitedBinsMask = 0;
@@ -575,6 +601,8 @@ private:
 	int64 OverallHoopScenarioObservationFrames[30] = {};
 	int64 OverallGuidedCameraStyleObservationFrames[4] = {};
 	int64 OverallPitchBandObservationFrames[4] = {};
+	int32 CurrentV2PositionBinFrames[9] = {};
+	int32 CurrentV2ViewBinFrames[8] = {};
 	TArray<uint16> ActionScriptMasks;
 	TArray<int32> ActionScriptHoldSteps;
 	TArray<FVector> CoverageWaypoints;
