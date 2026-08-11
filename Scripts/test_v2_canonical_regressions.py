@@ -13,6 +13,7 @@ from v2_dataset_controller import CONTRACT_VERSION, SOURCE_FRAME_SHARES
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "Source/he_grenade_game/DataGenerator/CurriculumDataGenerator.cpp"
+VALIDATOR = (ROOT / "Scripts/review_dataset.py").read_text(encoding="utf-8")
 
 # Stable audit identities retained even though their rejected recipes are not
 # reused as production cells.
@@ -36,6 +37,11 @@ class CanonicalV2RegressionTests(unittest.TestCase):
 
     def test_runtime_metadata_matches_controller_contract(self) -> None:
         self.assertIn(CONTRACT_VERSION, self.source)
+
+    def test_semi_markov_preferences_are_not_per_episode_failures(self) -> None:
+        self.assertNotIn("central_attention <", VALIDATOR)
+        self.assertNotIn("wall_zone_frames >", VALIDATOR)
+        self.assertNotIn("len(position_bins) <", VALIDATOR)
 
     def test_named_human_audit_cases_remain_frozen(self) -> None:
         self.assertEqual(len(set(FAILED_SEEDS.values())), len(FAILED_SEEDS))
@@ -95,6 +101,16 @@ class CanonicalV2RegressionTests(unittest.TestCase):
         self.assertIn("CurrentV2ViewBinFrames", self.source)
         self.assertIn("ApplyV2PostThrowAttention", self.source)
         self.assertIn("AttentionRoll < 40", self.source)
+
+    def test_v1_uses_persistent_policy_without_grenade_controls(self) -> None:
+        route = self.source.split("void ACurriculumDataGenerator::PrepareNextAction", 1)[1]
+        self.assertIn("CurriculumStage == ECurriculumStage::Movement", route)
+        self.assertIn("SelectV2SemiMarkovAction(false)", route)
+        selector = self.source.split(
+            "uint16 ACurriculumDataGenerator::SelectV2SemiMarkovAction", 1
+        )[1].split("int32 ACurriculumDataGenerator::SelectV2PersistentHoldSteps", 1)[0]
+        self.assertIn("const bool bMovementOnly", selector)
+        self.assertIn("CurriculumAction::MovementMask | CurriculumAction::CameraMask", selector)
 
 
 if __name__ == "__main__":

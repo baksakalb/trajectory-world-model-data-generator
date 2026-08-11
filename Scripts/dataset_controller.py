@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-PLAN_VERSION = "movement-v1-budgeted-3"
+PLAN_VERSION = "movement-v1-persistent-semi-markov-4"
 CATALOG_VERSION = "fixed-arena-r4-realized-facing"
 DEFAULT_DURATION_CALIBRATION = Path(__file__).with_name("movement_v1_duration_calibration.json")
 MISSION_COUNTS = {
@@ -28,11 +28,11 @@ MISSION_COUNTS = {
 }
 GUIDED_MISSIONS = set(MISSION_COUNTS) - {"semi_markov"}
 MISSION_FRAME_SHARES = {
-    "semi_markov": Fraction(55, 100),
-    "object_view": Fraction(20, 100),
-    "contact_recovery": Fraction(15, 100),
-    "ramp_traverse": Fraction(5, 100),
-    "hoop_pass": Fraction(5, 100),
+    "semi_markov": Fraction(70, 100),
+    "object_view": Fraction(2, 15),
+    "contact_recovery": Fraction(10, 100),
+    "ramp_traverse": Fraction(1, 30),
+    "hoop_pass": Fraction(1, 30),
 }
 FACING_SHARES = {
     "forward": Fraction(35, 100),
@@ -439,6 +439,11 @@ def create_plan(args: argparse.Namespace) -> None:
     if root.exists() and any(root.iterdir()):
         raise ValueError(f"collection directory is not empty: {root}")
     calibration = load_duration_calibration(args.duration_calibration)
+    # V1 free play now uses full persistent episodes. Its duration is prescribed
+    # by the plan rather than inherited from the historical ten-second calibration.
+    calibration["expected_frames_by_scenario"]["semi_markov"] = [
+        args.episode_seconds * args.observation_rate + 1
+    ] * MISSION_COUNTS["semi_markov"]
     calibration_identity = stable_id("calibration", calibration)
     requirements = feasibility_requirements(calibration)
     minimum_frames = minimum_feasible_frame_budget(calibration)
@@ -866,7 +871,7 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--workers", type=int, default=1)
     plan.add_argument("--recipes-per-assignment", type=int, default=32)
     plan.add_argument("--tail-single-recipes", type=int, default=64)
-    plan.add_argument("--episode-seconds", type=int, default=10)
+    plan.add_argument("--episode-seconds", type=int, default=150)
     plan.add_argument("--observation-rate", type=int, default=20)
     plan.add_argument("--width", type=int, default=256)
     plan.add_argument("--height", type=int, default=256)

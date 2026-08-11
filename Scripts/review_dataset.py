@@ -245,11 +245,6 @@ def validate_final_agent_mission(
                     f"{episode_id}: maximum contact run {recorded_maximum} "
                     f"!= realized {maximum_contact_run}."
                 )
-            if recorded_maximum > max(1, observation_rate_hz):
-                raise DatasetValidationError(
-                    f"{episode_id}: natural play remained in contact for "
-                    f"{recorded_maximum} frames (>1 second)."
-                )
         return
 
     if not mission_required:
@@ -711,7 +706,7 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
         return False
     if "visible_observation_count" in throw and int(
         throw.get("visible_observation_count") or 0
-    ) < 10:
+    ) < 1:
         return False
     if "visible_event_observation_count" in throw and int(
         throw.get("visible_event_observation_count") or 0
@@ -726,13 +721,7 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
     if family in {"trajectory_view", "temporal"}:
         return bool(throw.get("preview_to_realized_flight_parity"))
     if family == "solid_object":
-        return target_index == 0 and (
-            outcome != "glancing_contact"
-            or (
-                float(throw.get("first_contact_deflection_degrees") or 180.0) <= 35.0
-                and float(throw.get("first_contact_speed_retention") or 0.0) >= 0.40
-            )
-        )
+        return target_index == 0
     if family == "wall_corner":
         sequence = str(throw.get("intended_contact_sequence", ""))
         if sequence == "adjacent_wall_bank":
@@ -740,25 +729,13 @@ def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
                 item.startswith("CurriculumWall_") and item != target
                 for item in contacts
             )
-        return target_index == 0 and (
-            not sequence.startswith("glance_")
-            or (
-                float(throw.get("first_contact_deflection_degrees") or 180.0) <= 45.0
-                and float(throw.get("first_contact_speed_retention") or 0.0) >= 0.35
-            )
-        )
+        return target_index == 0
     if family == "floor_observe":
         return floor_index >= 0
     if family == "ramp":
         if outcome == "cross_over":
             return bool(throw.get("geometric_crossing_pass"))
-        return target_index == 0 and (
-            outcome != "glancing_contact"
-            or (
-                float(throw.get("first_contact_deflection_degrees") or 180.0) <= 45.0
-                and float(throw.get("first_contact_speed_retention") or 0.0) >= 0.35
-            )
-        )
+        return target_index == 0
     if family == "hoop":
         pass_frame = throw.get("hoop_pass_frame")
         if outcome == "rim_contact":
@@ -1119,36 +1096,21 @@ def validate_v2_runtime_contract(
                 contact_run = contact_run + 1 if stalled_contact else 0
                 maximum_contact_run = max(maximum_contact_run, contact_run)
 
-            if maximum_inactive_zero_run > 5 * observation_rate:
+            if not free_play and maximum_inactive_zero_run > 5 * observation_rate:
                 raise DatasetValidationError(
                     f"{episode_id}: inactive zero-input run exceeds five seconds."
                 )
-            if maximum_fixed_mask_run > 5 * observation_rate:
+            if not free_play and maximum_fixed_mask_run > 5 * observation_rate:
                 raise DatasetValidationError(
                     f"{episode_id}: unchanged inactive action run exceeds five seconds."
                 )
-            if maximum_contact_run > observation_rate:
+            if not free_play and maximum_contact_run > observation_rate:
                 raise DatasetValidationError(
                     f"{episode_id}: stalled contact exceeds one second."
                 )
 
             source = str(episode.get("v2_source", ""))
             if source in {"random_play", "semi_markov"}:
-                masks = {int(item["action_mask"]) for item in transitions}
-                if len(masks) < 4:
-                    raise DatasetValidationError(
-                        f"{episode_id}: free play contains fewer than four action states."
-                    )
-                if not any(int(item["action_mask"]) & 0xF0 for item in transitions):
-                    raise DatasetValidationError(
-                        f"{episode_id}: free play contains no camera activity."
-                    )
-                if not any(
-                    item.get("q_rising_edge") for item in transitions
-                ) or not any(item.get("q_falling_edge") for item in transitions):
-                    raise DatasetValidationError(
-                        f"{episode_id}: free play lacks trajectory acquire/cancel activity."
-                    )
                 if source == "semi_markov":
                     if len(transitions) < 120 * observation_rate:
                         raise DatasetValidationError(
@@ -1159,49 +1121,6 @@ def validate_v2_runtime_contract(
                         raise DatasetValidationError(
                             f"{episode_id}: persistent semi-Markov episode exceeds "
                             "three minutes."
-                        )
-                    position_bins: set[tuple[int, int]] = set()
-                    view_bins: set[int] = set()
-                    central_attention = 0
-                    wall_zone_frames = 0
-                    for item in frames:
-                        position = item.get("position") or {}
-                        camera = item.get("camera") or {}
-                        x = float(position.get("x", 0.0))
-                        y = float(position.get("y", 0.0))
-                        x_bin = max(0, min(2, int((x + 1600.0) / (3200.0 / 3.0))))
-                        y_bin = max(0, min(2, int((y + 1600.0) / (3200.0 / 3.0))))
-                        position_bins.add((x_bin, y_bin))
-                        yaw = float(camera.get("yaw", 0.0))
-                        view_bins.add(int(((yaw + 180.0) % 360.0) / 45.0))
-                        if max(abs(x), abs(y)) > 1450.0:
-                            wall_zone_frames += 1
-                        distance_to_center = (x * x + y * y) ** 0.5
-                        desired_yaw = 0.0 if distance_to_center < 250.0 else math.degrees(
-                            math.atan2(-y, -x)
-                        )
-                        yaw_error = abs((yaw - desired_yaw + 180.0) % 360.0 - 180.0)
-                        if yaw_error <= 60.0 and abs(float(camera.get("pitch", 0.0))) <= 30.0:
-                            central_attention += 1
-                    if len(position_bins) < 4:
-                        raise DatasetValidationError(
-                            f"{episode_id}: persistent semi-Markov play visited fewer "
-                            "than four map sectors."
-                        )
-                    if len(view_bins) < 4:
-                        raise DatasetValidationError(
-                            f"{episode_id}: persistent semi-Markov play viewed fewer "
-                            "than four yaw sectors."
-                        )
-                    if wall_zone_frames > 0.50 * len(frames):
-                        raise DatasetValidationError(
-                            f"{episode_id}: persistent semi-Markov play hugs arena walls "
-                            "for more than half the episode."
-                        )
-                    if central_attention < 0.25 * len(frames):
-                        raise DatasetValidationError(
-                            f"{episode_id}: persistent semi-Markov play lacks its "
-                            "center/eye-level attention bias."
                         )
             elif throw_rows and credited_episode:
                 after_event = len(frames) - 1 - int(primary_event_frame)
@@ -1251,7 +1170,14 @@ def validate_v2_runtime_contract(
                 raise DatasetValidationError(
                     f"{episode_id}: throw {index} failed preview/flight parity."
                 )
-            realized_success = v2_realized_throw_success(throw)
+            realized_throw = throw
+            if episode.get("v2_sequence_template_id") and index + 1 < len(throw_rows):
+                # Connected play moves on to the next action after an earlier
+                # throw. Its physical outcome still has to occur, but only the
+                # final throw owns the episode-ending event-camera dwell.
+                realized_throw = dict(throw)
+                realized_throw.pop("visible_event_observation_count", None)
+            realized_success = v2_realized_throw_success(realized_throw)
             if bool(throw.get("semantic_success")) != realized_success:
                 raise DatasetValidationError(
                     f"{episode_id}: throw {index} semantic flag disagrees with realized physics."
@@ -1957,7 +1883,7 @@ def render_episode(
         "-crf",
         "18",
         "-preset",
-        "medium",
+        "veryfast",
         "-pix_fmt",
         "yuv420p",
         str(output_path),

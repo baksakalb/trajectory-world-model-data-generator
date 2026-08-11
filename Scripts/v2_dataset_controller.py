@@ -176,6 +176,8 @@ def sequence_connections(template_index: int) -> list[str]:
     connected: list[str] = []
     for step, family in enumerate(template.base_family_pattern):
         choices = grouped[family]
+        if family == "floor_observe":
+            choices = [cell for cell in choices if cell.get("arc_band") == "low"]
         connected.append(choices[(template_index * 37 + step * 101) % len(choices)]["cell_id"])
     return connected
 
@@ -279,6 +281,24 @@ def build_recipe(
     # into unrelated profiles).
     if cell["family"] == "trajectory_view":
         recipe["aim_acquisition_profile"] = cell["interaction_mode"]
+    # Rare positive-event missions vary their approach/view geometry, not by
+    # walking away from the event immediately after release. Temporal movement
+    # coverage belongs to its dedicated family and connected sequences.
+    if cell["family"] in {
+        "trajectory_view", "solid_object", "wall_corner", "floor_observe",
+        "ramp", "hoop", "out_of_bounds",
+    }:
+        recipe["post_throw_movement_profile"] = "stationary"
+    if cell["family"] in {"solid_object", "wall_corner"}:
+        recipe["post_throw_camera_profile"] = "target_region"
+    elif cell["family"] == "floor_observe":
+        recipe["post_throw_camera_profile"] = "landing_region"
+    elif cell["family"] in {"ramp", "hoop"}:
+        recipe["post_throw_camera_profile"] = "crossing_corridor"
+    elif cell["family"] == "trajectory_view":
+        recipe["post_throw_camera_profile"] = "ordinary_survey"
+    elif cell["family"] == "out_of_bounds":
+        recipe["post_throw_camera_profile"] = "exit_direction"
     if sequence_index is not None:
         template = SEQUENCE_TEMPLATES[sequence_index]
         recipe["sequence_template_id"] = template.template_id
@@ -584,11 +604,13 @@ def create_qualification_plan(args: argparse.Namespace) -> None:
         recipes.append(recipe)
         repetitions[cell["cell_id"]] += 1
 
-    for cell_id in dict.fromkeys(requested_cells):
-        append_recipe(by_cell_id[cell_id])
-    for template_id in dict.fromkeys(requested_sequences):
-        sequence_index = by_template_id[template_id]
-        append_recipe(by_cell_id[sequence_connections(sequence_index)[0]], sequence_index)
+    qualification_repetitions = int(getattr(args, "repetitions", 1))
+    for _ in range(qualification_repetitions):
+        for cell_id in dict.fromkeys(requested_cells):
+            append_recipe(by_cell_id[cell_id])
+        for template_id in dict.fromkeys(requested_sequences):
+            sequence_index = by_template_id[template_id]
+            append_recipe(by_cell_id[sequence_connections(sequence_index)[0]], sequence_index)
 
     generator = {
         "stage": "trajectory_throw_v2", "observation_rate": args.observation_rate,
@@ -627,6 +649,7 @@ def create_qualification_plan(args: argparse.Namespace) -> None:
         "distribution_feasible": False, "target_accepted_frames": target,
         "selected_base_cell_count": len(dict.fromkeys(requested_cells)),
         "selected_sequence_template_count": len(dict.fromkeys(requested_sequences)),
+        "qualification_repetitions": qualification_repetitions,
         "active_recipe_count": len(recipes), "reserve_recipe_count": 0,
         "assignment_count": len(assignments), "worker_count": args.workers,
         "recipes_per_assignment": args.recipes_per_assignment,
@@ -799,6 +822,7 @@ def parser() -> argparse.ArgumentParser:
     qualification.add_argument("--all-base-cells", action="store_true")
     qualification.add_argument("--all-sequences", action="store_true")
     qualification.add_argument("--audit-cells", action="store_true")
+    qualification.add_argument("--repetitions", type=int, default=1)
     qualification.add_argument("--workers", type=int, default=1)
     qualification.add_argument("--recipes-per-assignment", type=int, default=1)
     qualification.add_argument("--episode-seconds", type=int, default=20)
@@ -838,6 +862,8 @@ def parser() -> argparse.ArgumentParser:
 def validate_common_args(args: argparse.Namespace) -> None:
     if getattr(args, "workers", 1) < 1 or getattr(args, "recipes_per_assignment", 1) < 1:
         raise ValueError("workers and recipes-per-assignment must be positive")
+    if getattr(args, "repetitions", 1) < 1:
+        raise ValueError("repetitions must be positive")
     width = getattr(args, "width", 64)
     height = getattr(args, "height", 64)
     if not 64 <= width <= 4096 or not 64 <= height <= 4096:

@@ -23,8 +23,22 @@ class V2AuditTests(unittest.TestCase):
         slots = [{"slot_id": "A", "family": "floor", "title": "one", "cell_id": "absent"}]
         selected, missing = select_examples([], slots)
         self.assertFalse(selected)
-        self.assertEqual(missing, slots)
+        self.assertEqual(missing, [{**slots[0], "available_examples": 0}])
         self.assertFalse(coverage(selected, missing)["complete"])
+
+    def test_three_examples_are_distinct_and_ordered_per_slot(self) -> None:
+        slots = [{"slot_id": "A", "family": "hoop", "title": "clean", "cell_id": "cell-a"}]
+        candidates = [
+            {"cell_id": "cell-a", "semantic_success": True,
+             "replay_identity": replay, "seed": seed,
+             "episode_id": f"e{seed}", "output_directory": "z"}
+            for replay, seed in (("ccc", 3), ("aaa", 1), ("bbb", 2))
+        ]
+        selected, missing = select_examples(candidates, slots, examples_per_slot=3)
+        self.assertFalse(missing)
+        self.assertEqual([item["replay_identity"] for item in selected], ["aaa", "bbb", "ccc"])
+        self.assertEqual([item["example_index"] for item in selected], [1, 2, 3])
+        self.assertEqual(len(selected), 3)
 
     def test_event_manifest_uses_authoritative_transition_edges(self) -> None:
         transitions = [

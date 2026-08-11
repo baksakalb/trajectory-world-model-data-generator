@@ -348,20 +348,24 @@ backward, both strafe, and free-attention facing profiles. Continuous geometry
 such as radius, start/end points, offsets, and durations is stratified and
 jittered inside validated safe ranges.
 
-The frozen mission frame shares are 55% semi-Markov, 20% object view, 15%
-contact/recovery, 5% ramp, and 5% hoop. Object targets are equal; object modes
+The current mission frame shares are 70% persistent semi-Markov, 13.33% object
+view, 10% contact/recovery, 3.33% ramp, and 3.33% hoop. The four prescribed
+mission families retain their previous relative balance inside the remaining
+30%. Object targets are equal; object modes
 target 40/35/20/5 for approach/pass-by/partial-orbit/full-orbit; gaze targets
 40/25/20/15; orbit directions are equal. Contact targets, recovery styles, and
 approaches are equal, with 35/15/15/15/20 facing. Ramp and hoop directions are
 equal, paths are 50/25/25, and facing is again 35/15/15/15/20.
 
+V1 semi-Markov recipes default to 150 seconds and use the same persistent,
+state-aware policy as V2 free play, with Q and E removed from the action mask.
 Recipe counts are derived from those frame shares using the versioned
 per-scenario duration calibration in
 `Scripts/movement_v1_duration_calibration.json`. The calibration comes from a
 300,177-frame Windows prescribed run and prevents long modes from being
 overrepresented merely because an episode lasts longer. With the complete
 887-cell mandatory floor and current calibration, the smallest plan which can
-also satisfy all frozen aggregate shares is 344,534 credited frames. The
+also satisfy all current aggregate shares is 648,000 credited frames. The
 limiting constraint is mandatory contact-facing coverage. Smaller production
 plans are rejected explicitly. Local below-floor smoke and controller tests may
 opt into `--allow-infeasible-diagnostic`; the resulting plan records
@@ -2377,7 +2381,8 @@ or encoder.
 
 ### Active implementation checkpoint
 
-Movement V1 is preserved. V1 and V2 share one canonical ten-bit action layout:
+Movement V1 missions are preserved; only its old short random-play selector is
+replaced. V1 and V2 share one canonical ten-bit action layout:
 W, A, S, D, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Q, E occupy bits 0-9.
 Both stages use the same transition columns and derived forward/right/pitch/yaw
 axes. Their dataset version strings intentionally differ: current Movement V1
@@ -2421,20 +2426,23 @@ Every prescribed physical event is admitted before capture by the exact
 contact-aware canonical grenade simulator. All throws retain the canonical
 1400 cm/s launch speed and common gravity, restitution, friction, damping, and
 unlimited-natural-bounce configuration. Mission code may search only a bounded
-set of camera geometries and requires the outcome to survive small neighboring
-camera perturbations. It may not alter physics, mine seeds, activate a reserve,
+set of camera geometries and requires the exact recorded camera command to
+produce the requested outcome. It may not alter physics, mine seeds, activate a reserve,
 or substitute a failed episode. An uncertifiable cell aborts qualification or
 collection and is treated as a catalog/implementation defect.
 
-Runtime and independent validation gate requested first contact, full contact
-order after settling, hoop crossing, bounce/rest state, arena-exit direction,
-preview-versus-realized parity, visible-event dwell, prescribed movement dwell,
-and realized signed displacement. Ordinary missions reject every arena exit;
+Runtime and independent validation gate the explicitly requested first contact,
+contact order, hoop/ramp crossing, arena-exit direction, preview-versus-realized
+parity, ordinary action/state integrity, and a short useful view of the requested
+event. They do not impose arbitrary deflection, retention, bounce-count, rest,
+camera-bin, eye-level-percentage, or map-coverage thresholds. Ordinary missions
+reject every arena exit;
 only semi-Markov play and the explicit directional OOB family permit it. The
 camera begins prescribed missions with an eye-level scene-establishing view and
 uses recorded human-speed actions rather than snaps. Required contacts,
-crossings, bounces, rolls, and settling must remain visible for their mission
-contract. Connected relocation sequences use broad floor trajectories instead
+crossings, and physical motion use a camera that keeps the grenade/event in view;
+brief physical contact is not required to occupy an invented number of frames.
+Connected relocation sequences use bounded local low-arc floor trajectories instead
 of pretending that a precision object collision remains guaranteed after
 unconstrained realized movement.
 
@@ -2448,28 +2456,30 @@ regression test freezes their presence. The editor worker also supplies the
 The human audit has 99 representative slots rather than requiring review of all
 312 geometric cells: 12 semi-Markov controls, 12 trajectory-view, 15 solid
 object, eight wall, six floor, eight ramp, 18 hoop, eight temporal, four OOB,
-and eight connected-sequence representatives. Audit export never fills a slot
+and eight connected-sequence representatives. The review set contains three
+independent examples per slot (297 videos) so validity and repetition can be
+judged visually. Audit export never fills a slot
 with a semantic failure. A complete 99-episode 384×384 capture produced 50,901
 observations, but its fail-fast validation exposed the now-fixed Parquet field
 omission at episode 41. The eight affected wall representatives were regenerated
 at 384×384 and passed independent validation (1,326 observations); all eight
 connected templates separately passed the complete worker/finalizer/validator
-path (1,798 observations). Python V2 regression tests pass 51/51 and the Unreal
-Editor target builds successfully. These results are machine qualification, not
-human acceptance.
+path (1,798 observations). The current review export contains all 297 requested
+384×384 MP4s with zero missing slots. It combines 279 unaffected validated
+examples with an 18-example corrected supplement for the high-floor and SQ04/
+SQ05/SQ08 definitions; no failed recipe is exported. The full Python suite
+passes 66/66 and the Unreal Editor target builds successfully. These results are
+machine qualification, not human acceptance.
 
 Remaining gates before production are deliberately explicit:
 
-1. Regenerate one complete 99-slot 384×384 audit with the corrected Parquet
-   schema and current source fingerprint.
-2. Independently validate every episode and export MP4s only from stored
-   authoritative observations.
-3. Obtain human visual acceptance for all 99 representatives; correct the
+1. Obtain human visual acceptance for all 99 representatives (three examples
+   each); correct the
    catalog or implementation if any representative is visually unclear.
-4. Rerun complete low-resolution catalog qualification and duration calibration
+2. Rerun complete low-resolution catalog qualification and duration calibration
    after acceptance.
-5. Select final frame budget X and create a new immutable 70/30 production plan.
-6. Start production only after all prior gates pass. Do not reuse the historical
+3. Select final frame budget X and create a new immutable 70/30 production plan.
+4. Start production only after all prior gates pass. Do not reuse the historical
    402,200-frame or 480,000/600,000 diagnostic feasibility values.
 
 No remote or cloud generation is required by this workflow. The old standalone

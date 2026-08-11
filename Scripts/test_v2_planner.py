@@ -68,7 +68,7 @@ class V2CatalogTests(unittest.TestCase):
         self.assertEqual(len(cells), 312)
         self.assertEqual(len({cell["cell_id"] for cell in cells}), 312)
         self.assertEqual(catalog_fingerprint(cells), "61fc9d8f6fb886f77a443bd8aa8cc10810d13560c2a40057bfa33996dfccf151")
-        self.assertEqual(sequence_fingerprint(), "8b2201b6d9ca8aa75584e133ee3128dfbbd910cc808d10642fc71d2e162793f1")
+        self.assertEqual(sequence_fingerprint(), "4d903b85e3a27f0f0bfc7adbcdd912538496bc68c3a9af7f00ba11f2a741c477")
 
     def test_every_sequence_and_visual_audit_slot_is_unique(self) -> None:
         self.assertEqual(len(SEQUENCE_TEMPLATES), 8)

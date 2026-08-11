@@ -9,6 +9,7 @@ import io
 import json
 import tarfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -93,6 +94,7 @@ def result_candidates(collections: Iterable[Path]) -> list[dict[str, Any]]:
 def select_examples(
     candidates: Iterable[dict[str, Any]],
     slots: Iterable[dict[str, Any]] | None = None,
+    examples_per_slot: int = 1,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     by_cell: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_sequence: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -117,10 +119,16 @@ def select_examples(
             by_sequence.get(sequence_id, []) if sequence_id
             else by_cell.get(str(slot["cell_id"]), [])
         )
-        if not matches:
-            missing.append(dict(slot))
+        if len(matches) < examples_per_slot:
+            missing.append({**slot, "available_examples": len(matches)})
             continue
-        selected.append({**slot, **matches[0]})
+        for example_index, match in enumerate(matches[:examples_per_slot], start=1):
+            selected.append({
+                **slot,
+                **match,
+                "example_index": example_index,
+                "example_count": examples_per_slot,
+            })
     return selected, missing
 
 
@@ -171,7 +179,9 @@ def render_selected(selected: list[dict[str, Any]], output: Path, ffmpeg: Path) 
             for transition in transition_rows:
                 transitions[str(transition["episode_id"])].append(transition)
             cache[key] = (dataset, shard, records, transitions)
-        dataset, shard_path, records, transitions = cache[key]
+    def render_one(example: dict[str, Any]) -> tuple[str, str, Image.Image]:
+        dataset_dir = Path(str(example["output_directory"]))
+        dataset, shard_path, records, transitions = cache[str(dataset_dir)]
         episode_id = str(example["episode_id"])
         frames = records[episode_id]
         example["event_indices"] = event_indices(
@@ -179,7 +189,10 @@ def render_selected(selected: list[dict[str, Any]], output: Path, ffmpeg: Path) 
         )
         family_dir = output / str(example["family"])
         family_dir.mkdir(parents=True, exist_ok=True)
-        video = family_dir / f"{example['slot_id']}.mp4"
+        suffix = "" if int(example.get("example_count", 1)) == 1 else (
+            f"--example-{int(example['example_index']):02d}"
+        )
+        video = family_dir / f"{example['slot_id']}{suffix}.mp4"
         with tarfile.open(shard_path, "r:") as archive:
             review_dataset.render_episode(
                 archive, ffmpeg, video, frames,
@@ -198,11 +211,16 @@ def render_selected(selected: list[dict[str, Any]], output: Path, ffmpeg: Path) 
             extracted = archive.extractfile(thumbnail_key)
             if extracted is None:
                 raise ValueError(f"could not extract thumbnail {thumbnail_key}")
-            thumbnails[str(example["family"])].append((
-                str(example["slot_id"]), Image.open(io.BytesIO(extracted.read())).convert("RGB")
-            ))
+            thumbnail = Image.open(io.BytesIO(extracted.read())).convert("RGB")
         example["video"] = str(video.relative_to(output)).replace("\\", "/")
         example["source_image_keys"] = [frame["rgb_key"] for frame in frames]
+        return str(example["family"]), str(example["slot_id"]), thumbnail
+
+    # Each video has its own tar handle and ffmpeg process. Three workers match
+    # the local audit-generation fanout without sharing archive state.
+    with ThreadPoolExecutor(max_workers=min(3, len(selected))) as executor:
+        for family, slot_id, thumbnail in executor.map(render_one, selected):
+            thumbnails[family].append((slot_id, thumbnail))
 
     font = ImageFont.load_default()
     for family, items in thumbnails.items():
@@ -221,16 +239,19 @@ def render_selected(selected: list[dict[str, Any]], output: Path, ffmpeg: Path) 
         sheet.save(output / f"contact-sheet-{family}.jpg", quality=90)
 
 
-def coverage(selected: list[dict[str, Any]], missing: list[dict[str, Any]]) -> dict[str, Any]:
+def coverage(
+    selected: list[dict[str, Any]], missing: list[dict[str, Any]], examples_per_slot: int = 1,
+) -> dict[str, Any]:
     counts: dict[str, int] = defaultdict(int)
     for item in selected:
         counts[str(item["family"])] += 1
-    required = len(audit_slots())
+    required = len(audit_slots()) * examples_per_slot
     return {
         "required_slot_count": required,
         "selected_slot_count": len(selected),
         "missing_slot_count": len(missing),
         "selected_by_family": dict(sorted(counts.items())),
+        "examples_per_slot": examples_per_slot,
         "complete": not missing and len(selected) == required,
         "missing_slots": missing,
     }
@@ -243,16 +264,21 @@ def main() -> int:
     parser.add_argument("--ffmpeg", type=Path)
     parser.add_argument("--allow-incomplete", action="store_true")
     parser.add_argument("--select-only", action="store_true")
+    parser.add_argument("--examples-per-slot", type=int, default=1)
     args = parser.parse_args()
-    selected, missing = select_examples(result_candidates(args.collection))
+    if args.examples_per_slot < 1:
+        parser.error("--examples-per-slot must be positive")
+    selected, missing = select_examples(
+        result_candidates(args.collection), examples_per_slot=args.examples_per_slot,
+    )
     if missing and not args.allow_incomplete:
-        print(json.dumps(coverage(selected, missing), indent=2, sort_keys=True))
+        print(json.dumps(coverage(selected, missing, args.examples_per_slot), indent=2, sort_keys=True))
         return 2
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if not args.select_only:
         render_selected(selected, output, resolve_ffmpeg(args.ffmpeg))
-    report = coverage(selected, missing)
+    report = coverage(selected, missing, args.examples_per_slot)
     manifest = {
         "schema_version": 1,
         "selection_contract": "v2-certified-positive-event-audit-1",
@@ -265,7 +291,7 @@ def main() -> int:
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (output / "coverage-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    required = len(audit_slots())
+    required = len(audit_slots()) * args.examples_per_slot
     lines = [
         "# V2 semantic visual audit", "",
         f"Selected {len(selected)} of {required} frozen slots.", "",

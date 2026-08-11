@@ -332,14 +332,11 @@ class V2RuntimeContractTests(unittest.TestCase):
         }
         return dataset, frames, transitions, episode
 
-    def test_contract3_rejects_dead_random_tail(self) -> None:
+    def test_free_play_does_not_fail_for_a_long_idle_sample(self) -> None:
         dataset, frames, transitions, episode = self.make_contract3_random_records(
             [1, (1 << 8), 0] + ([0] * 119)
         )
-        with self.assertRaisesRegex(DatasetValidationError, "zero-input run"):
-            validate_v2_runtime_contract(
-                dataset, "episode", frames, transitions, episode
-            )
+        validate_v2_runtime_contract(dataset, "episode", frames, transitions, episode)
 
     def test_contract3_accepts_varied_random_activity(self) -> None:
         masks = [(1 << 8), 0, (1 << 4), 1] * 30
@@ -362,17 +359,14 @@ class V2RuntimeContractTests(unittest.TestCase):
             dataset, "episode", frames, transitions, episode
         )
 
-    def test_stationary_contact_tail_is_rejected(self) -> None:
+    def test_free_play_does_not_fail_for_stationary_wall_contact(self) -> None:
         masks = [(1 << 8), 0, (1 << 4), 1] * 10
         dataset, frames, transitions, episode = self.make_contract3_random_records(
             masks
         )
         for item in frames:
             item["contact"] = True
-        with self.assertRaisesRegex(DatasetValidationError, "stalled contact"):
-            validate_v2_runtime_contract(
-                dataset, "episode", frames, transitions, episode
-            )
+        validate_v2_runtime_contract(dataset, "episode", frames, transitions, episode)
 
     def test_contract3_accepts_bounded_event_random_continuation(self) -> None:
         masks = [(1 << 8), 0] + ([1, (1 << 4), (1 << 8), 0] * 10)

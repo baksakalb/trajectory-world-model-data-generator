@@ -17,7 +17,7 @@ from typing import Any, Iterable, Iterator
 
 
 CATALOG_VERSION = "trajectory-throw-v2-certified-positive-events-3"
-SEQUENCE_VERSION = "trajectory-throw-v2-certified-sequences-2"
+SEQUENCE_VERSION = "trajectory-throw-v2-certified-sequences-5"
 HOLD_BANDS = ("short", "medium", "long", "very_long")
 SECTORS = tuple(f"S{index}" for index in range(8))
 DISTANCE_BANDS = ("near", "medium", "far")
@@ -129,20 +129,22 @@ SEQUENCE_TEMPLATES = (
     _sequence(4, "throw_relocate_reacquire", 2,
               aims=("static_hold", "prelook_q_off"),
               movement=("relocation_before_next_throw",),
-              camera=("target_region", "ordinary_survey"),
+              camera=("target_region", "landing_region"),
               families=("floor_observe", "floor_observe"),
               reaim=True, relocation=True),
     _sequence(5, "mixed_q_retention", 2,
-              q=("immediate_release", "short_retain"), reaim=True),
+              q=("immediate_release", "short_retain"),
+              camera=("landing_region",),
+              families=("floor_observe",), reaim=True),
     _sequence(6, "cooldown_rejection_recovery", 2,
               q=("cooldown_long_retain", "immediate_release"),
               reaim=True, recovery=True),
     _sequence(7, "two_grenade_persistence", 2,
               families=("floor_observe", "solid_object"), reaim=True),
     _sequence(8, "three_grenade_connected_play", 3,
-              aims=("static_hold", "yaw_adjust", "pitch_adjust"),
+              aims=("static_hold", "prelook_q_off", "static_hold"),
               movement=("forward", "strafe_right", "backward"),
-              camera=("landing_region", "target_region", "ordinary_survey"),
+              camera=("landing_region", "target_region", "landing_region"),
               families=("floor_observe", "floor_observe", "floor_observe"),
               reaim=True, relocation=True),
 )
