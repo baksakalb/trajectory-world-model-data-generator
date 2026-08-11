@@ -145,6 +145,8 @@ The V2 minimum feasible frame budget will be calculated from the finalized
 mission durations and family shares. No historical feasibility floor will be
 copied.
 
+The complete agreed implementation contract is in `V2_MISSION_DESIGN.md`.
+
 ## Canonical grenade physics
 
 Every accepted throw uses the fixed game launch path, launch speed, cooldown,
