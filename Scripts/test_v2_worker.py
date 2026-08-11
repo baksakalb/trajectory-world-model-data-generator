@@ -68,8 +68,11 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
             "recipe_id": "r", "observation_count": 101,
             "v2_source": "semi_markov", "mission_success": False,
         }
-        with patch("dataset_worker.read_episode_rows", return_value=[row]):
-            result = build_validated_result(assignment, "attempt-000", "worker", Path("unused"))
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "dataset.json").write_text("{}\n", encoding="utf-8")
+            with patch("dataset_worker.read_episode_rows", return_value=[row]):
+                result = build_validated_result(assignment, "attempt-000", "worker", output)
         self.assertEqual(result["accepted_observation_frames"], 100)
         self.assertEqual(result["semantic_failure_recipe_ids"], [])
 
@@ -85,7 +88,8 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
         }
         row = {
             "recipe_id": "r", "observation_count": 101,
-            "v2_source": "mission", "mission_success": False,
+            "v2_source": "mission", "v2_mission_type": "rectangle_north_face",
+            "mission_success": False,
         }
         with patch("dataset_worker.read_episode_rows", return_value=[row]):
             with self.assertRaisesRegex(ValueError, "invariant failed"):

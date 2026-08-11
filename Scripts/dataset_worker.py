@@ -161,6 +161,9 @@ def build_validated_result(
     accepted_frames = 0
     produced_frames = 0
     accepted_frames_by_mission: dict[str, int] = {}
+    assignment_is_v2 = str(assignment.get("plan_version", "")).startswith(
+        "trajectory-throw-v2"
+    )
     for recipe in assignment["recipes"]:
         recipe_id = recipe["recipe_id"]
         row = rows_by_recipe.get(recipe_id)
@@ -170,7 +173,7 @@ def build_validated_result(
         observation_count = int(row["observation_count"])
         produced_frames += observation_count
         mission = recipe["mission"]
-        is_v2 = str(assignment.get("plan_version", "")).startswith("trajectory-throw-v2")
+        is_v2 = assignment_is_v2
         source = str(recipe.get("source") or "")
         if is_v2:
             if source not in {"semi_markov", "mission"}:
@@ -181,6 +184,10 @@ def build_validated_result(
                 raise ValueError(f"V2 semi-Markov recipe has mission {mission!r}")
             if source == "mission" and mission != recipe.get("mission_type"):
                 raise ValueError(f"V2 mission recipe {recipe_id} changed mission identity")
+            if row.get("v2_replay_identity") != recipe.get("replay_identity"):
+                raise ValueError(f"V2 recipe {recipe_id} changed replay identity")
+            if source == "mission" and row.get("v2_mission_type") != recipe.get("mission_type"):
+                raise ValueError(f"V2 recipe {recipe_id} changed runtime mission type")
             # A certified mission disagreement is a code/physics regression.
             # It is never a semantic result eligible for a different seed.
             if source == "mission" and not bool(row["mission_success"]):
@@ -202,13 +209,14 @@ def build_validated_result(
                 "family": recipe.get("family"),
                 "scenario_index": int(recipe["scenario_index"]),
                 "cell_id": recipe.get("cell_id"),
+                "variation_cell_id": recipe.get("variation_cell_id"),
                 "recipe_id": recipe_id,
                 "credited_observation_frames": credited_frames,
                 "produced_observation_frames": observation_count,
             })
         else:
             semantic_failures.append(recipe_id)
-    return {
+    result = {
         "schema_version": 1,
         "plan_id": assignment["plan_id"],
         "assignment_id": assignment["assignment_id"],
@@ -226,6 +234,21 @@ def build_validated_result(
         "semantic_failure_recipe_ids": semantic_failures,
         "credited_cells": credited_cells,
     }
+    if assignment_is_v2:
+        result.update({
+            "output_dataset_sha256": sha256_file(output / "dataset.json"),
+            "assignment_digest": assignment.get("assignment_digest"),
+            "recipe_bindings": [
+                {
+                    "recipe_id": recipe["recipe_id"],
+                    "replay_identity": recipe.get("replay_identity"),
+                    "mission_type": recipe.get("mission_type"),
+                    "mission_solution": recipe.get("mission_solution"),
+                }
+                for recipe in assignment["recipes"]
+            ],
+        })
+    return result
 
 
 def command_for(executable: Path, runtime_manifest: Path, output: Path) -> list[str]:
@@ -249,6 +272,8 @@ def command_for(executable: Path, runtime_manifest: Path, output: Path) -> list[
 def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:
     root = args.collection.resolve()
     assignment = read_json(assignment_path)
+    if str(assignment.get("plan_version", "")).startswith("trajectory-throw-v2"):
+        v2_controller.validate_assignment_against_plan(root, assignment)
     assignment_id = assignment["assignment_id"]
     previous = results_for(root, assignment_id)
     if any(result.get("technical_result") == "validated" for result in previous):
@@ -328,7 +353,24 @@ def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:
         })
         return "validation_failed"
 
-    result = build_validated_result(assignment, attempt_id, args.executor_id, output)
+    try:
+        result = build_validated_result(assignment, attempt_id, args.executor_id, output)
+    except ValueError as error:
+        write_new_json(result_path, {
+            "schema_version": 1,
+            "plan_id": assignment["plan_id"],
+            "assignment_id": assignment_id,
+            "attempt_id": attempt_id,
+            "executor_id": args.executor_id,
+            "started_utc": started,
+            "completed_utc": utc_now(),
+            "technical_result": "validation_failed",
+            "semantic_result": "not_evaluated",
+            "resolved_recipe_ids": [],
+            "accepted_observation_frames": 0,
+            "error": str(error),
+        })
+        return "validation_failed"
     result["execution_build"] = args.execution_build
     write_new_json(result_path, result)
     return "validated"
@@ -336,7 +378,10 @@ def run_assignment(args: argparse.Namespace, assignment_path: Path) -> str:
 
 def prior_wave_complete(root: Path, assignment: dict[str, Any]) -> bool:
     """Do not let a fast worker run arbitrarily far beyond slower workers."""
-    if "reserve_activation_for" in assignment:
+    is_v2 = str(assignment.get("plan_version", "")).startswith("trajectory-throw-v2")
+    if is_v2 and v2_controller._forbidden_keys(assignment):
+        raise ValueError("V2 assignments cannot use reserve or replacement fields")
+    if not is_v2 and "reserve_activation_for" in assignment:
         return True
     wave = int(assignment.get("dispatch_wave", 0))
     if wave == 0:
@@ -348,7 +393,8 @@ def prior_wave_complete(root: Path, assignment: dict[str, Any]) -> bool:
     }
     for path in (root / "assignments").glob("*.json"):
         earlier = read_json(path)
-        if "reserve_activation_for" in earlier:
+        earlier_is_v2 = str(earlier.get("plan_version", "")).startswith("trajectory-throw-v2")
+        if not earlier_is_v2 and "reserve_activation_for" in earlier:
             continue
         if int(earlier.get("dispatch_wave", 0)) < wave and earlier["assignment_id"] not in validated:
             return False

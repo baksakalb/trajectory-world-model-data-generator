@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Geometry, variation, timing, and camera-construction tests for all 60 types."""
+"""Geometry, variation, timing, and camera-construction tests for all 62 types."""
 
 from __future__ import annotations
 
@@ -30,7 +30,9 @@ class V2MissionCatalogTests(unittest.TestCase):
             timing = build_solution(item, 0, 20)["timing"]
             self.assertGreaterEqual(timing["establish_steps"], 15, item.slug)
             self.assertGreaterEqual(timing["preview_dwell_steps"], 12, item.slug)
-            self.assertGreaterEqual(timing["camera_adjust_steps"], 3, item.slug)
+            # Isolated named missions open at their solved throwing rotation;
+            # camera acquisition is covered by the semi-Markov recipes.
+            self.assertEqual(timing["camera_adjust_steps"], 0, item.slug)
             self.assertGreater(
                 timing["total_observation_frames"],
                 timing["throw_source_frame"] + 20,
@@ -68,6 +70,18 @@ class V2MissionCatalogTests(unittest.TestCase):
         ]
         self.assertTrue(edges)
         self.assertTrue(all(item.region_radius_cm >= 20.0 for item in edges))
+
+    def test_rectangle_nw_edge_paths_stay_clear_of_central_ramp(self) -> None:
+        item = next(
+            value for value in mission_types()
+            if value.slug == "rectangle_nw_vertical_edge"
+        )
+        for repetition in range(3):
+            solution = build_solution(item, repetition, 20, sample_count=3)
+            # The ramp spans only the central Y corridor.  Both launch and
+            # target remain on the rectangle's west-side Y corridor.
+            self.assertGreater(solution["player_spawn"]["y"], 200.0)
+            self.assertGreater(solution["target_point"]["y"], 400.0)
 
     def test_continuous_variations_are_deterministic_and_well_separated(self) -> None:
         for item in mission_types():

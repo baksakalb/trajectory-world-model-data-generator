@@ -4,10 +4,17 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from Scripts.finalize_production_dataset import V2_THROW
-from Scripts.review_dataset import DatasetValidationError, validate_v2_runtime_contract
+from Scripts.review_dataset import (
+    DatasetValidationError,
+    validate_dataset,
+    validate_v2_runtime_contract,
+)
 
 
 def frame(
@@ -34,6 +41,20 @@ def frame(
 
 
 class V2RuntimeContractTests(unittest.TestCase):
+    def test_complete_manifest_cannot_omit_requested_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "dataset.json").write_text(json.dumps({
+                "complete": True,
+                "requested_episode_count": 1,
+                "completed_episode_count": 0,
+                "observation_count": 0,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(
+                DatasetValidationError, "requested 1, completed 0"
+            ):
+                validate_dataset(root)
+
     def setUp(self) -> None:
         self.dataset = {
             "schema_version": "trajectory_throw_v2-preflight-12",
@@ -42,7 +63,7 @@ class V2RuntimeContractTests(unittest.TestCase):
         self.frames = [
             frame(0, q=False, cooldown=0),
             frame(1, q=True, cooldown=0),
-            frame(2, q=True, cooldown=40, grenades=[{"id": 0, "resting": False}]),
+            frame(2, q=False, cooldown=40, grenades=[{"id": 0, "resting": False}]),
         ]
         self.transitions = [
             {
@@ -55,6 +76,7 @@ class V2RuntimeContractTests(unittest.TestCase):
                 "forward_axis": 0.0,
                 "right_axis": 0.0,
                 "cooldown_before_steps": 0,
+                "cooldown_after_steps": 0,
             },
             {
                 "action_mask": (1 << 8) | (1 << 9),
@@ -66,6 +88,7 @@ class V2RuntimeContractTests(unittest.TestCase):
                 "forward_axis": 0.0,
                 "right_axis": 0.0,
                 "cooldown_before_steps": 0,
+                "cooldown_after_steps": 40,
             },
         ]
 
@@ -104,6 +127,8 @@ class V2RuntimeContractTests(unittest.TestCase):
         self.assertIn("launch_position", names)
         self.assertIn("launch_velocity", names)
         self.assertIn("physics_config_identity", names)
+        self.assertIn("first_contact_normal", names)
+        self.assertIn("first_contact_velocity", names)
         self.assertNotIn("intended_family", names)
         self.assertNotIn("semantic_success", names)
         self.assertNotIn("base_cell_id", names)
@@ -114,14 +139,19 @@ class V2RuntimeContractTests(unittest.TestCase):
             frame(0, q=False, cooldown=0, mission_type=mission),
             frame(1, q=True, cooldown=0, mission_type=mission),
             frame(
-                2, q=True, cooldown=40,
+                2, q=False, cooldown=40,
                 grenades=[{"id": 0, "resting": False}], mission_type=mission,
             ),
         ]
         episode = {
             "v2_source": "mission",
-            "v2_contract_version": "shared-persistent-semi-markov-1+certified-sixty-missions-1",
+            "v2_contract_version": "shared-persistent-semi-markov-1+certified-sixty-two-missions-1",
             "v2_mission_type": mission,
+            "v2_mission_family": "broad_object_surface",
+            "v2_event_kind": "contact_region",
+            "v2_target_actor": "CurriculumObject_Rectangle",
+            "v2_target_region": "north_face",
+            "v2_canonical_physics_id": "grenade-sim-config-r1+launch-1400cmps+cooldown-2s",
             "collection_mission": mission,
             "mission_required": True,
             "mission_success": True,
@@ -132,22 +162,63 @@ class V2RuntimeContractTests(unittest.TestCase):
             "v2_opening_arena_context_visible": True,
             "v2_mission_event_frame": 2,
             "v2_accepted_throw_count": 1,
+            "mission_parameters": {
+                "mission_type": mission,
+                "family": "broad_object_surface",
+                "event_kind": "contact_region",
+                "target_actor": "CurriculumObject_Rectangle",
+                "target_region": "north_face",
+                "canonical_physics_id": "grenade-sim-config-r1+launch-1400cmps+cooldown-2s",
+                "target_point": {"x": 100, "y": 0, "z": 100},
+                "player_spawn": {"x": 0, "y": 0, "z": 0},
+                "region_radius_cm": 34,
+                "boundary": None,
+                "direction": None,
+                "expected_contact_order": [],
+                "event_observed": True,
+                "event_position": {"x": 100, "y": 0, "z": 100},
+                "event_normal": {"x": 1, "y": 0, "z": 0},
+                "event_velocity": {"x": 1000, "y": 0, "z": -100},
+                "event_clearance_cm": 0,
+            },
             "v2_throws": [{
                 "grenade_id": 0,
                 "preview_to_realized_flight_parity": True,
                 "physics_config_identity": "grenade-sim-config-r1",
-                "launch_position": {"x": 0, "y": 0, "z": 0},
+                "camera_yaw": 0,
+                "camera_pitch": 0,
+                "launch_position": {"x": 30, "y": 10, "z": 54},
                 "launch_velocity": {"x": 1400, "y": 0, "z": 0},
+                "realized_target": "CurriculumObject_Rectangle",
+                "realized_contact_order": ["CurriculumObject_Rectangle"],
+                "first_contact_position": {"x": 100, "y": 0, "z": 100},
+                "first_contact_normal": {"x": 1, "y": 0, "z": 0},
+                "first_contact_velocity": {"x": 1000, "y": 0, "z": -100},
+                "arena_exit_direction": None,
             }],
         }
         dataset = {
             "schema_version": "trajectory_throw_v2-preflight-13",
             "observation_rate_hz": 20,
-            "collection_policy": "training_v2_combined_sixty_missions_v1",
+            "collection_policy": "training_v2_combined_sixty_two_missions_v1",
         }
         validate_v2_runtime_contract(
             dataset, "episode", frames, self.transitions, episode
         )
+
+        slow = copy.deepcopy(episode)
+        slow["v2_throws"][0]["launch_velocity"] = {"x": 1, "y": 0, "z": 0}
+        with self.assertRaisesRegex(DatasetValidationError, "1400"):
+            validate_v2_runtime_contract(
+                dataset, "episode", frames, self.transitions, slow
+            )
+
+        wrong_contact = copy.deepcopy(episode)
+        wrong_contact["v2_throws"][0]["realized_target"] = "CurriculumObject_Sphere"
+        with self.assertRaisesRegex(DatasetValidationError, "contact-region"):
+            validate_v2_runtime_contract(
+                dataset, "episode", frames, self.transitions, wrong_contact
+            )
 
 
 if __name__ == "__main__":

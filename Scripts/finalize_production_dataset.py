@@ -48,6 +48,8 @@ V2_THROW = pa.struct(
         pa.field("realized_contact_order", pa.list_(pa.string()), nullable=False),
         pa.field("first_contact_frame", pa.int32()),
         pa.field("first_contact_position", VECTOR3),
+        pa.field("first_contact_normal", VECTOR3),
+        pa.field("first_contact_velocity", VECTOR3),
         pa.field("bounce_count", pa.int32(), nullable=False),
         pa.field("rest_frame", pa.int32()),
         pa.field("post_rest_tail_steps", pa.int32(), nullable=False),

@@ -10,6 +10,7 @@ class AStaticMeshActor;
 class Ahe_grenade_gameCharacter;
 class UCameraComponent;
 class USceneCaptureComponent2D;
+class FJsonValue;
 class UTextureRenderTarget2D;
 
 /**
@@ -200,6 +201,8 @@ private:
 		FVector LaunchPosition = FVector::ZeroVector;
 		FVector LaunchVelocity = FVector::ZeroVector;
 		FVector FirstContactPosition = FVector::ZeroVector;
+		FVector FirstContactNormal = FVector::ZeroVector;
+		FVector FirstContactVelocity = FVector::ZeroVector;
 		FVector PredictedRestPosition = FVector::ZeroVector;
 		FGrenadeSimConfig SimConfig;
 		FString RealizedTarget;
@@ -234,6 +237,10 @@ private:
 		FVector MissionTargetPoint = FVector::ZeroVector;
 		FVector MissionPlayerSpawn = FVector::ZeroVector;
 		float MissionRegionRadiusCm = 0.0f;
+		float MaximumContactDistanceCm = 0.0f;
+		float HoopSafePassageRadiusCm = 0.0f;
+		float RampCrossingHalfWidthCm = 0.0f;
+		float RampOppositeLandingOffsetCm = 0.0f;
 		int32 EstablishSteps = 0;
 		int32 CameraAdjustSteps = 0;
 		int32 PreviewDwellSteps = 0;
@@ -246,8 +253,10 @@ private:
 	bool OpenOutput();
 	bool ResolvePlayer();
 	bool BeginEpisode();
+	void RunV2PlanCertification();
 	void EndEpisode();
 	void FinishRun(bool bSuccess, const FString& ErrorMessage = FString());
+	FTransform GetObservationCameraTransform() const;
 	bool CaptureObservation(int32 ObservationIndex, FRecordedState& OutState);
 	void AppendTransition(
 		int32 SourceFrameIndex,
@@ -299,10 +308,13 @@ private:
 	bool ConfigureV2MissionSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch);
 	bool CertifyV2MissionConstruction();
 	bool IsV2MissionRegionVisible() const;
+	bool IsV2PreviewUsefulSegmentVisible() const;
+	bool IsV2OpeningArenaContextVisible() const;
 	void UpdateV2MissionEvidence(
 		const FGeneratedGrenade& Grenade,
 		const FGrenadeSimStepResult& StepResult,
-		const FVector& PreviousPosition);
+		const FVector& PreviousPosition,
+		const FVector& PreviousVelocity);
 	FString BuildV2ThrowsJson() const;
 	uint16 SelectCoverageGuidedAction();
 	uint16 WorldDirectionToMovementBits(const FVector& DesiredWorldDirection) const;
@@ -553,6 +565,9 @@ private:
 	FVector CurrentV2MissionPlayerSpawn = FVector::ZeroVector;
 	FVector CurrentV2CertifiedLaunchPosition = FVector::ZeroVector;
 	FVector CurrentV2CertifiedLaunchVelocity = FVector::ZeroVector;
+	FVector CurrentV2MissionEventPosition = FVector::ZeroVector;
+	FVector CurrentV2MissionEventNormal = FVector::ZeroVector;
+	FVector CurrentV2MissionEventVelocity = FVector::ZeroVector;
 	TArray<FString> CurrentV2ExpectedContactOrder;
 	FVector CoverageMissionGoal = FVector::ZeroVector;
 	FVector CoverageLookTarget = FVector::ZeroVector;
@@ -574,6 +589,11 @@ private:
 	float HeldCameraPitchTargetDegrees = 0.0f;
 	float CoverageDistanceToGoalAtSuccessCm = 0.0f;
 	float CurrentV2MissionRegionRadiusCm = 0.0f;
+	float CurrentV2MaximumContactDistanceCm = 0.0f;
+	float CurrentV2HoopSafePassageRadiusCm = 0.0f;
+	float CurrentV2RampCrossingHalfWidthCm = 0.0f;
+	float CurrentV2RampOppositeLandingOffsetCm = 0.0f;
+	float CurrentV2MissionEventClearanceCm = 0.0f;
 	float CurrentV2MissionAimYaw = 0.0f;
 	float CurrentV2MissionAimPitch = 0.0f;
 	ECurriculumStage CurriculumStage = ECurriculumStage::Movement;
@@ -600,6 +620,7 @@ private:
 	bool bCurrentQFalling = false;
 	bool bCurrentPlanarMovementSuppressed = false;
 	bool bQVisibleInLatestObservation = false;
+	bool bV2PreviewRequiresFreshReadyQPress = false;
 	bool bCurrentCoverageTargetVisible = false;
 	bool bCoveragePreviousPositionValid = false;
 	bool bCoverageOrbitClockwise = false;
@@ -618,6 +639,13 @@ private:
 	bool bEpisodeActive = false;
 	bool bTarFinalized = false;
 	bool bExitOnComplete = true;
+	// QA-only escape hatch for rendering a rejected immutable recipe. Normal
+	// collection commands never set this and still fail closed.
+	bool bAllowUncertifiedV2Diagnostic = false;
+	bool bV2PlanCertificationOnly = false;
+	int32 V2CertificationCertifiedCount = 0;
+	int32 V2CertificationFailedCount = 0;
+	TArray<TSharedPtr<FJsonValue>> V2CertificationResults;
 	bool bTrajectoryShowcase = false;
 	bool bMissionReviewSuite = false;
 	bool bV2SemiMarkovRecipe = false;
@@ -625,9 +653,12 @@ private:
 	bool bV2MissionRecipe = false;
 	bool bV2ConstructionCertified = false;
 	bool bV2MissionEventObserved = false;
+	bool bV2RampBodyCrossed = false;
+	bool bV2HoopContactObserved = false;
 	bool bV2MissionRegionVisibleAllFrames = true;
 	bool bV2PreviewRegionVisibleAllQFrames = true;
 	bool bV2OpeningArenaContextVisible = true;
+	bool bV2ControlPreviewHiddenDuringCooldown = false;
 	bool bCoverageGuided = true;
 	bool bPrescribedRecipes = false;
 	V2ActionSemantics::EThrowRejectionReason CurrentERejectionReason =

@@ -55,6 +55,98 @@ namespace
 	constexpr float RampLengthCm = 500.0f;
 	constexpr float RampThicknessCm = 36.0f;
 	constexpr float CharacterStandingHalfHeightCm = 96.0f;
+	constexpr float HoopPlaneX = 700.0f;
+	const FVector HoopCenter(700.0f, -700.0f, 145.0f);
+
+	FString CurriculumContactSlug(const FHitResult& Hit)
+	{
+		if (const AActor* HitActor = Hit.GetActor())
+		{
+			for (const FName Tag : HitActor->Tags)
+			{
+				const FString Text = Tag.ToString();
+				if (Text.StartsWith(TEXT("Curriculum"))
+					&& Text != TEXT("CurriculumArena"))
+				{
+					return Text;
+				}
+			}
+		}
+		return FString();
+	}
+
+	bool CrossedDirectedPlane(
+		const float Previous,
+		const float Current,
+		const float Plane,
+		const bool bIncreasing)
+	{
+		return bIncreasing
+			? Previous < Plane && Current >= Plane
+			: Previous > Plane && Current <= Plane;
+	}
+
+	bool V2ContactRegionMatches(
+		const FString& ContactSlug,
+		const FString& TargetActor,
+		const FString& TargetRegion,
+		const FString& Boundary,
+		const FVector& TargetPoint,
+		const float MaximumDistance,
+		const FHitResult& Hit,
+		const FVector& IncomingVelocity)
+	{
+		if (ContactSlug != TargetActor
+			|| FVector::Distance(Hit.Location, TargetPoint) > MaximumDistance)
+		{
+			return false;
+		}
+		FVector ExpectedNormal = FVector::ZeroVector;
+		if (TargetRegion == TEXT("north_face")) ExpectedNormal = FVector(1, 0, 0);
+		else if (TargetRegion == TEXT("south_face")) ExpectedNormal = FVector(-1, 0, 0);
+		else if (TargetRegion == TEXT("east_face")) ExpectedNormal = FVector(0, 1, 0);
+		else if (TargetRegion == TEXT("west_face")) ExpectedNormal = FVector(0, -1, 0);
+		else if (TargetRegion == TEXT("top_inset")) ExpectedNormal = FVector(0, 0, 1);
+		else if (TargetRegion == TEXT("north_slope")) ExpectedNormal = FVector(0.87f, 0, 0.49f);
+		else if (TargetRegion == TEXT("south_slope")) ExpectedNormal = FVector(-0.87f, 0, 0.49f);
+		else if (TargetRegion == TEXT("east_slope")) ExpectedNormal = FVector(0, 0.87f, 0.49f);
+		else if (TargetRegion == TEXT("west_slope")) ExpectedNormal = FVector(0, -0.87f, 0.49f);
+		if (!ExpectedNormal.IsNearlyZero()
+			&& FVector::DotProduct(Hit.ImpactNormal.GetSafeNormal(), ExpectedNormal) < 0.70f)
+		{
+			return false;
+		}
+		if (TargetRegion.EndsWith(TEXT("_quadrant")))
+		{
+			const FVector Offset = Hit.Location - FVector(-700.0f, -700.0f, 120.0f);
+			if ((TargetRegion == TEXT("north_quadrant") && Offset.X <= 0.0f)
+				|| (TargetRegion == TEXT("south_quadrant") && Offset.X >= 0.0f)
+				|| (TargetRegion == TEXT("east_quadrant") && Offset.Y <= 0.0f)
+				|| (TargetRegion == TEXT("west_quadrant") && Offset.Y >= 0.0f))
+			{
+				return false;
+			}
+		}
+		if (TargetRegion.EndsWith(TEXT("_direct"))
+			|| TargetRegion.EndsWith(TEXT("_oblique")))
+		{
+			FVector2D Normal;
+			if (Boundary == TEXT("north")) Normal = FVector2D(-1, 0);
+			else if (Boundary == TEXT("south")) Normal = FVector2D(1, 0);
+			else if (Boundary == TEXT("east")) Normal = FVector2D(0, -1);
+			else Normal = FVector2D(0, 1);
+			const FVector2D Incoming(IncomingVelocity.X, IncomingVelocity.Y);
+			const float Cosine = FMath::Clamp(
+				FVector2D::DotProduct(-Incoming.GetSafeNormal(), Normal), -1.0f, 1.0f);
+			const float IncidenceDegrees = FMath::RadiansToDegrees(FMath::Acos(Cosine));
+			if ((TargetRegion.EndsWith(TEXT("_direct")) && IncidenceDegrees > 14.0f)
+				|| (TargetRegion.EndsWith(TEXT("_oblique")) && IncidenceDegrees < 15.0f))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 
 	constexpr double AutomatedMissionFrameShares[] =
 	{
@@ -721,7 +813,12 @@ void ACurriculumDataGenerator::BeginPlay()
 		}
 		return;
 	}
-	if (!OpenOutput())
+	const bool bOutputReady = bV2PlanCertificationOnly
+		? IFileManager::Get().MakeDirectory(*OutputDirectory, true)
+			&& !FPaths::FileExists(FPaths::Combine(
+				OutputDirectory, TEXT("certification-report.json")))
+		: OpenOutput();
+	if (!bOutputReady)
 	{
 		// In particular, never replace dataset.json when the output directory
 		// already contains a completed run.
@@ -759,7 +856,7 @@ void ACurriculumDataGenerator::BeginPlay()
 	UE_LOG(
 		LogTemp,
 		Display,
-		TEXT("Dataset generator configured: stage %s, %d episode(s), %d transitions each, %d Hz, %dx%d, worker %d, storage %s, WebP effort %d."),
+		TEXT("Dataset generator configured: stage %s, %d episode(s), %d transitions each, %d Hz, %dx%d, worker %d, storage %s, WebP effort %d, certification-only %s."),
 		*GetStageSlug(),
 		EpisodeCount,
 		TransitionsPerEpisode,
@@ -770,7 +867,8 @@ void ACurriculumDataGenerator::BeginPlay()
 		StorageFormat == EStorageFormat::WebPParquet
 			? TEXT("webp_parquet")
 			: TEXT("png_jsonl"),
-		WebPLosslessEffort);
+		WebPLosslessEffort,
+		bV2PlanCertificationOnly ? TEXT("true") : TEXT("false"));
 }
 
 void ACurriculumDataGenerator::Tick(float DeltaSeconds)
@@ -794,6 +892,11 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 	if (StartupFramesRemaining > 0)
 	{
 		--StartupFramesRemaining;
+		return;
+	}
+	if (bV2PlanCertificationOnly)
+	{
+		RunV2PlanCertification();
 		return;
 	}
 
@@ -830,13 +933,16 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 	const bool bMissionTimedOut =
 		!bCoverageMissionSucceeded
 		&& FrameIndex >= TransitionsPerEpisode;
-	if (bV2MissionRecipe && (bCoverageMissionFailed || bMissionTimedOut))
+	if (bV2MissionRecipe && (bCoverageMissionFailed || bMissionTimedOut)
+		&& !bAllowUncertifiedV2Diagnostic)
 	{
 		FinishRun(
 			false,
-			FString::Printf(
-				TEXT("Certified V2 mission invariant failed for immutable recipe %s."),
-				*CurrentRecipeId));
+			LastError.IsEmpty()
+				? FString::Printf(
+					TEXT("Certified V2 mission invariant failed for immutable recipe %s."),
+					*CurrentRecipeId)
+				: LastError);
 		return;
 	}
 	if (bPostSuccessRolloutComplete
@@ -1139,6 +1245,17 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	{
 		bExitOnComplete = false;
 	}
+	bAllowUncertifiedV2Diagnostic =
+		FParse::Param(CommandLine, TEXT("AllowUncertifiedV2Diagnostic"));
+	bV2PlanCertificationOnly =
+		FParse::Param(CommandLine, TEXT("CertifyV2PlanOnly"));
+	if (bV2PlanCertificationOnly
+		&& (!bPrescribedRecipes
+			|| CurriculumStage != ECurriculumStage::TrajectoryThrowV2))
+	{
+		LastError = TEXT("-CertifyV2PlanOnly requires a prescribed Trajectory/Throw V2 manifest.");
+		return false;
+	}
 	bTrajectoryShowcase =
 		FParse::Param(CommandLine, TEXT("TrajectoryShowcase"));
 	bMissionReviewSuite =
@@ -1186,6 +1303,12 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	}
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 	{
+		if (ObservationRate != 20)
+		{
+			LastError = TEXT(
+				"V2 certified recipes require exactly 20 Hz; other rates need a separately certified catalog.");
+			return false;
+		}
 		bCoverageGuided = false;
 	}
 	if (bTrajectoryShowcase
@@ -1493,6 +1616,32 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 				return false;
 			}
 			Recipe.MissionRegionRadiusCm = NumberValue;
+			const TSharedPtr<FJsonObject>* EventConstraints = nullptr;
+			if (!(*Solution)->TryGetObjectField(
+					TEXT("event_constraints"), EventConstraints)
+				|| !EventConstraints || !EventConstraints->IsValid()
+				|| !(*EventConstraints)->TryGetNumberField(
+					TEXT("maximum_contact_distance_cm"), NumberValue))
+			{
+				LastError = TEXT("V2 mission solution has no frozen event constraints.");
+				return false;
+			}
+			Recipe.MaximumContactDistanceCm = NumberValue;
+			if ((*EventConstraints)->TryGetNumberField(
+				TEXT("hoop_safe_passage_radius_cm"), NumberValue))
+			{
+				Recipe.HoopSafePassageRadiusCm = NumberValue;
+			}
+			if ((*EventConstraints)->TryGetNumberField(
+				TEXT("ramp_crossing_half_width_cm"), NumberValue))
+			{
+				Recipe.RampCrossingHalfWidthCm = NumberValue;
+			}
+			if ((*EventConstraints)->TryGetNumberField(
+				TEXT("ramp_opposite_landing_offset_cm"), NumberValue))
+			{
+				Recipe.RampOppositeLandingOffsetCm = NumberValue;
+			}
 			const TSharedPtr<FJsonObject>* Timing = nullptr;
 			if (!(*Solution)->TryGetObjectField(TEXT("timing"), Timing)
 				|| !Timing || !Timing->IsValid())
@@ -1524,7 +1673,7 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 			if (Recipe.EventKind.IsEmpty() || Recipe.TargetActor.IsEmpty()
 				|| Recipe.EstablishSteps < ObservationRate * 3 / 4
 				|| Recipe.PreviewDwellSteps < ObservationRate * 3 / 5
-				|| Recipe.CameraAdjustSteps < 3
+				|| Recipe.CameraAdjustSteps != 0
 				|| Recipe.MissionObservationFrames <= 1)
 			{
 				LastError = FString::Printf(
@@ -1655,6 +1804,10 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		CurrentV2MissionTargetPoint = Recipe.MissionTargetPoint;
 		CurrentV2MissionPlayerSpawn = Recipe.MissionPlayerSpawn;
 		CurrentV2MissionRegionRadiusCm = Recipe.MissionRegionRadiusCm;
+		CurrentV2MaximumContactDistanceCm = Recipe.MaximumContactDistanceCm;
+		CurrentV2HoopSafePassageRadiusCm = Recipe.HoopSafePassageRadiusCm;
+		CurrentV2RampCrossingHalfWidthCm = Recipe.RampCrossingHalfWidthCm;
+		CurrentV2RampOppositeLandingOffsetCm = Recipe.RampOppositeLandingOffsetCm;
 		CurrentV2EstablishSteps = Recipe.EstablishSteps;
 		CurrentV2CameraAdjustSteps = Recipe.CameraAdjustSteps;
 		CurrentV2PreviewDwellSteps = Recipe.PreviewDwellSteps;
@@ -1711,14 +1864,41 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 	{
 		Movement->StopMovementImmediately();
+		if (bV2MissionRecipe)
+		{
+			// Named V2 recipes certify one exact camera-derived launch state. Keep
+			// the prescribed stationary spawn fixed so gravity/capsule settling
+			// cannot change that state before the E edge.
+			Movement->DisableMovement();
+		}
 	}
 	Character->GetController()->SetControlRotation(FRotator(Pitch, Yaw, 0.0f));
 	if (bV2MissionRecipe && !CertifyV2MissionConstruction())
 	{
-		LastError = FString::Printf(
-			TEXT("Immutable V2 mission %s failed canonical construction certification."),
-			*CurrentV2MissionType);
+		if (bAllowUncertifiedV2Diagnostic)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("QA ONLY: recording uncertified V2 recipe %s: %s"),
+				*CurrentV2MissionType,
+				*LastError);
+			LastError.Reset();
+		}
+		else
+		{
+		if (LastError.IsEmpty())
+		{
+			LastError = FString::Printf(
+				TEXT("Immutable V2 mission %s failed canonical construction certification."),
+				*CurrentV2MissionType);
+		}
 		return false;
+		}
+	}
+	if (bV2PlanCertificationOnly)
+	{
+		return true;
 	}
 
 	FrameIndex = 0;
@@ -1735,9 +1915,16 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	CurrentV2AcceptedThrowCount = 0;
 	CurrentV2MissionEventFrame = INDEX_NONE;
 	bV2MissionEventObserved = false;
+	bV2RampBodyCrossed = false;
+	bV2HoopContactObserved = false;
+	CurrentV2MissionEventPosition = FVector::ZeroVector;
+	CurrentV2MissionEventNormal = FVector::ZeroVector;
+	CurrentV2MissionEventVelocity = FVector::ZeroVector;
+	CurrentV2MissionEventClearanceCm = 0.0f;
 	bV2MissionRegionVisibleAllFrames = true;
 	bV2PreviewRegionVisibleAllQFrames = true;
 	bV2OpeningArenaContextVisible = true;
+	bV2ControlPreviewHiddenDuringCooldown = false;
 	CurrentV2PreviewStartFrame = 5;
 	CurrentV2ERequestCount = 0;
 	CurrentV2QRisingCount = 0;
@@ -1948,6 +2135,15 @@ void ACurriculumDataGenerator::EndEpisode()
 	FString MissionParameters = TEXT("{}");
 	if (bV2MissionRecipe)
 	{
+		FString ExpectedContacts = TEXT("[");
+		for (int32 Index = 0; Index < CurrentV2ExpectedContactOrder.Num(); ++Index)
+		{
+			if (Index > 0) ExpectedContacts += TEXT(",");
+			ExpectedContacts += FString::Printf(
+				TEXT("\"%s\""),
+				*CurrentV2ExpectedContactOrder[Index].ReplaceCharWithEscapedChar());
+		}
+		ExpectedContacts += TEXT("]");
 		MissionParameters = FString::Printf(
 			TEXT("{\"mission_type\":\"%s\",\"family\":\"%s\",")
 			TEXT("\"event_kind\":\"%s\",\"target_actor\":\"%s\",")
@@ -1955,7 +2151,12 @@ void ACurriculumDataGenerator::EndEpisode()
 			TEXT("\"player_spawn\":%s,\"region_radius_cm\":%s,")
 			TEXT("\"establish_steps\":%d,\"camera_adjust_steps\":%d,")
 			TEXT("\"preview_dwell_steps\":%d,\"ballistic_branch\":\"low\",")
-			TEXT("\"canonical_physics_id\":\"%s\"}"),
+			TEXT("\"canonical_physics_id\":\"%s\",")
+			TEXT("\"boundary\":%s,\"direction\":%s,")
+			TEXT("\"expected_contact_order\":%s,")
+			TEXT("\"event_observed\":%s,\"event_position\":%s,")
+			TEXT("\"event_normal\":%s,\"event_velocity\":%s,")
+			TEXT("\"event_clearance_cm\":%s}"),
 			*CurrentV2MissionType.ReplaceCharWithEscapedChar(),
 			*CurrentV2Family.ReplaceCharWithEscapedChar(),
 			*CurrentV2EventKind.ReplaceCharWithEscapedChar(),
@@ -1967,7 +2168,19 @@ void ACurriculumDataGenerator::EndEpisode()
 			CurrentV2EstablishSteps,
 			CurrentV2CameraAdjustSteps,
 			CurrentV2PreviewDwellSteps,
-			*CurrentV2CanonicalPhysicsId.ReplaceCharWithEscapedChar());
+			*CurrentV2CanonicalPhysicsId.ReplaceCharWithEscapedChar(),
+			CurrentV2Boundary.IsEmpty()
+				? TEXT("null")
+				: *FString::Printf(TEXT("\"%s\""), *CurrentV2Boundary.ReplaceCharWithEscapedChar()),
+			CurrentV2Direction.IsEmpty()
+				? TEXT("null")
+				: *FString::Printf(TEXT("\"%s\""), *CurrentV2Direction.ReplaceCharWithEscapedChar()),
+			*ExpectedContacts,
+			JsonBool(bV2MissionEventObserved),
+			*JsonVector(CurrentV2MissionEventPosition),
+			*JsonVector(CurrentV2MissionEventNormal),
+			*JsonVector(CurrentV2MissionEventVelocity),
+			*JsonNumber(CurrentV2MissionEventClearanceCm));
 	}
 	else if (CoverageMission == ECoverageMission::ObjectView)
 	{
@@ -2189,7 +2402,7 @@ void ACurriculumDataGenerator::EndEpisode()
 			? *FString::Printf(TEXT("\"%s\""), *CurrentRecipeId.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-			? TEXT("\"shared-persistent-semi-markov-1+certified-sixty-missions-1\"")
+			? TEXT("\"shared-persistent-semi-markov-1+certified-sixty-two-missions-1\"")
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 			? *FString::Printf(
@@ -2478,6 +2691,19 @@ void ACurriculumDataGenerator::FinishRun(
 	}
 }
 
+FTransform ACurriculumDataGenerator::GetObservationCameraTransform() const
+{
+	if (bV2MissionRecipe)
+	{
+		return FTransform(
+			FRotator(CurrentV2MissionAimPitch, CurrentV2MissionAimYaw, 0.0f),
+			CurrentV2MissionPlayerSpawn + FVector(0.0f, 0.0f, 64.0f));
+	}
+	return PlayerCamera
+		? PlayerCamera->GetComponentTransform()
+		: FTransform::Identity;
+}
+
 bool ACurriculumDataGenerator::CaptureObservation(
 	const int32 ObservationIndex,
 	FRecordedState& OutState)
@@ -2488,7 +2714,7 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		return false;
 	}
 
-	SceneCapture->SetWorldTransform(PlayerCamera->GetComponentTransform());
+	SceneCapture->SetWorldTransform(GetObservationCameraTransform());
 	SceneCapture->FOVAngle = PlayerCamera->FieldOfView;
 	SceneCapture->CaptureScene();
 
@@ -2687,22 +2913,55 @@ bool ACurriculumDataGenerator::CaptureObservation(
 
 	const bool bQVisible =
 		CurriculumStage != ECurriculumStage::Movement
-		&& (CurrentActionMask & CurriculumAction::Q) != 0;
+		&& (CurrentActionMask & CurriculumAction::Q) != 0
+		&& !(CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+			&& (CooldownRemainingSteps > 0
+				|| bV2PreviewRequiresFreshReadyQPress));
 	const bool bAimLockActive =
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 		&& bQVisible;
+	if (bV2MissionRecipe && !bV2MissionEventObserved)
+	{
+		if (CurrentV2EventKind == TEXT("trajectory_reload_reopen")
+			&& (CurrentActionMask & CurriculumAction::Q) != 0
+			&& CooldownRemainingSteps > 0
+			&& !bQVisible)
+		{
+			bV2ControlPreviewHiddenDuringCooldown = true;
+		}
+		const bool bControlObserved =
+			(CurrentV2EventKind == TEXT("trajectory_manual_toggle")
+				&& CurrentV2QRisingCount >= 2
+				&& CurrentV2QFallingCount >= 1
+				&& CurrentV2AcceptedThrowCount == 0
+				&& bQVisible)
+			|| (CurrentV2EventKind == TEXT("trajectory_reload_reopen")
+				&& CurrentV2AcceptedThrowCount == 1
+				&& bV2ControlPreviewHiddenDuringCooldown
+				&& CooldownRemainingSteps <= 0
+				&& bCurrentQRising
+				&& bQVisible);
+		if (bControlObserved)
+		{
+			bV2MissionEventObserved = true;
+			CurrentV2MissionEventFrame = ObservationIndex;
+			CurrentV2MissionEventPosition =
+				GetObservationCameraTransform().GetLocation();
+			CurrentV2MissionEventNormal = FVector::ZeroVector;
+			CurrentV2MissionEventVelocity = FVector::ZeroVector;
+			bCoveragePrimaryObjectiveAchieved = true;
+			bCoverageMissionSucceeded = true;
+			CoverageMissionSuccessFrameIndex = ObservationIndex;
+			CoverageRequiredPostSuccessSteps = FMath::Max(
+				1, TransitionsPerEpisode - ObservationIndex + 1);
+		}
+	}
 	const bool bV2MissionRegionVisible =
 		!bV2MissionRecipe || IsV2MissionRegionVisible();
-	const float V2MissionYawError = FMath::Abs(FMath::FindDeltaAngleDegrees(
-		OutState.CameraRotation.Yaw,
-		CurrentV2MissionAimYaw));
-	const float V2MissionPitchError = FMath::Abs(
-		OutState.CameraRotation.Pitch - CurrentV2MissionAimPitch);
 	const bool bV2PreviewRegionVisible = !bV2MissionRecipe
 		|| !bQVisible
 		|| (bV2MissionRegionVisible
-			&& V2MissionYawError <= 2.0f
-			&& V2MissionPitchError <= 2.0f);
+			&& IsV2PreviewUsefulSegmentVisible());
 	if (bV2MissionRecipe)
 	{
 		bV2MissionRegionVisibleAllFrames &= bV2MissionRegionVisible;
@@ -2712,11 +2971,11 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		}
 		if (ObservationIndex == 0)
 		{
-			bV2OpeningArenaContextVisible = bV2MissionRegionVisible
-				&& FMath::Abs(OutState.CameraRotation.Pitch) < 55.0f;
+			bV2OpeningArenaContextVisible = IsV2OpeningArenaContextVisible();
 		}
-		if (!bV2MissionRegionVisible || !bV2PreviewRegionVisible
+		if ((!bV2MissionRegionVisible || !bV2PreviewRegionVisible
 			|| !bV2OpeningArenaContextVisible)
+			&& !bAllowUncertifiedV2Diagnostic)
 		{
 			LastError = FString::Printf(
 				TEXT("V2 camera railguard failed for immutable mission %s at frame %d."),
@@ -2728,7 +2987,7 @@ bool ACurriculumDataGenerator::CaptureObservation(
 	int32 FlyingGrenadeCount = 0;
 	int32 RestingGrenadeCount = 0;
 	int32 VisibleGrenadeCount = 0;
-	const FTransform CameraTransform = PlayerCamera->GetComponentTransform();
+	const FTransform CameraTransform = GetObservationCameraTransform();
 	for (const FGeneratedGrenade& Grenade : Grenades)
 	{
 		if (Grenade.State.bMotionStopped)
@@ -3982,22 +4241,38 @@ int32 ACurriculumDataGenerator::SelectPersistentSemiMarkovHoldSteps()
 
 uint16 ACurriculumDataGenerator::SelectV2MissionAction() const
 {
-	// The frozen action sequence is deliberately paced: scene establishment,
-	// a multi-frame ordinary-input adjustment, visible Q dwell, one E edge,
-	// then a stationary aftermath that preserves the intended region.
+	if (CurrentV2EventKind == TEXT("trajectory_manual_toggle"))
+	{
+		const int32 Start = CurrentV2EstablishSteps;
+		if (FrameIndex < Start) return 0;
+		if (FrameIndex < Start + 10) return CurriculumAction::Q;
+		if (FrameIndex < Start + 20) return 0;
+		if (FrameIndex < Start + 30) return CurriculumAction::Q;
+		return 0;
+	}
+	if (CurrentV2EventKind == TEXT("trajectory_reload_reopen"))
+	{
+		const int32 Start = CurrentV2EstablishSteps;
+		const int32 ThrowFrame = Start + CurrentV2PreviewDwellSteps;
+		if (FrameIndex < Start) return 0;
+		if (FrameIndex < ThrowFrame) return CurriculumAction::Q;
+		if (FrameIndex == ThrowFrame) return CurriculumAction::Q | CurriculumAction::E;
+		if (FrameIndex == ThrowFrame + 1) return 0;
+		if (FrameIndex < ThrowFrame + 44) return CurriculumAction::Q;
+		if (FrameIndex == ThrowFrame + 44) return 0;
+		if (FrameIndex < ThrowFrame + 55) return CurriculumAction::Q;
+		return 0;
+	}
+	// Named missions open at the exact certified throwing rotation. Camera
+	// acquisition belongs to semi-Markov data, not to the isolated skill demo.
+	// Establish the scene, visibly dwell on Q, emit one E edge, then preserve a
+	// stationary aftermath around the intended region.
 	if (FrameIndex < CurrentV2EstablishSteps)
 	{
 		return 0;
 	}
-	const int32 AdjustmentEnd =
-		CurrentV2EstablishSteps + CurrentV2CameraAdjustSteps;
-	if (FrameIndex < AdjustmentEnd)
-	{
-		return (CurrentRepetitionIndex & 1) == 0
-			? CurriculumAction::ArrowLeft
-			: CurriculumAction::ArrowRight;
-	}
-	const int32 ThrowFrame = AdjustmentEnd + CurrentV2PreviewDwellSteps;
+	const int32 ThrowFrame =
+		CurrentV2EstablishSteps + CurrentV2PreviewDwellSteps;
 	if (FrameIndex < ThrowFrame)
 	{
 		return CurriculumAction::Q;
@@ -4045,7 +4320,9 @@ bool ACurriculumDataGenerator::ConfigureV2MissionSpawn(
 	}
 	// Near-vertical or sky-only construction is forbidden. Relocation belongs
 	// in the certified region, not in a runtime alternate-root fallback.
-	if (AimPitch < -25.0f || AimPitch > 52.0f)
+	const float MinimumReadablePitch =
+		CurrentV2MissionType == TEXT("ramp_downhill_surface") ? -55.0f : -25.0f;
+	if (AimPitch < MinimumReadablePitch || AimPitch > 52.0f)
 	{
 		LastError = FString::Printf(
 			TEXT("V2 mission %s violates the readable low-arc pitch railguard."),
@@ -4054,16 +4331,114 @@ bool ACurriculumDataGenerator::ConfigureV2MissionSpawn(
 	}
 	CurrentV2MissionAimYaw = FRotator::NormalizeAxis(AimYaw);
 	CurrentV2MissionAimPitch = AimPitch;
-	// Matches the fixed binary arrow-key yaw rate used by the character.
-	constexpr float CameraRate = 90.0f;
-	const float OpeningOffset = CameraRate
-		/ static_cast<float>(FMath::Max(1, ObservationRate))
-		* static_cast<float>(CurrentV2CameraAdjustSteps);
-	OutYaw = FRotator::NormalizeAxis(
-		CurrentV2MissionAimYaw
-		+ (((CurrentRepetitionIndex & 1) == 0) ? OpeningOffset : -OpeningOffset));
+	OutYaw = CurrentV2MissionAimYaw;
 	OutPitch = CurrentV2MissionAimPitch;
 	return true;
+}
+
+void ACurriculumDataGenerator::RunV2PlanCertification()
+{
+	if (EpisodeOrdinal < PrescribedRecipes.Num())
+	{
+		LastError.Reset();
+		bEpisodeActive = false;
+		const FPrescribedRecipe& Recipe = PrescribedRecipes[EpisodeOrdinal];
+		const bool bConfiguredRecipe = BeginEpisode();
+		const bool bRequiresConstruction = Recipe.Source == TEXT("mission");
+		const bool bCertified = bConfiguredRecipe
+			&& (!bRequiresConstruction || bV2ConstructionCertified);
+		if (bCertified)
+		{
+			++V2CertificationCertifiedCount;
+		}
+		else
+		{
+			++V2CertificationFailedCount;
+		}
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("recipe_id"), Recipe.RecipeId);
+		Entry->SetStringField(TEXT("replay_identity"), Recipe.ReplayIdentity);
+		Entry->SetStringField(TEXT("source"), Recipe.Source);
+		Entry->SetStringField(TEXT("mission_type"), Recipe.MissionType);
+		Entry->SetNumberField(TEXT("episode_index"), Recipe.EpisodeIndex);
+		Entry->SetBoolField(TEXT("construction_required"), bRequiresConstruction);
+		Entry->SetBoolField(TEXT("certified"), bCertified);
+		Entry->SetStringField(
+			TEXT("status"),
+			bCertified
+				? (bRequiresConstruction ? TEXT("certified") : TEXT("not_applicable"))
+				: TEXT("rejected"));
+		Entry->SetStringField(TEXT("error"), bCertified ? FString() : LastError);
+		V2CertificationResults.Add(MakeShared<FJsonValueObject>(Entry));
+		ResetStageState();
+		++EpisodeOrdinal;
+		TSharedPtr<FJsonObject> Progress = MakeShared<FJsonObject>();
+		Progress->SetNumberField(TEXT("checked_count"), EpisodeOrdinal);
+		Progress->SetNumberField(TEXT("recipe_count"), PrescribedRecipes.Num());
+		Progress->SetNumberField(
+			TEXT("certified_count"), V2CertificationCertifiedCount);
+		Progress->SetNumberField(TEXT("failed_count"), V2CertificationFailedCount);
+		Progress->SetStringField(TEXT("last_recipe_id"), Recipe.RecipeId);
+		FString ProgressJson;
+		TSharedRef<TJsonWriter<>> ProgressWriter =
+			TJsonWriterFactory<>::Create(&ProgressJson);
+		FJsonSerializer::Serialize(Progress.ToSharedRef(), ProgressWriter);
+		FFileHelper::SaveStringToFile(
+			ProgressJson,
+			*FPaths::Combine(OutputDirectory, TEXT("certification-progress.json")),
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		UE_LOG(
+			LogTemp,
+			Display,
+			TEXT("V2 plan certification progress: %d/%d, recipe %s, status %s."),
+			EpisodeOrdinal,
+			PrescribedRecipes.Num(),
+			*Recipe.RecipeId,
+			bCertified ? TEXT("certified") : TEXT("rejected"));
+		return;
+	}
+
+	TSharedPtr<FJsonObject> Report = MakeShared<FJsonObject>();
+	Report->SetNumberField(TEXT("schema_version"), 1);
+	Report->SetStringField(TEXT("purpose"), TEXT("v2_plan_construction_certification"));
+	Report->SetStringField(TEXT("plan_id"), PlanId);
+	Report->SetStringField(TEXT("plan_version"), PlanVersion);
+	Report->SetStringField(TEXT("assignment_id"), AssignmentId);
+	Report->SetStringField(TEXT("canonical_physics_id"),
+		TEXT("grenade-sim-config-r1+launch-1400cmps+cooldown-2s"));
+	Report->SetStringField(TEXT("unreal_engine_version"),
+		FEngineVersion::Current().ToString());
+	Report->SetNumberField(TEXT("recipe_count"), PrescribedRecipes.Num());
+	Report->SetNumberField(
+		TEXT("certified_count"), V2CertificationCertifiedCount);
+	Report->SetNumberField(TEXT("failed_count"), V2CertificationFailedCount);
+	Report->SetBoolField(TEXT("complete"), V2CertificationFailedCount == 0);
+	Report->SetArrayField(TEXT("results"), V2CertificationResults);
+	FString ReportJson;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ReportJson);
+	FJsonSerializer::Serialize(Report.ToSharedRef(), Writer);
+	const FString ReportPath = FPaths::Combine(
+		OutputDirectory, TEXT("certification-report.json"));
+	const bool bWroteReport = FFileHelper::SaveStringToFile(
+		ReportJson, *ReportPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	if (!bWroteReport)
+	{
+		++V2CertificationFailedCount;
+	}
+	UE_LOG(
+		LogTemp,
+		Display,
+		TEXT("V2 plan certification completed: %d certified, %d rejected. Report: %s"),
+		V2CertificationCertifiedCount,
+		V2CertificationFailedCount,
+		*ReportPath);
+	bRunFinished = true;
+	FApp::SetUseFixedTimeStep(false);
+	if (bExitOnComplete)
+	{
+		FPlatformMisc::RequestExitWithStatus(
+			false, V2CertificationFailedCount == 0 ? 0 : 1);
+	}
 }
 
 bool ACurriculumDataGenerator::CertifyV2MissionConstruction()
@@ -4076,13 +4451,23 @@ bool ACurriculumDataGenerator::CertifyV2MissionConstruction()
 		CurrentV2MissionAimPitch,
 		CurrentV2MissionAimYaw,
 		0.0f);
-	const FVector CameraLocation = PlayerCamera->GetComponentLocation();
+	// Named-mission launch geometry is anchored to the prescribed eye point,
+	// not to the animated first-person head bone (which shifts laterally while
+	// turning and would make an otherwise identical recipe non-replayable).
+	const FVector CameraLocation =
+		CurrentV2MissionPlayerSpawn + FVector(0.0f, 0.0f, 64.0f);
 	CurrentV2CertifiedLaunchPosition = CameraLocation
 		+ ThrowRotation.Vector() * 30.0f
 		+ FRotationMatrix(ThrowRotation).GetScaledAxis(EAxis::Y) * 10.0f
 		- FRotationMatrix(ThrowRotation).GetScaledAxis(EAxis::Z) * 10.0f;
 	CurrentV2CertifiedLaunchVelocity =
 		ThrowRotation.Vector() * CurriculumThrowSpeedCmPerSecond;
+	if (CurrentV2EventKind == TEXT("trajectory_manual_toggle")
+		|| CurrentV2EventKind == TEXT("trajectory_reload_reopen"))
+	{
+		bV2ConstructionCertified = true;
+		return true;
+	}
 	FGrenadeSimState State;
 	FGrenadeSim::InitializeState(
 		State,
@@ -4091,12 +4476,19 @@ bool ACurriculumDataGenerator::CertifyV2MissionConstruction()
 		3600.0f);
 	TArray<FString> ContactOrder;
 	bool bObserved = false;
+	bool bRampBodyCrossed = false;
+	bool bHoopContactObserved = false;
+	bool bHadAnyContact = false;
+	FString LastContactSlug;
+	FVector LastContactLocation = FVector::ZeroVector;
+	float ClosestTargetDistance = TNumericLimits<float>::Max();
 	const float StepDt = FMath::Max(0.001f, GrenadeSimConfig.FixedStepSeconds);
 	for (int32 StepIndex = 0;
 		StepIndex < MaxTrajectorySimulationSteps && !State.bMotionStopped;
 		++StepIndex)
 	{
 		const FVector PreviousPosition = State.Position;
+		const FVector PreviousVelocity = State.Velocity;
 		const FGrenadeSimStepResult Result = FGrenadeSim::Step(
 			GetWorld(),
 			GrenadeSimConfig,
@@ -4122,28 +4514,56 @@ bool ACurriculumDataGenerator::CertifyV2MissionConstruction()
 			{
 				ContactOrder.Add(ContactSlug);
 			}
+			bHoopContactObserved |= ContactSlug == TEXT("CurriculumObject_Hoop");
+			LastContactSlug = ContactSlug;
+			LastContactLocation = Result.Hit.Location;
+			ClosestTargetDistance = FMath::Min(
+				ClosestTargetDistance,
+				FVector::Distance(Result.Hit.Location, CurrentV2MissionTargetPoint));
 		}
 		if (CurrentV2EventKind == TEXT("arena_exit"))
 		{
-			bObserved = (CurrentV2Boundary == TEXT("north") && State.Position.X > 1650.0f)
-				|| (CurrentV2Boundary == TEXT("south") && State.Position.X < -1650.0f)
-				|| (CurrentV2Boundary == TEXT("east") && State.Position.Y > 1650.0f)
-				|| (CurrentV2Boundary == TEXT("west") && State.Position.Y < -1650.0f);
+			bObserved = (CurrentV2Boundary == TEXT("north")
+					&& CrossedDirectedPlane(PreviousPosition.X, State.Position.X, 1650.0f, true))
+				|| (CurrentV2Boundary == TEXT("south")
+					&& CrossedDirectedPlane(PreviousPosition.X, State.Position.X, -1650.0f, false))
+				|| (CurrentV2Boundary == TEXT("east")
+					&& CrossedDirectedPlane(PreviousPosition.Y, State.Position.Y, 1650.0f, true))
+				|| (CurrentV2Boundary == TEXT("west")
+					&& CrossedDirectedPlane(PreviousPosition.Y, State.Position.Y, -1650.0f, false));
 		}
 		else if (CurrentV2EventKind == TEXT("hoop_passage"))
 		{
-			const bool bCrossed = (PreviousPosition.X - 700.0f)
-				* (State.Position.X - 700.0f) <= 0.0f;
-			bObserved = bCrossed
-				&& FMath::Abs(State.Position.Y + 700.0f) <= 72.0f
-				&& FMath::Abs(State.Position.Z - 145.0f) <= 72.0f;
+			const bool bIncreasing = CurrentV2Direction
+				== TEXT("negative_x_to_positive_x");
+			const bool bCrossed = CrossedDirectedPlane(
+				PreviousPosition.X, State.Position.X, HoopPlaneX, bIncreasing);
+			if (bCrossed)
+			{
+				const float Alpha = FMath::Clamp(
+					(HoopPlaneX - PreviousPosition.X)
+					/ (State.Position.X - PreviousPosition.X), 0.0f, 1.0f);
+				const FVector Crossing = FMath::Lerp(PreviousPosition, State.Position, Alpha);
+				const float Radius = FVector2D(
+					Crossing.Y - HoopCenter.Y, Crossing.Z - HoopCenter.Z).Size();
+				bObserved = !bHoopContactObserved
+					&& Radius <= CurrentV2HoopSafePassageRadiusCm;
+			}
 		}
 		else if (CurrentV2EventKind == TEXT("ramp_crossover"))
 		{
-			const bool bCrossed = PreviousPosition.Y * State.Position.Y <= 0.0f;
-			bObserved = bCrossed
-				&& FMath::Abs(State.Position.X) <= 250.0f
-				&& State.Position.Z >= RampTopSurfaceZ(State.Position.X) - 20.0f;
+			const bool bIncreasing = CurrentV2Direction == TEXT("left_to_right");
+			const bool bCrossed = CrossedDirectedPlane(
+				PreviousPosition.Y, State.Position.Y, 0.0f, bIncreasing);
+			bRampBodyCrossed |= bCrossed
+				&& FMath::Abs(State.Position.X) <= CurrentV2RampCrossingHalfWidthCm
+				&& State.Position.Z >= RampTopSurfaceZ(State.Position.X) - 20.0f
+				&& State.Position.Z <= RampTopSurfaceZ(State.Position.X) + 250.0f;
+			const bool bReachedOppositeSide = bIncreasing
+				? State.Position.Y >= CurrentV2RampOppositeLandingOffsetCm
+				: State.Position.Y <= -CurrentV2RampOppositeLandingOffsetCm;
+			bObserved = bRampBodyCrossed && bReachedOppositeSide
+				&& Result.bHadHit && Result.Hit.ImpactNormal.Z >= 0.65f;
 		}
 		else if (CurrentV2EventKind == TEXT("two_wall_contact"))
 		{
@@ -4152,20 +4572,43 @@ bool ACurriculumDataGenerator::CertifyV2MissionConstruction()
 				&& ContactOrder[0] == CurrentV2ExpectedContactOrder[0]
 				&& ContactOrder[1] == CurrentV2ExpectedContactOrder[1];
 		}
-		else if (Result.bHadHit && ContactSlug == CurrentV2TargetActor)
+		else if (Result.bHadHit && !bHadAnyContact)
 		{
-			const float Tolerance = CurrentV2MissionRegionRadiusCm
-				+ GrenadeSimConfig.RadiusCm + 15.0f;
-			bObserved = FVector::Distance(
-				Result.Hit.Location,
-				CurrentV2MissionTargetPoint) <= Tolerance;
+			bObserved = V2ContactRegionMatches(
+				ContactSlug, CurrentV2TargetActor, CurrentV2TargetRegion,
+				CurrentV2Boundary, CurrentV2MissionTargetPoint,
+				CurrentV2MaximumContactDistanceCm, Result.Hit, PreviousVelocity);
+			if (bObserved && CurrentV2EventKind == TEXT("rim_contact"))
+			{
+				bObserved = CurrentV2Direction == TEXT("negative_x_to_positive_x")
+					? PreviousVelocity.X > 0.0f : PreviousVelocity.X < 0.0f;
+			}
 		}
+		bHadAnyContact |= Result.bHadHit;
 		if (bObserved)
 		{
 			break;
 		}
 	}
 	bV2ConstructionCertified = bObserved;
+	if (!bObserved)
+	{
+		LastError = FString::Printf(
+			TEXT("Immutable V2 mission %s failed construction: event %s, target %s/%s, "
+				"any contact %s, last contact %s at %s, closest target distance %.2f cm, "
+				"realized order [%s], expected order [%s]."),
+			*CurrentV2MissionType,
+			*CurrentV2EventKind,
+			*CurrentV2TargetActor,
+			*CurrentV2TargetRegion,
+			bHadAnyContact ? TEXT("true") : TEXT("false"),
+			*LastContactSlug,
+			*LastContactLocation.ToCompactString(),
+			ClosestTargetDistance == TNumericLimits<float>::Max()
+				? -1.0f : ClosestTargetDistance,
+			*FString::Join(ContactOrder, TEXT(",")),
+			*FString::Join(CurrentV2ExpectedContactOrder, TEXT(",")));
+	}
 	return bObserved;
 }
 
@@ -4175,54 +4618,201 @@ bool ACurriculumDataGenerator::IsV2MissionRegionVisible() const
 	{
 		return true;
 	}
-	FVector2D Pixel;
-	return ProjectToCapture(
+	if (CurrentV2EventKind == TEXT("trajectory_manual_toggle")
+		|| CurrentV2EventKind == TEXT("trajectory_reload_reopen"))
+	{
+		return true;
+	}
+	const FTransform CameraTransform = GetObservationCameraTransform();
+	const FVector Right = CameraTransform.GetUnitAxis(EAxis::Y);
+	const FVector Up = CameraTransform.GetUnitAxis(EAxis::Z);
+	const float Extent = FMath::Clamp(CurrentV2MissionRegionRadiusCm, 12.0f, 70.0f);
+	const FVector Points[] = {
 		CurrentV2MissionTargetPoint,
-		PlayerCamera->GetComponentTransform(),
-		PlayerCamera->FieldOfView,
-		CaptureWidth,
-		CaptureHeight,
-		Pixel)
-		&& Pixel.X >= 2.0f
-		&& Pixel.X <= static_cast<float>(CaptureWidth - 2)
-		&& Pixel.Y >= 2.0f
-		&& Pixel.Y <= static_cast<float>(CaptureHeight - 2);
+		CurrentV2MissionTargetPoint + Right * Extent,
+		CurrentV2MissionTargetPoint - Right * Extent,
+		CurrentV2MissionTargetPoint + Up * Extent,
+		CurrentV2MissionTargetPoint - Up * Extent,
+	};
+	for (const FVector& Point : Points)
+	{
+		FVector2D Pixel;
+		if (!ProjectToCapture(
+				Point, CameraTransform, PlayerCamera->FieldOfView,
+				CaptureWidth, CaptureHeight, Pixel)
+			|| Pixel.X < 4.0f
+			|| Pixel.X > static_cast<float>(CaptureWidth - 4)
+			|| Pixel.Y < 4.0f
+			|| Pixel.Y > static_cast<float>(CaptureHeight - 4))
+		{
+			return false;
+		}
+	}
+	FHitResult VisibilityHit;
+	FCollisionQueryParams Query(SCENE_QUERY_STAT(V2MissionRegionVisibility), true);
+	Query.AddIgnoredActor(Character);
+	if (GetWorld()->LineTraceSingleByChannel(
+			VisibilityHit,
+			GetObservationCameraTransform().GetLocation(),
+			CurrentV2MissionTargetPoint,
+			ECC_Visibility,
+			Query))
+	{
+		const FString HitSlug = CurriculumContactSlug(VisibilityHit);
+		const bool bExpectedCornerWall = CurrentV2EventKind == TEXT("two_wall_contact")
+			&& CurrentV2ExpectedContactOrder.Contains(HitSlug);
+		if (HitSlug != CurrentV2TargetActor && !bExpectedCornerWall)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ACurriculumDataGenerator::IsV2PreviewUsefulSegmentVisible() const
+{
+	if (!bV2MissionRecipe || !PlayerCamera || !GetWorld())
+	{
+		return true;
+	}
+	FGrenadeSimState PreviewState;
+	FGrenadeSim::InitializeState(
+		PreviewState,
+		CurrentV2CertifiedLaunchPosition,
+		CurrentV2CertifiedLaunchVelocity,
+		3600.0f);
+	const FTransform CameraTransform = GetObservationCameraTransform();
+	const float StepDt = FMath::Max(0.001f, GrenadeSimConfig.FixedStepSeconds);
+	int32 VisibleSamples = 0;
+	for (int32 StepIndex = 0;
+		StepIndex < 180 && !PreviewState.bMotionStopped;
+		++StepIndex)
+	{
+		FGrenadeSim::Step(
+			GetWorld(), GrenadeSimConfig, PreviewState, StepDt, Character,
+			[](const FHitResult&) { return static_cast<ABreakableTile*>(nullptr); });
+		if (StepIndex % 12 == 0)
+		{
+			FVector2D Pixel;
+			if (ProjectToCapture(
+					PreviewState.Position, CameraTransform, PlayerCamera->FieldOfView,
+					CaptureWidth, CaptureHeight, Pixel)
+				&& Pixel.X >= 2.0f && Pixel.X <= static_cast<float>(CaptureWidth - 2)
+				&& Pixel.Y >= 2.0f && Pixel.Y <= static_cast<float>(CaptureHeight - 2))
+			{
+				++VisibleSamples;
+			}
+		}
+	}
+	return VisibleSamples >= 3;
+}
+
+bool ACurriculumDataGenerator::IsV2OpeningArenaContextVisible() const
+{
+	if (bV2MissionRecipe
+		&& (CurrentV2EventKind == TEXT("trajectory_manual_toggle")
+			|| CurrentV2EventKind == TEXT("trajectory_reload_reopen")))
+	{
+		return true;
+	}
+	if (!bV2MissionRecipe || !PlayerCamera || !IsV2MissionRegionVisible())
+	{
+		return !bV2MissionRecipe;
+	}
+	const FVector Landmarks[] = {
+		FVector::ZeroVector,
+		FVector(-700.0f, 700.0f, 125.0f),
+		FVector(-700.0f, -700.0f, 120.0f),
+		FVector(700.0f, 700.0f, 125.0f),
+		FVector(0.0f, 0.0f, 100.0f),
+		FVector(CurrentV2MissionTargetPoint.X, CurrentV2MissionTargetPoint.Y, 0.0f),
+		CurrentV2MissionTargetPoint + FVector(240.0f, 0.0f, -80.0f),
+		CurrentV2MissionTargetPoint + FVector(0.0f, 240.0f, -80.0f),
+	};
+	for (const FVector& Landmark : Landmarks)
+	{
+		FVector2D Pixel;
+		if (ProjectToCapture(
+				Landmark,
+				GetObservationCameraTransform(),
+				PlayerCamera->FieldOfView,
+				CaptureWidth,
+				CaptureHeight,
+				Pixel)
+			&& Pixel.X >= 8.0f && Pixel.X <= static_cast<float>(CaptureWidth - 8)
+			&& Pixel.Y >= 8.0f && Pixel.Y <= static_cast<float>(CaptureHeight - 8))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void ACurriculumDataGenerator::UpdateV2MissionEvidence(
 	const FGeneratedGrenade& Grenade,
 	const FGrenadeSimStepResult& StepResult,
-	const FVector& PreviousPosition)
+	const FVector& PreviousPosition,
+	const FVector& PreviousVelocity)
 {
 	if (!bV2MissionRecipe || bV2MissionEventObserved)
 	{
 		return;
 	}
 	bool bObserved = false;
+	FVector EvidencePosition = Grenade.State.Position;
+	FString ContactSlug;
+	if (StepResult.bHadHit)
+	{
+		ContactSlug = CurriculumContactSlug(StepResult.Hit);
+		bV2HoopContactObserved |= ContactSlug == TEXT("CurriculumObject_Hoop");
+	}
 	if (CurrentV2EventKind == TEXT("arena_exit"))
 	{
-		bObserved =
-			(CurrentV2Boundary == TEXT("north") && Grenade.State.Position.X > 1650.0f)
-			|| (CurrentV2Boundary == TEXT("south") && Grenade.State.Position.X < -1650.0f)
-			|| (CurrentV2Boundary == TEXT("east") && Grenade.State.Position.Y > 1650.0f)
-			|| (CurrentV2Boundary == TEXT("west") && Grenade.State.Position.Y < -1650.0f);
+		bObserved = (CurrentV2Boundary == TEXT("north")
+				&& CrossedDirectedPlane(PreviousPosition.X, Grenade.State.Position.X, 1650.0f, true))
+			|| (CurrentV2Boundary == TEXT("south")
+				&& CrossedDirectedPlane(PreviousPosition.X, Grenade.State.Position.X, -1650.0f, false))
+			|| (CurrentV2Boundary == TEXT("east")
+				&& CrossedDirectedPlane(PreviousPosition.Y, Grenade.State.Position.Y, 1650.0f, true))
+			|| (CurrentV2Boundary == TEXT("west")
+				&& CrossedDirectedPlane(PreviousPosition.Y, Grenade.State.Position.Y, -1650.0f, false));
 	}
 	else if (CurrentV2EventKind == TEXT("hoop_passage"))
 	{
-		const bool bCrossed = (PreviousPosition.X - 700.0f)
-			* (Grenade.State.Position.X - 700.0f) <= 0.0f;
-		bObserved = bCrossed
-			&& FMath::Abs(Grenade.State.Position.Y + 700.0f) <= 72.0f
-			&& FMath::Abs(Grenade.State.Position.Z - 145.0f) <= 72.0f;
+		const bool bIncreasing = CurrentV2Direction
+			== TEXT("negative_x_to_positive_x");
+		const bool bCrossed = CrossedDirectedPlane(
+			PreviousPosition.X, Grenade.State.Position.X, HoopPlaneX, bIncreasing);
+		if (bCrossed)
+		{
+			const float Alpha = FMath::Clamp(
+				(HoopPlaneX - PreviousPosition.X)
+				/ (Grenade.State.Position.X - PreviousPosition.X), 0.0f, 1.0f);
+			EvidencePosition = FMath::Lerp(
+				PreviousPosition, Grenade.State.Position, Alpha);
+			const float Radius = FVector2D(
+				EvidencePosition.Y - HoopCenter.Y,
+				EvidencePosition.Z - HoopCenter.Z).Size();
+			CurrentV2MissionEventClearanceCm =
+				CurrentV2HoopSafePassageRadiusCm - Radius;
+			bObserved = !bV2HoopContactObserved
+				&& CurrentV2MissionEventClearanceCm >= 0.0f;
+		}
 	}
 	else if (CurrentV2EventKind == TEXT("ramp_crossover"))
 	{
-		const bool bCrossed =
-			PreviousPosition.Y * Grenade.State.Position.Y <= 0.0f;
-		bObserved = bCrossed
-			&& FMath::Abs(Grenade.State.Position.X) <= 250.0f
-			&& Grenade.State.Position.Z
-				>= RampTopSurfaceZ(Grenade.State.Position.X) - 20.0f;
+		const bool bIncreasing = CurrentV2Direction == TEXT("left_to_right");
+		const bool bCrossed = CrossedDirectedPlane(
+			PreviousPosition.Y, Grenade.State.Position.Y, 0.0f, bIncreasing);
+		bV2RampBodyCrossed |= bCrossed
+			&& FMath::Abs(Grenade.State.Position.X) <= CurrentV2RampCrossingHalfWidthCm
+			&& Grenade.State.Position.Z >= RampTopSurfaceZ(Grenade.State.Position.X) - 20.0f
+			&& Grenade.State.Position.Z <= RampTopSurfaceZ(Grenade.State.Position.X) + 250.0f;
+		const bool bReachedOppositeSide = bIncreasing
+			? Grenade.State.Position.Y >= CurrentV2RampOppositeLandingOffsetCm
+			: Grenade.State.Position.Y <= -CurrentV2RampOppositeLandingOffsetCm;
+		bObserved = bV2RampBodyCrossed && bReachedOppositeSide
+			&& StepResult.bHadHit && StepResult.Hit.ImpactNormal.Z >= 0.65f;
 	}
 	else if (CurrentV2EventKind == TEXT("two_wall_contact"))
 	{
@@ -4231,28 +4821,26 @@ void ACurriculumDataGenerator::UpdateV2MissionEvidence(
 			&& Grenade.ContactOrder[0] == CurrentV2ExpectedContactOrder[0]
 			&& Grenade.ContactOrder[1] == CurrentV2ExpectedContactOrder[1];
 	}
-	else if (StepResult.bHadHit && StepResult.Hit.GetActor())
+	else if (StepResult.bHadHit
+		&& Grenade.FirstContactFrame == FrameIndex + 1)
 	{
-		FString ContactSlug;
-		for (const FName Tag : StepResult.Hit.GetActor()->Tags)
+		bObserved = V2ContactRegionMatches(
+			ContactSlug, CurrentV2TargetActor, CurrentV2TargetRegion,
+			CurrentV2Boundary, CurrentV2MissionTargetPoint,
+			CurrentV2MaximumContactDistanceCm, StepResult.Hit, PreviousVelocity);
+		if (bObserved && CurrentV2EventKind == TEXT("rim_contact"))
 		{
-			const FString Text = Tag.ToString();
-			if (Text.StartsWith(TEXT("Curriculum"))
-				&& Text != TEXT("CurriculumArena"))
-			{
-				ContactSlug = Text;
-				break;
-			}
+			bObserved = CurrentV2Direction == TEXT("negative_x_to_positive_x")
+				? PreviousVelocity.X > 0.0f : PreviousVelocity.X < 0.0f;
 		}
-		const float Tolerance = CurrentV2MissionRegionRadiusCm
-			+ GrenadeSimConfig.RadiusCm + 15.0f;
-		bObserved = ContactSlug == CurrentV2TargetActor
-			&& FVector::Distance(
-				StepResult.Hit.Location,
-				CurrentV2MissionTargetPoint) <= Tolerance;
+		EvidencePosition = StepResult.Hit.Location;
 	}
 	if (bObserved)
 	{
+		CurrentV2MissionEventPosition = EvidencePosition;
+		CurrentV2MissionEventNormal = StepResult.bHadHit
+			? StepResult.Hit.ImpactNormal : FVector::ZeroVector;
+		CurrentV2MissionEventVelocity = PreviousVelocity;
 		bV2MissionEventObserved = true;
 		CurrentV2MissionEventFrame = FrameIndex + 1;
 		bCoveragePrimaryObjectiveAchieved = true;
@@ -4329,7 +4917,7 @@ uint16 ACurriculumDataGenerator::SelectPersistentSemiMarkovCameraBits()
 		return SelectCameraBits();
 	}
 	const float Roll = EpisodeRandom.FRandRange(0.0f, 100.0f);
-	const FVector CameraLocation = PlayerCamera->GetComponentLocation();
+	const FVector CameraLocation = GetObservationCameraTransform().GetLocation();
 	if (Roll < 60.0f && FVector2D(CameraLocation.X, CameraLocation.Y).Size() > 250.0f)
 	{
 		return CameraBitsToward(FVector(0.0f, 0.0f, CameraLocation.Z));
@@ -6497,7 +7085,7 @@ uint16 ACurriculumDataGenerator::CameraBitsToward(
 
 	const FRotator CurrentRotation = Character->GetController()->GetControlRotation();
 	const FRotator DesiredRotation =
-		(WorldTarget - PlayerCamera->GetComponentLocation()).Rotation();
+		(WorldTarget - GetObservationCameraTransform().GetLocation()).Rotation();
 	const float YawError =
 		FMath::FindDeltaAngleDegrees(CurrentRotation.Yaw, DesiredRotation.Yaw);
 	const float PitchError =
@@ -6561,7 +7149,7 @@ uint16 ACurriculumDataGenerator::SelectStableCameraBitsToward(
 
 	const FRotator CurrentRotation = Character->GetController()->GetControlRotation();
 	const FRotator DesiredRotation =
-		(WorldTarget - PlayerCamera->GetComponentLocation()).Rotation();
+		(WorldTarget - GetObservationCameraTransform().GetLocation()).Rotation();
 	const float YawError =
 		FMath::FindDeltaAngleDegrees(CurrentRotation.Yaw, DesiredRotation.Yaw);
 	const float PitchError =
@@ -6837,7 +7425,7 @@ bool ACurriculumDataGenerator::IsCoverageTargetVisible(const int32 TargetIndex) 
 
 	const FCoverageTargetDefinition& Target =
 		GetCoverageTargetDefinition(TargetIndex);
-	const FVector CameraLocation = PlayerCamera->GetComponentLocation();
+	const FVector CameraLocation = GetObservationCameraTransform().GetLocation();
 	const FRotator CameraRotation = PlayerCamera->GetComponentRotation();
 	const FRotator DesiredRotation = (Target.LookTarget - CameraLocation).Rotation();
 	if (FMath::Abs(FMath::FindDeltaAngleDegrees(CameraRotation.Yaw, DesiredRotation.Yaw)) > 42.0f
@@ -7442,10 +8030,7 @@ FString ACurriculumDataGenerator::GetMissionPhaseSlug() const
 	{
 		if (bV2MissionEventObserved) return TEXT("aftermath");
 		if (CurrentV2AcceptedThrowCount > 0) return TEXT("flight");
-		const int32 AdjustmentEnd =
-			CurrentV2EstablishSteps + CurrentV2CameraAdjustSteps;
-		if (FrameIndex >= AdjustmentEnd) return TEXT("trajectory_dwell");
-		if (FrameIndex >= CurrentV2EstablishSteps) return TEXT("camera_adjustment");
+		if (FrameIndex >= CurrentV2EstablishSteps) return TEXT("trajectory_dwell");
 		return TEXT("scene_establishment");
 	}
 	if (CoverageMission == ECoverageMission::SemiMarkov)
@@ -7614,6 +8199,12 @@ void ACurriculumDataGenerator::ApplyAction(const uint16 ActionMask)
 				CooldownRemainingSteps);
 		bCurrentQRising = Decision.bQRising;
 		bCurrentQFalling = Decision.bQFalling;
+		if (Decision.bQRising && CooldownRemainingSteps <= 0)
+		{
+			// A held or attempted Q during reload cannot reopen the preview.
+			// Only a fresh press made after the weapon is ready rearms it.
+			bV2PreviewRequiresFreshReadyQPress = false;
+		}
 		bCurrentERequestEdge = Decision.bERequestEdge;
 		bCurrentPlanarMovementSuppressed =
 			Decision.bPlanarMovementSuppressed;
@@ -7644,6 +8235,10 @@ void ACurriculumDataGenerator::ApplyAction(const uint16 ActionMask)
 		if (Decision.bThrowEligible)
 		{
 			bCurrentEAccepted = (CurrentAcceptedGrenadeId = AcceptThrow()) != INDEX_NONE;
+			if (bCurrentEAccepted)
+			{
+				bV2PreviewRequiresFreshReadyQPress = true;
+			}
 		}
 		CurrentCooldownAfterSteps = CooldownRemainingSteps;
 	}
@@ -7842,6 +8437,7 @@ void ACurriculumDataGenerator::ResetStageState()
 	bCurrentQFalling = false;
 	bCurrentPlanarMovementSuppressed = false;
 	bQVisibleInLatestObservation = false;
+	bV2PreviewRequiresFreshReadyQPress = false;
 	CurrentERejectionReason =
 		V2ActionSemantics::EThrowRejectionReason::None;
 	LastAppliedActionMask = 0;
@@ -7858,12 +8454,14 @@ bool ACurriculumDataGenerator::BuildLaunchState(
 		return false;
 	}
 
-	const FTransform CameraTransform = PlayerCamera->GetComponentTransform();
+	const FTransform CameraTransform = GetObservationCameraTransform();
 	const FVector Forward = CameraTransform.GetUnitAxis(EAxis::X);
 	const FVector Right = CameraTransform.GetUnitAxis(EAxis::Y);
 	const FVector Up = CameraTransform.GetUnitAxis(EAxis::Z);
-	OutSpawnLocation =
-		CameraTransform.GetLocation()
+	const FVector LaunchCameraLocation = bV2MissionRecipe
+		? CurrentV2MissionPlayerSpawn + FVector(0.0f, 0.0f, 64.0f)
+		: CameraTransform.GetLocation();
+	OutSpawnLocation = LaunchCameraLocation
 		+ (Forward * 30.0f)
 		+ (Right * 10.0f)
 		- (Up * 10.0f);
@@ -7892,8 +8490,16 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 			|| FVector::Distance(InitialVelocity, CurrentV2CertifiedLaunchVelocity) > 1.0f))
 	{
 		LastError = FString::Printf(
-			TEXT("V2 mission %s launch diverged from its certified immutable state."),
-			*CurrentV2MissionType);
+			TEXT("V2 mission %s launch diverged from its certified immutable state "
+				"(position delta %.3f cm, velocity delta %.3f cm/s; actual position %s, "
+				"certified position %s, actual velocity %s, certified velocity %s)."),
+			*CurrentV2MissionType,
+			FVector::Distance(SpawnLocation, CurrentV2CertifiedLaunchPosition),
+			FVector::Distance(InitialVelocity, CurrentV2CertifiedLaunchVelocity),
+			*SpawnLocation.ToCompactString(),
+			*CurrentV2CertifiedLaunchPosition.ToCompactString(),
+			*InitialVelocity.ToCompactString(),
+			*CurrentV2CertifiedLaunchVelocity.ToCompactString());
 		bCoverageMissionFailed = true;
 		return INDEX_NONE;
 	}
@@ -8066,6 +8672,7 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 			for (int32 Substep = 0; Substep < SubstepCount; ++Substep)
 			{
 				const FVector PreviousGrenadePosition = Grenade.State.Position;
+				const FVector PreviousGrenadeVelocity = Grenade.State.Velocity;
 				const FGrenadeSimStepResult StepResult = FGrenadeSim::Step(
 					GetWorld(),
 					Grenade.SimConfig,
@@ -8099,12 +8706,15 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 						Grenade.FirstContactFrame = FrameIndex + 1;
 						Grenade.RealizedTarget = ContactSlug;
 						Grenade.FirstContactPosition = StepResult.Hit.Location;
+						Grenade.FirstContactNormal = StepResult.Hit.ImpactNormal;
+						Grenade.FirstContactVelocity = PreviousGrenadeVelocity;
 					}
 				}
 				UpdateV2MissionEvidence(
 					Grenade,
 					StepResult,
-					PreviousGrenadePosition);
+					PreviousGrenadePosition,
+					PreviousGrenadeVelocity);
 				if (Grenade.State.bMotionStopped)
 				{
 					if (Grenade.RestFrame == INDEX_NONE)
@@ -8132,7 +8742,7 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 			FVector2D Pixel;
 			if (ProjectToCapture(
 				Grenade.State.Position,
-				PlayerCamera->GetComponentTransform(),
+				GetObservationCameraTransform(),
 				PlayerCamera->FieldOfView,
 				CaptureWidth,
 				CaptureHeight,
@@ -8152,6 +8762,9 @@ void ACurriculumDataGenerator::DrawTrajectoryOverlay(TArray<FColor>& Pixels) con
 {
 	if (CurriculumStage == ECurriculumStage::Movement
 		|| (CurrentActionMask & CurriculumAction::Q) == 0
+		|| (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+			&& (CooldownRemainingSteps > 0
+				|| bV2PreviewRequiresFreshReadyQPress))
 		|| Pixels.Num() != CaptureWidth * CaptureHeight
 		|| !GetWorld()
 		|| !PlayerCamera)
@@ -8173,7 +8786,7 @@ void ACurriculumDataGenerator::DrawTrajectoryOverlay(TArray<FColor>& Pixels) con
 		InitialVelocity,
 		3600.0f);
 
-	const FTransform CameraTransform = PlayerCamera->GetComponentTransform();
+	const FTransform CameraTransform = GetObservationCameraTransform();
 	const float FixedStep = FMath::Max(0.001f, GrenadeSimConfig.FixedStepSeconds);
 	FVector2D PreviousPixel = FVector2D::ZeroVector;
 	bool bHasPreviousPixel = ProjectToCapture(
@@ -8306,6 +8919,7 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 			TEXT("\"physics_config_identity\":\"grenade-sim-config-r1\",")
 			TEXT("\"realized_target\":%s,\"realized_contact_order\":%s,")
 			TEXT("\"first_contact_frame\":%s,\"first_contact_position\":%s,")
+			TEXT("\"first_contact_normal\":%s,\"first_contact_velocity\":%s,")
 			TEXT("\"bounce_count\":%d,")
 			TEXT("\"rest_frame\":%s,\"post_rest_tail_steps\":%d,")
 			TEXT("\"arena_exit_frame\":%s,\"arena_exit_direction\":%s,")
@@ -8326,6 +8940,10 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 				? TEXT("null") : *FString::FromInt(Grenade.FirstContactFrame),
 			Grenade.FirstContactFrame == INDEX_NONE
 				? TEXT("null") : *JsonVector(Grenade.FirstContactPosition),
+			Grenade.FirstContactFrame == INDEX_NONE
+				? TEXT("null") : *JsonVector(Grenade.FirstContactNormal),
+			Grenade.FirstContactFrame == INDEX_NONE
+				? TEXT("null") : *JsonVector(Grenade.FirstContactVelocity),
 			Grenade.State.BounceCount,
 			Grenade.RestFrame == INDEX_NONE
 				? TEXT("null") : *FString::FromInt(Grenade.RestFrame),
@@ -8456,7 +9074,7 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 	}
 	const TCHAR* CollectionPolicy =
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-		? TEXT("training_v2_combined_sixty_missions_v1")
+		? TEXT("training_v2_combined_sixty_two_missions_v1")
 		: (bPrescribedRecipes
 		? TEXT("training_central_prescribed_recipes_v1")
 		: (bTrajectoryShowcase

@@ -25,15 +25,20 @@ from v2_mission_catalog import (
 )
 
 
-PLAN_VERSION = "trajectory-throw-v2-sixty-missions-1"
-CONTRACT_VERSION = "shared-persistent-semi-markov-1+certified-sixty-missions-1"
+PLAN_VERSION = "trajectory-throw-v2-sixty-two-missions-10"
+CONTRACT_VERSION = "shared-persistent-semi-markov-1+certified-sixty-two-missions-1"
 SOURCE_FRAME_SHARES = {
     "semi_markov": Fraction(7, 10),
     "mission": Fraction(3, 10),
 }
 MINIMUM_EPISODE_SECONDS = 120
 MAXIMUM_EPISODE_SECONDS = 180
-PRODUCTION_BUDGET_QUANTUM = 200  # one 0.5% type share is one integral frame
+PRODUCTION_BUDGET_QUANTUM = 10  # preserves the exact 70/30 source split
+V2_OBSERVATION_RATE = 20
+FORBIDDEN_V2_KEYS = {
+    "candidate_seed", "reserve_activation_for", "reserve_for",
+    "replacement_for", "replacement_recipe", "alternate_seed",
+}
 GENERATOR_PIPELINE_FILES = (
     "Scripts/build_v2_review_set.py",
     "Scripts/dataset_worker.py",
@@ -51,6 +56,50 @@ def canonical_json(value: Any) -> str:
 def stable_id(prefix: str, value: Any, length: int = 16) -> str:
     digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
     return f"{prefix}-{digest[:length]}"
+
+
+def _forbidden_keys(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        return ({str(key) for key in value if str(key) in FORBIDDEN_V2_KEYS}
+                | set().union(*(_forbidden_keys(item) for item in value.values()), set()))
+    if isinstance(value, list):
+        return set().union(*(_forbidden_keys(item) for item in value), set())
+    return set()
+
+
+def recipe_identity_payload(recipe: dict[str, Any]) -> dict[str, Any]:
+    """All immutable execution and credit fields covered by a recipe identity."""
+    keys = (
+        "active", "recipe_index", "episode_index", "scenario_index",
+        "continuous_sample_ordinal", "refinement_level", "repetition_index",
+        "seed", "mission", "mission_type", "source", "family", "cell_id",
+        "variation_cell_id", "mission_solution", "split", "schedule_phase",
+        "planned_credited_frames", "expected_credited_frames", "review_variant",
+    )
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "catalog_version": CATALOG_VERSION,
+        **{key: recipe.get(key) for key in keys},
+    }
+
+
+def recipe_digest(recipe: dict[str, Any]) -> str:
+    return stable_id("v2recipe", recipe_identity_payload(recipe))
+
+
+def replay_digest(recipe: dict[str, Any]) -> str:
+    return stable_id("v2replay", recipe_identity_payload(recipe))
+
+
+def assignment_digest(assignment: dict[str, Any]) -> str:
+    payload = {key: value for key, value in assignment.items() if key != "assignment_digest"}
+    return stable_id("v2assignment", payload, length=32)
+
+
+def seal_assignment(assignment: dict[str, Any]) -> dict[str, Any]:
+    result = dict(assignment)
+    result["assignment_digest"] = assignment_digest(result)
+    return result
 
 
 def utc_now() -> str:
@@ -107,6 +156,14 @@ def validate_episode_seconds(seconds: int) -> None:
         )
 
 
+def validate_observation_rate(observation_rate: int) -> None:
+    if observation_rate != V2_OBSERVATION_RATE:
+        raise ValueError(
+            f"V2 certified recipes require exactly {V2_OBSERVATION_RATE} Hz; "
+            "a different rate needs a separately certified catalog"
+        )
+
+
 def _ceil_fraction(value: Fraction) -> int:
     return (value.numerator + value.denominator - 1) // value.denominator
 
@@ -125,8 +182,7 @@ def minimum_feasible_frame_budget(
 ) -> int:
     """Calculate the V2 floor from mandatory durations and family shares."""
     validate_episode_seconds(episode_seconds)
-    if observation_rate <= 0:
-        raise ValueError("observation rate must be positive")
+    validate_observation_rate(observation_rate)
     semi_markov_mandatory_frames = episode_seconds * observation_rate + 1
     candidates = [
         Fraction(semi_markov_mandatory_frames, 1)
@@ -162,8 +218,8 @@ def mandatory_mission_order() -> list[Any]:
                 # Alternating ends separates opposing regions during coverage.
                 index = ordinal // 2 if ordinal % 2 == 0 else len(values) - 1 - ordinal // 2
                 result.append(values[index])
-    if len(result) != 60 or len({item.slug for item in result}) != 60:
-        raise AssertionError("mandatory order must contain all 60 types exactly once")
+    if len(result) != 62 or len({item.slug for item in result}) != 62:
+        raise AssertionError("mandatory order must contain all 62 types exactly once")
     return result
 
 
@@ -198,20 +254,15 @@ def _materialize_recipe(
     evaluation_percent: int,
 ) -> dict[str, Any]:
     seed = seed_start + recipe_index
-    identity = {
-        "contract_version": CONTRACT_VERSION,
-        "catalog_version": CATALOG_VERSION,
-        "recipe_index": recipe_index,
-        "source": draft["source"],
-        "mission_type": draft.get("mission_type"),
-        "repetition_index": draft["repetition_index"],
-        "solution": draft.get("mission_solution"),
-        "seed": seed,
-    }
-    recipe_id = stable_id("v2recipe", identity)
-    return {
+    split = _split_for(
+        draft["source"],
+        str(draft.get("mission_type") or "semi_markov"),
+        int(draft["repetition_index"]),
+        seed,
+        evaluation_percent,
+    )
+    recipe = {
         "active": True,
-        "recipe_id": recipe_id,
         "recipe_index": recipe_index,
         "episode_index": recipe_index,
         "scenario_index": int(draft["scenario_index"]),
@@ -224,19 +275,24 @@ def _materialize_recipe(
         "source": draft["source"],
         "family": draft["family"],
         "cell_id": draft.get("mission_type"),
-        "mission_solution": draft.get("mission_solution"),
-        "replay_identity": stable_id("v2replay", identity),
-        "split": _split_for(
-            draft["source"],
-            str(draft.get("mission_type") or "semi_markov"),
-            int(draft["repetition_index"]),
-            seed,
-            evaluation_percent,
+        "variation_cell_id": (
+            stable_id(
+                "v2cell",
+                draft["mission_solution"]["variation"]["coverage_cell"],
+            )
+            if draft.get("mission_solution") else None
         ),
+        "mission_solution": draft.get("mission_solution"),
+        "split": split,
         "schedule_phase": draft["schedule_phase"],
         "planned_credited_frames": int(draft["planned_credited_frames"]),
         "expected_credited_frames": int(draft["expected_credited_frames"]),
     }
+    if "review_variant" in draft:
+        recipe["review_variant"] = int(draft["review_variant"])
+    recipe["recipe_id"] = recipe_digest(recipe)
+    recipe["replay_identity"] = replay_digest(recipe)
+    return recipe
 
 
 def build_recipes(
@@ -249,8 +305,7 @@ def build_recipes(
     if frame_budget <= 0:
         raise ValueError("frame budget must be positive")
     validate_episode_seconds(episode_seconds)
-    if observation_rate <= 0:
-        raise ValueError("observation rate must be positive")
+    validate_observation_rate(observation_rate)
     if not 0 <= evaluation_percent <= 100:
         raise ValueError("evaluation percent must be between 0 and 100")
     floor = minimum_feasible_frame_budget(episode_seconds, observation_rate)
@@ -266,11 +321,22 @@ def build_recipes(
 
     type_values = mission_types()
     type_index = {item.slug: index for index, item in enumerate(type_values)}
-    type_target = frame_budget // 200
+    mission_total = frame_budget * 3 // 10
+    base_type_target, extra_type_targets = divmod(mission_total, len(type_values))
+    type_targets = {
+        item.slug: base_type_target + (index < extra_type_targets)
+        for index, item in enumerate(type_values)
+    }
     semi_target = frame_budget * 7 // 10
     drafts: list[dict[str, Any]] = []
     credited: Counter[str] = Counter()
     repetitions: Counter[str] = Counter()
+    mission_sample_counts = {
+        item.slug: math.ceil(
+            type_targets[item.slug] / mission_expected_frames(item, observation_rate)
+        )
+        for item in type_values
+    }
 
     # The one mandatory semi-Markov opening makes its floor term concrete.
     semi_expected = episode_seconds * observation_rate + 1
@@ -286,7 +352,9 @@ def build_recipes(
     # First pass: every mission type once, before any deficit work.
     for item in mandatory_mission_order():
         expected = mission_expected_frames(item, observation_rate)
-        solution = build_solution(item, 0, observation_rate)
+        solution = build_solution(
+            item, 0, observation_rate, mission_sample_counts[item.slug]
+        )
         drafts.append({
             "source": "mission", "family": item.family,
             "mission": item.slug, "mission_type": item.slug,
@@ -300,12 +368,12 @@ def build_recipes(
         repetitions[item.slug] = 1
 
     # Deterministic largest frame-deficit scheduling. Ties use catalog order.
-    while any(credited[item.slug] < type_target for item in type_values):
+    while any(credited[item.slug] < type_targets[item.slug] for item in type_values):
         item = max(
             type_values,
-            key=lambda value: (type_target - credited[value.slug], -type_index[value.slug]),
+            key=lambda value: (type_targets[value.slug] - credited[value.slug], -type_index[value.slug]),
         )
-        deficit = type_target - credited[item.slug]
+        deficit = type_targets[item.slug] - credited[item.slug]
         if deficit <= 0:
             break
         repetition = repetitions[item.slug]
@@ -318,7 +386,10 @@ def build_recipes(
             "schedule_phase": "frame_deficit",
             "expected_credited_frames": expected,
             "planned_credited_frames": min(expected, deficit),
-            "mission_solution": build_solution(item, repetition, observation_rate),
+            "mission_solution": build_solution(
+                item, repetition, observation_rate,
+                mission_sample_counts[item.slug],
+            ),
         })
         credited[item.slug] += min(expected, deficit)
         repetitions[item.slug] += 1
@@ -351,6 +422,7 @@ def planned_distribution(recipes: Iterable[dict[str, Any]]) -> dict[str, Any]:
     family_frames: Counter[str] = Counter()
     type_frames: Counter[str] = Counter()
     split_frames: Counter[str] = Counter()
+    variation_cells: dict[str, set[str]] = defaultdict(set)
     total = 0
     for recipe in recipes:
         frames = int(recipe["planned_credited_frames"])
@@ -359,6 +431,9 @@ def planned_distribution(recipes: Iterable[dict[str, Any]]) -> dict[str, Any]:
         family_frames[str(recipe["family"])] += frames
         if recipe["source"] == "mission":
             type_frames[str(recipe["mission_type"])] += frames
+            variation_cells[str(recipe["mission_type"])].add(
+                str(recipe["variation_cell_id"])
+            )
         split_frames[str(recipe["split"])] += frames
     return {
         "total_credited_frames": total,
@@ -369,6 +444,9 @@ def planned_distribution(recipes: Iterable[dict[str, Any]]) -> dict[str, Any]:
         },
         "family_frames": dict(sorted(family_frames.items())),
         "mission_type_frames": dict(sorted(type_frames.items())),
+        "mission_type_variation_cell_counts": {
+            key: len(value) for key, value in sorted(variation_cells.items())
+        },
         "split_frames": dict(sorted(split_frames.items())),
     }
 
@@ -377,8 +455,10 @@ def create_plan(args: argparse.Namespace) -> None:
     root = args.collection.resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError(f"collection directory is not empty: {root}")
-    if args.workers < 1 or args.recipes_per_assignment < 1:
-        raise ValueError("workers and recipes-per-assignment must be positive")
+    if args.workers != 1:
+        raise ValueError("Trajectory/Throw V2 planning requires exactly one worker")
+    if args.recipes_per_assignment < 1:
+        raise ValueError("recipes-per-assignment must be positive")
     if not 64 <= args.width <= 4096 or not 64 <= args.height <= 4096:
         raise ValueError("width and height must be between 64 and 4096")
     recipes = build_recipes(
@@ -395,6 +475,7 @@ def create_plan(args: argparse.Namespace) -> None:
         "storage_format": args.storage_format,
         "webp_effort": args.webp_effort,
         "seed_start": args.seed_start,
+        "evaluation_percent": args.evaluation_percent,
     }
     identity = {
         "plan_version": PLAN_VERSION,
@@ -409,19 +490,19 @@ def create_plan(args: argparse.Namespace) -> None:
     assignments: list[dict[str, Any]] = []
     for number, start in enumerate(range(0, len(recipes), args.recipes_per_assignment)):
         assignment_id = f"assignment-{number:06d}"
-        assignments.append({
+        assignments.append(seal_assignment({
             "schema_version": 3,
             "plan_id": plan_id,
             "plan_version": PLAN_VERSION,
             "contract_version": CONTRACT_VERSION,
             "assignment_id": assignment_id,
             "assignment_number": number,
-            "dispatch_wave": number // args.workers,
-            "logical_worker_id": number % args.workers,
+            "dispatch_wave": number,
+            "logical_worker_id": 0,
             "split": "mixed",
             "generator": generator,
             "recipes": recipes[start:start + args.recipes_per_assignment],
-        })
+        }))
     plan = {
         "schema_version": 5,
         "plan_version": PLAN_VERSION,
@@ -437,12 +518,12 @@ def create_plan(args: argparse.Namespace) -> None:
         ),
         "active_recipe_count": len(recipes),
         "assignment_count": len(assignments),
-        "worker_count": args.workers,
+        "worker_count": 1,
         "recipes_per_assignment": args.recipes_per_assignment,
         "source_frame_shares": {key: float(value) for key, value in SOURCE_FRAME_SHARES.items()},
         "family_frame_shares": {key: float(value) for key, value in FAMILY_FRAME_SHARES.items()},
         "mission_type_frame_share": float(TYPE_FRAME_SHARE),
-        "mandatory_mission_type_count": 60,
+        "mandatory_mission_type_count": 62,
         "generator": generator,
         "planned_distribution": planned_distribution(recipes),
     }
@@ -457,35 +538,183 @@ def create_plan(args: argparse.Namespace) -> None:
     }))
 
 
+def recipe_validation_errors(
+    recipe: dict[str, Any],
+    generator: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    forbidden = _forbidden_keys(recipe)
+    if forbidden:
+        errors.append(f"forbidden V2 fields: {sorted(forbidden)}")
+    base_keys = {
+        "active", "recipe_id", "recipe_index", "episode_index",
+        "scenario_index", "continuous_sample_ordinal", "refinement_level",
+        "repetition_index", "seed", "mission", "mission_type", "source",
+        "family", "cell_id", "variation_cell_id", "mission_solution",
+        "replay_identity", "split",
+        "schedule_phase", "planned_credited_frames", "expected_credited_frames",
+    }
+    allowed = base_keys | ({"review_variant"} if "review_variant" in recipe else set())
+    extras = set(recipe) - allowed
+    missing = base_keys - set(recipe)
+    if extras:
+        errors.append(f"unknown immutable recipe fields: {sorted(extras)}")
+    if missing:
+        errors.append(f"missing immutable recipe fields: {sorted(missing)}")
+        return errors
+    try:
+        rate = int(generator["observation_rate"])
+        validate_observation_rate(rate)
+        index = int(recipe["recipe_index"])
+        repetition = int(recipe["repetition_index"])
+        if recipe["episode_index"] != index:
+            errors.append("episode_index differs from recipe_index")
+        if recipe["continuous_sample_ordinal"] != repetition:
+            errors.append("continuous sample ordinal differs from repetition")
+        if int(recipe["seed"]) != int(generator["seed_start"]) + index:
+            errors.append("seed is not the deterministic plan seed")
+        if recipe["active"] is not True:
+            errors.append("V2 recipe is not active")
+        source = str(recipe["source"])
+        if source == "mission":
+            values = list(mission_types())
+            by_slug = {item.slug: (position, item) for position, item in enumerate(values)}
+            mission_type = str(recipe["mission_type"])
+            if mission_type not in by_slug:
+                errors.append("unknown mission type")
+            else:
+                position, item = by_slug[mission_type]
+                sample_count_value = (
+                    recipe.get("mission_solution", {})
+                    .get("variation", {})
+                    .get("budget_sample_count")
+                )
+                sample_count = (
+                    int(sample_count_value)
+                    if sample_count_value is not None else None
+                )
+                expected_solution = build_solution(
+                    item, repetition, rate, sample_count
+                )
+                expected_frames = mission_expected_frames(item, rate)
+                expected_fields = {
+                    "mission": mission_type,
+                    "family": item.family,
+                    "cell_id": mission_type,
+                    "variation_cell_id": stable_id(
+                        "v2cell", expected_solution["variation"]["coverage_cell"]
+                    ),
+                    "scenario_index": position,
+                    "mission_solution": expected_solution,
+                    "expected_credited_frames": expected_frames,
+                }
+                for key, expected in expected_fields.items():
+                    if recipe.get(key) != expected:
+                        errors.append(f"{key} differs from the canonical catalog")
+        elif source == "semi_markov":
+            expected = {
+                "mission": "semi_markov", "mission_type": None,
+                "family": "semi_markov", "cell_id": None,
+                "variation_cell_id": None,
+                "mission_solution": None,
+            }
+            for key, value in expected.items():
+                if recipe.get(key) != value:
+                    errors.append(f"semi-Markov {key} changed")
+        else:
+            errors.append(f"invalid source {source!r}")
+        expected_frames = int(recipe["expected_credited_frames"])
+        planned_frames = int(recipe["planned_credited_frames"])
+        if not 0 < planned_frames <= expected_frames:
+            errors.append("planned frame credit is outside the recipe duration")
+        if recipe["recipe_id"] != recipe_digest(recipe):
+            errors.append("recipe identity hash mismatch")
+        if recipe["replay_identity"] != replay_digest(recipe):
+            errors.append("replay identity hash mismatch")
+    except (KeyError, TypeError, ValueError) as error:
+        errors.append(f"malformed recipe: {error}")
+    return errors
+
+
+def validate_assignment_against_plan(
+    root: Path,
+    assignment: dict[str, Any],
+) -> None:
+    root = root.resolve()
+    plan = read_json(root / "plan" / "collection-plan.json")
+    canonical = {
+        recipe["recipe_id"]: recipe
+        for recipe in read_jsonl(root / "plan" / "recipes.jsonl")
+    }
+    forbidden = _forbidden_keys(assignment)
+    if forbidden:
+        raise ValueError(f"V2 assignment has forbidden fields: {sorted(forbidden)}")
+    if assignment.get("assignment_digest") != assignment_digest(assignment):
+        raise ValueError("V2 assignment identity hash mismatch")
+    for key in ("plan_id", "plan_version", "contract_version", "generator"):
+        expected = plan.get(key)
+        if key == "contract_version" and expected is None:
+            expected = CONTRACT_VERSION
+        if assignment.get(key) != expected:
+            raise ValueError(f"V2 assignment {key} differs from its plan")
+    seen: set[str] = set()
+    for recipe in assignment.get("recipes", []):
+        recipe_id = str(recipe.get("recipe_id"))
+        if recipe_id in seen or recipe_id not in canonical:
+            raise ValueError("V2 assignment has duplicate or unknown recipe identity")
+        seen.add(recipe_id)
+        if recipe != canonical[recipe_id]:
+            raise ValueError(f"V2 assignment recipe {recipe_id} differs from recipes.jsonl")
+        errors = recipe_validation_errors(recipe, plan["generator"])
+        if errors:
+            raise ValueError(f"V2 recipe {recipe_id} is invalid: {'; '.join(errors)}")
+    if not seen:
+        raise ValueError("V2 assignment contains no recipes")
+
+
 def verify_plan(root: Path) -> dict[str, Any]:
     root = root.resolve()
     plan = read_json(root / "plan" / "collection-plan.json")
     recipes = read_jsonl(root / "plan" / "recipes.jsonl")
     assignments = [read_json(path) for path in sorted((root / "assignments").glob("*.json"))]
-    assigned_ids = [item["recipe_id"] for assignment in assignments for item in assignment["recipes"]]
+    assigned_ids = [item["recipe_id"] for assignment in assignments for item in assignment.get("recipes", [])]
     recipe_ids = [item["recipe_id"] for item in recipes]
     distribution = planned_distribution(recipes)
     mission_types_present = {
         str(item.get("mission_type")) for item in recipes if item.get("source") == "mission"
     }
     mandatory = [item for item in recipes if item.get("schedule_phase") == "mandatory_coverage"]
-    exact_type_frames = set(distribution["mission_type_frames"].values()) == {
-        int(plan["target_accepted_frames"]) // 200
-    }
+    mission_total = int(plan["target_accepted_frames"]) * 3 // 10
+    base_type_target, extra_type_targets = divmod(mission_total, 62)
+    exact_type_frames = sorted(distribution["mission_type_frames"].values()) == sorted(
+        [base_type_target + 1] * extra_type_targets
+        + [base_type_target] * (62 - extra_type_targets)
+    )
     exact_source_frames = distribution["source_frames"] == {
         "mission": int(plan["target_accepted_frames"]) * 3 // 10,
         "semi_markov": int(plan["target_accepted_frames"]) * 7 // 10,
     }
     exact_assignment = Counter(assigned_ids) == Counter(recipe_ids)
     unique = len(recipe_ids) == len(set(recipe_ids)) and len({item["replay_identity"] for item in recipes}) == len(recipes)
-    complete_coverage = len(mission_types_present) == 60 and len(
+    complete_coverage = len(mission_types_present) == 62 and len(
         {item.get("mission_type") for item in mandatory if item.get("source") == "mission"}
-    ) == 60
-    # The schema has one active immutable recipe list and no fallback channel.
-    no_mutable_fallbacks = True
+    ) == 62
+    no_mutable_fallbacks = not _forbidden_keys([plan, recipes, assignments])
+    recipe_errors = {
+        recipe["recipe_id"]: errors
+        for recipe in recipes
+        if (errors := recipe_validation_errors(recipe, plan["generator"]))
+    }
+    assignment_errors: list[str] = []
+    for assignment in assignments:
+        try:
+            validate_assignment_against_plan(root, assignment)
+        except ValueError as error:
+            assignment_errors.append(f"{assignment.get('assignment_id')}: {error}")
+    immutable_recipes = not recipe_errors and not assignment_errors
     valid = all((
         exact_assignment, unique, complete_coverage, exact_type_frames,
-        exact_source_frames, no_mutable_fallbacks,
+        exact_source_frames, no_mutable_fallbacks, immutable_recipes,
         distribution["total_credited_frames"] == int(plan["target_accepted_frames"]),
     ))
     return {
@@ -500,6 +729,9 @@ def verify_plan(root: Path) -> dict[str, Any]:
         "exact_half_percent_types": exact_type_frames,
         "identities_unique": unique,
         "no_replacement_fields": no_mutable_fallbacks,
+        "immutable_recipe_content": immutable_recipes,
+        "recipe_validation_errors": recipe_errors,
+        "assignment_validation_errors": assignment_errors,
         "minimum_feasible_frame_budget": plan["minimum_feasible_frame_budget"],
         "planned_distribution": distribution,
     }
@@ -519,12 +751,37 @@ def build_inventory(root: Path) -> dict[str, Any]:
     produced = 0
     resolved: set[str] = set()
     technical_failures = 0
+    assignments = {
+        value["assignment_id"]: value
+        for path in sorted((root / "assignments").glob("*.json"))
+        if (value := read_json(path))
+    }
     for path in result_files(root):
         result = read_json(path)
         if result.get("technical_result") != "validated":
             technical_failures += 1
             continue
         assignment_id = str(result["assignment_id"])
+        assignment = assignments.get(assignment_id)
+        expected_bindings = [] if assignment is None else [
+            {
+                "recipe_id": recipe["recipe_id"],
+                "replay_identity": recipe.get("replay_identity"),
+                "mission_type": recipe.get("mission_type"),
+                "mission_solution": recipe.get("mission_solution"),
+            }
+            for recipe in assignment["recipes"]
+        ]
+        if (
+            assignment is None
+            or result.get("plan_id") != plan["plan_id"]
+            or result.get("assignment_digest") != assignment.get("assignment_digest")
+            or result.get("recipe_bindings") != expected_bindings
+            or result.get("resolved_recipe_ids")
+                != [recipe["recipe_id"] for recipe in assignment["recipes"]]
+        ):
+            technical_failures += 1
+            continue
         if assignment_id in validated_assignments:
             continue
         validated_assignments.add(assignment_id)
@@ -556,11 +813,20 @@ def build_inventory(root: Path) -> dict[str, Any]:
 
 
 def create_review_plan(args: argparse.Namespace) -> None:
+    if args.workers != 1:
+        raise ValueError("Trajectory/Throw V2 review planning requires exactly one worker")
     """Write review manifests only; this command never launches the game."""
     root = args.collection.resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError(f"review directory is not empty: {root}")
-    entries = review_recipes(args.observation_rate)
+    examples_per_type = int(getattr(args, "examples_per_type", 3))
+    recipes_per_assignment = int(getattr(args, "recipes_per_assignment", 1))
+    if recipes_per_assignment < 1:
+        raise ValueError("recipes-per-assignment must be positive")
+    entries = [
+        entry for entry in review_recipes(args.observation_rate)
+        if int(entry["review_variant"]) < examples_per_type
+    ]
     generator = {
         "stage": "trajectory_throw_v2",
         "episode_seconds": 150,
@@ -570,6 +836,7 @@ def create_review_plan(args: argparse.Namespace) -> None:
         "storage_format": "webp_parquet",
         "webp_effort": 0,
         "seed_start": 900000,
+        "evaluation_percent": 0,
     }
     recipes: list[dict[str, Any]] = []
     assignments: list[dict[str, Any]] = []
@@ -585,26 +852,28 @@ def create_review_plan(args: argparse.Namespace) -> None:
             "expected_credited_frames": expected,
             "planned_credited_frames": expected,
             "mission_solution": entry["solution"],
+            "review_variant": entry["review_variant"],
         }
         recipe = _materialize_recipe(draft, index, 900000, 0)
-        recipe["review_variant"] = entry["review_variant"]
         recipes.append(recipe)
     plan_id = stable_id("v2reviewplan", [item["replay_identity"] for item in recipes])
-    for index, recipe in enumerate(recipes):
-        assignment_id = f"review-assignment-{index:03d}"
-        assignments.append({
+    for assignment_number, start in enumerate(
+        range(0, len(recipes), recipes_per_assignment)
+    ):
+        assignment_id = f"review-assignment-{assignment_number:03d}"
+        assignments.append(seal_assignment({
             "schema_version": 3,
             "plan_id": plan_id,
             "plan_version": f"{PLAN_VERSION}-review-1",
             "contract_version": CONTRACT_VERSION,
             "assignment_id": assignment_id,
-            "assignment_number": index,
-            "dispatch_wave": index // args.workers,
-            "logical_worker_id": index % args.workers,
+            "assignment_number": assignment_number,
+            "dispatch_wave": assignment_number,
+            "logical_worker_id": 0,
             "split": "review",
             "generator": generator,
-            "recipes": [recipe],
-        })
+            "recipes": recipes[start:start + recipes_per_assignment],
+        }))
     manifest = {
         "schema_version": 1,
         "purpose": "v2_human_review",
@@ -612,16 +881,18 @@ def create_review_plan(args: argparse.Namespace) -> None:
         "catalog_sha256": catalog_fingerprint(),
         "width": 384,
         "height": 384,
-        "examples_per_type": 3,
-        "mission_type_count": 60,
-        "video_count": 180,
+        "examples_per_type": examples_per_type,
+        "mission_type_count": 62,
+        "video_count": len(recipes),
         "plan_id": plan_id,
         "entries": [
             {
                 **entry,
                 "recipe_id": recipes[index]["recipe_id"],
+                "replay_identity": recipes[index]["replay_identity"],
                 "episode_id": f"p-e{index:09d}",
-                "assignment_id": assignments[index]["assignment_id"],
+                "assignment_id": assignments[index // recipes_per_assignment]["assignment_id"],
+                "assignment_digest": assignments[index // recipes_per_assignment]["assignment_digest"],
                 "review_id": stable_id("v2review", {
                     "type": entry["mission_type"],
                     "variant": entry["review_variant"],
@@ -639,9 +910,9 @@ def create_review_plan(args: argparse.Namespace) -> None:
         "contract_version": CONTRACT_VERSION,
         "generator_source_sha256": generator_source_fingerprint(),
         "target_accepted_frames": sum(item["planned_credited_frames"] for item in recipes),
-        "active_recipe_count": 180,
-        "assignment_count": 180,
-        "worker_count": args.workers,
+        "active_recipe_count": len(recipes),
+        "assignment_count": len(assignments),
+        "worker_count": 1,
         "human_review_only": True,
         "generator": generator,
     })
@@ -649,7 +920,7 @@ def create_review_plan(args: argparse.Namespace) -> None:
     for assignment in assignments:
         write_new_json(root / "assignments" / f"{assignment['assignment_id']}.json", assignment)
     write_new_json(root / "v2-review-plan.json", manifest)
-    print(canonical_json({"review_recipes": 180, "collection": str(root)}))
+    print(canonical_json({"review_recipes": len(recipes), "collection": str(root)}))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -658,7 +929,7 @@ def parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan")
     plan.add_argument("collection", type=Path)
     plan.add_argument("--frame-budget", type=int, required=True)
-    plan.add_argument("--workers", type=int, default=1)
+    plan.add_argument("--workers", type=int, choices=(1,), default=1)
     plan.add_argument("--recipes-per-assignment", type=int, default=8)
     plan.add_argument("--episode-seconds", type=int, default=150)
     plan.add_argument("--observation-rate", type=int, default=20)
@@ -685,7 +956,9 @@ def parser() -> argparse.ArgumentParser:
     review = commands.add_parser("review-plan")
     review.add_argument("collection", type=Path)
     review.add_argument("--observation-rate", type=int, default=20)
-    review.add_argument("--workers", type=int, default=1)
+    review.add_argument("--workers", type=int, choices=(1,), default=1)
+    review.add_argument("--examples-per-type", type=int, choices=(1, 2, 3), default=3)
+    review.add_argument("--recipes-per-assignment", type=int, default=1)
     review.set_defaults(func=create_review_plan)
     return result
 

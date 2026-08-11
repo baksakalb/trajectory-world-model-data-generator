@@ -689,6 +689,206 @@ def validate_final_agent_mission(
                 )
 
 
+def _vector3(value: Any, label: str, episode_id: str) -> tuple[float, float, float]:
+    if not isinstance(value, dict):
+        raise DatasetValidationError(f"{episode_id}: {label} is not a physical vector.")
+    try:
+        result = tuple(float(value[axis]) for axis in ("x", "y", "z"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise DatasetValidationError(
+            f"{episode_id}: {label} is not a physical vector."
+        ) from error
+    if not all(math.isfinite(component) for component in result):
+        raise DatasetValidationError(f"{episode_id}: {label} is non-finite.")
+    return result  # type: ignore[return-value]
+
+
+def _distance(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)))
+
+
+def _validate_canonical_launch(
+    episode_id: str,
+    parameters: dict[str, Any],
+    throw: dict[str, Any],
+) -> None:
+    position = _vector3(throw.get("launch_position"), "launch position", episode_id)
+    velocity = _vector3(throw.get("launch_velocity"), "launch velocity", episode_id)
+    speed = math.sqrt(sum(component * component for component in velocity))
+    if not math.isclose(speed, 1400.0, abs_tol=0.5):
+        raise DatasetValidationError(
+            f"{episode_id}: mission launch speed is not the canonical 1400 cm/s."
+        )
+    yaw = math.radians(float(throw.get("camera_yaw")))
+    pitch = math.radians(float(throw.get("camera_pitch")))
+    forward = (
+        math.cos(pitch) * math.cos(yaw),
+        math.cos(pitch) * math.sin(yaw),
+        math.sin(pitch),
+    )
+    right = (-math.sin(yaw), math.cos(yaw), 0.0)
+    up = (
+        -math.sin(pitch) * math.cos(yaw),
+        -math.sin(pitch) * math.sin(yaw),
+        math.cos(pitch),
+    )
+    expected_velocity = tuple(component * 1400.0 for component in forward)
+    if _distance(velocity, expected_velocity) > 0.75:
+        raise DatasetValidationError(
+            f"{episode_id}: launch velocity disagrees with the recorded throw camera."
+        )
+    spawn = _vector3(parameters.get("player_spawn"), "mission player spawn", episode_id)
+    camera = (spawn[0], spawn[1], spawn[2] + 64.0)
+    expected_position = tuple(
+        camera[index] + forward[index] * 30.0 + right[index] * 10.0 - up[index] * 10.0
+        for index in range(3)
+    )
+    if _distance(position, expected_position) > 1.0:
+        raise DatasetValidationError(
+            f"{episode_id}: launch position disagrees with the immutable spawn/camera path."
+        )
+
+
+def _validate_named_mission_evidence(
+    episode_id: str,
+    episode: dict[str, Any],
+    throw: dict[str, Any],
+) -> None:
+    parameters = episode.get("mission_parameters") or {}
+    for field, episode_field in (
+        ("mission_type", "v2_mission_type"),
+        ("family", "v2_mission_family"),
+        ("event_kind", "v2_event_kind"),
+        ("target_actor", "v2_target_actor"),
+        ("target_region", "v2_target_region"),
+        ("canonical_physics_id", "v2_canonical_physics_id"),
+    ):
+        if parameters.get(field) != episode.get(episode_field):
+            raise DatasetValidationError(
+                f"{episode_id}: mission evidence {field} disagrees with episode identity."
+            )
+    if not bool(parameters.get("event_observed")):
+        raise DatasetValidationError(f"{episode_id}: named mission event was not observed.")
+    event_position = _vector3(parameters.get("event_position"), "event position", episode_id)
+    event_velocity = _vector3(parameters.get("event_velocity"), "event velocity", episode_id)
+    _vector3(parameters.get("event_normal"), "event normal", episode_id)
+    event_kind = str(parameters["event_kind"])
+    if event_kind == "trajectory_reload_reopen":
+        _validate_canonical_launch(episode_id, parameters, throw)
+        return
+    if math.sqrt(sum(component * component for component in event_velocity)) <= 1.0:
+        raise DatasetValidationError(f"{episode_id}: mission event has no physical velocity evidence.")
+    _validate_canonical_launch(episode_id, parameters, throw)
+
+    target_actor = str(parameters["target_actor"])
+    contacts = list(throw.get("realized_contact_order") or [])
+    if event_kind == "hoop_passage":
+        radius = math.hypot(event_position[1] + 700.0, event_position[2] - 145.0)
+        if (
+            abs(event_position[0] - 700.0) > 1.0
+            or radius > 58.0
+            or "CurriculumObject_Hoop" in contacts
+        ):
+            raise DatasetValidationError(f"{episode_id}: clean hoop-passage evidence is invalid.")
+        direction = parameters.get("direction")
+        if (direction == "negative_x_to_positive_x" and event_velocity[0] <= 0) or (
+            direction == "positive_x_to_negative_x" and event_velocity[0] >= 0
+        ):
+            raise DatasetValidationError(f"{episode_id}: hoop-passage direction is wrong.")
+    elif event_kind == "ramp_crossover":
+        direction = parameters.get("direction")
+        if (direction == "left_to_right" and event_position[1] < 150.0) or (
+            direction == "right_to_left" and event_position[1] > -150.0
+        ):
+            raise DatasetValidationError(f"{episode_id}: ramp crossover lacks opposite-side landing.")
+    elif event_kind == "two_wall_contact":
+        expected = list(parameters.get("expected_contact_order") or [])
+        if len(expected) != 2 or contacts[:2] != expected:
+            raise DatasetValidationError(f"{episode_id}: two-wall contact order evidence is wrong.")
+    elif event_kind == "arena_exit":
+        boundary = parameters.get("boundary")
+        coordinate = {
+            "north": event_position[0], "south": -event_position[0],
+            "east": event_position[1], "west": -event_position[1],
+        }.get(boundary, -math.inf)
+        if coordinate < 1650.0 or throw.get("arena_exit_direction") != boundary:
+            raise DatasetValidationError(f"{episode_id}: named arena-exit evidence is wrong.")
+    else:
+        target = _vector3(parameters.get("target_point"), "mission target point", episode_id)
+        maximum = float(parameters.get("region_radius_cm")) + 8.0
+        first_position = _vector3(
+            throw.get("first_contact_position"), "first contact position", episode_id
+        )
+        contact_normal = _vector3(
+            throw.get("first_contact_normal"), "first contact normal", episode_id
+        )
+        contact_velocity = _vector3(
+            throw.get("first_contact_velocity"), "first contact velocity", episode_id
+        )
+        if (
+            throw.get("realized_target") != target_actor
+            or not contacts
+            or contacts[0] != target_actor
+            or _distance(first_position, target) > maximum + 0.1
+            or _distance(event_position, first_position) > 0.5
+        ):
+            raise DatasetValidationError(f"{episode_id}: named contact-region evidence is wrong.")
+        region = str(parameters.get("target_region"))
+        expected_normals = {
+            "north_face": (1.0, 0.0, 0.0),
+            "south_face": (-1.0, 0.0, 0.0),
+            "east_face": (0.0, 1.0, 0.0),
+            "west_face": (0.0, -1.0, 0.0),
+            "top_inset": (0.0, 0.0, 1.0),
+            "north_slope": (0.87, 0.0, 0.49),
+            "south_slope": (-0.87, 0.0, 0.49),
+            "east_slope": (0.0, 0.87, 0.49),
+            "west_slope": (0.0, -0.87, 0.49),
+        }
+        if region in expected_normals:
+            normal_length = math.sqrt(sum(value * value for value in contact_normal))
+            dot = sum(
+                contact_normal[index] / max(normal_length, 1e-9) * expected_normals[region][index]
+                for index in range(3)
+            )
+            if dot < 0.70:
+                raise DatasetValidationError(f"{episode_id}: contact face normal is wrong.")
+        if region.endswith("_quadrant"):
+            offset = (first_position[0] + 700.0, first_position[1] + 700.0)
+            wrong = (
+                (region == "north_quadrant" and offset[0] <= 0)
+                or (region == "south_quadrant" and offset[0] >= 0)
+                or (region == "east_quadrant" and offset[1] <= 0)
+                or (region == "west_quadrant" and offset[1] >= 0)
+            )
+            if wrong:
+                raise DatasetValidationError(f"{episode_id}: sphere quadrant evidence is wrong.")
+        if region.endswith(("_direct", "_oblique")):
+            boundary = parameters.get("boundary")
+            normal2 = {
+                "north": (-1.0, 0.0), "south": (1.0, 0.0),
+                "east": (0.0, -1.0), "west": (0.0, 1.0),
+            }.get(boundary)
+            horizontal_speed = math.hypot(contact_velocity[0], contact_velocity[1])
+            if normal2 is None or horizontal_speed <= 1e-9:
+                raise DatasetValidationError(f"{episode_id}: wall incidence evidence is absent.")
+            cosine = max(-1.0, min(1.0, -(
+                contact_velocity[0] / horizontal_speed * normal2[0]
+                + contact_velocity[1] / horizontal_speed * normal2[1]
+            )))
+            incidence = math.degrees(math.acos(cosine))
+            if (region.endswith("_direct") and incidence > 14.0) or (
+                region.endswith("_oblique") and incidence < 15.0
+            ):
+                raise DatasetValidationError(f"{episode_id}: wall incidence class is wrong.")
+        if event_kind == "rim_contact":
+            direction = parameters.get("direction")
+            if (direction == "negative_x_to_positive_x" and contact_velocity[0] <= 0) or (
+                direction == "positive_x_to_negative_x" and contact_velocity[0] >= 0
+            ):
+                raise DatasetValidationError(f"{episode_id}: rim-contact direction is wrong.")
+
+
 def validate_v2_runtime_contract(
     dataset: dict[str, Any],
     episode_id: str,
@@ -706,6 +906,7 @@ def validate_v2_runtime_contract(
 
     previous_mask = 0
     accepted_grenade_ids: set[int] = set()
+    preview_requires_fresh_ready_q = False
     for index, transition in enumerate(transitions):
         source = frames[index]
         target = frames[index + 1]
@@ -719,7 +920,15 @@ def validate_v2_runtime_contract(
         e_request_edge = e and not previous_e
         q_previously_visible = bool(source.get("q_visibility"))
         cooldown_before = int(transition.get("cooldown_before_steps") or 0)
+        cooldown_after = int(transition.get("cooldown_after_steps") or 0)
         eligible = e_request_edge and q and q_previously_visible and cooldown_before <= 0
+        if q_rising and cooldown_before <= 0:
+            preview_requires_fresh_ready_q = False
+        if eligible:
+            preview_requires_fresh_ready_q = True
+        expected_q_visible = (
+            q and cooldown_after <= 0 and not preview_requires_fresh_ready_q
+        )
 
         if bool(transition.get("q_rising_edge")) != q_rising:
             raise DatasetValidationError(f"{episode_id}: incorrect Q rising edge at {index}.")
@@ -729,11 +938,11 @@ def validate_v2_runtime_contract(
             raise DatasetValidationError(f"{episode_id}: incorrect E request edge at {index}.")
         if bool(transition.get("e_accepted")) != eligible:
             raise DatasetValidationError(f"{episode_id}: incorrect E acceptance at {index}.")
-        if bool(target.get("q_visibility")) != q:
+        if bool(target.get("q_visibility")) != expected_q_visible:
             raise DatasetValidationError(f"{episode_id}: Q visibility disagrees at {index}.")
-        if bool(target.get("aim_lock_active")) != q:
+        if bool(target.get("aim_lock_active")) != expected_q_visible:
             raise DatasetValidationError(f"{episode_id}: aim-lock state disagrees at {index}.")
-        if bool(target.get("trajectory_visible")) != q:
+        if bool(target.get("trajectory_visible")) != expected_q_visible:
             raise DatasetValidationError(f"{episode_id}: trajectory visibility disagrees at {index}.")
         if "trajectory_points" in target:
             raise DatasetValidationError(
@@ -764,9 +973,11 @@ def validate_v2_runtime_contract(
     source = episode.get("v2_source")
     if source not in {"semi_markov", "mission"}:
         raise DatasetValidationError(f"{episode_id}: invalid V2 source {source!r}.")
-    expected_contract = "shared-persistent-semi-markov-1+certified-sixty-missions-1"
+    expected_contract = "shared-persistent-semi-markov-1+certified-sixty-two-missions-1"
     if episode.get("v2_contract_version") != expected_contract:
         raise DatasetValidationError(f"{episode_id}: wrong combined V2 contract version.")
+    if int(dataset.get("observation_rate_hz") or 0) != 20:
+        raise DatasetValidationError(f"{episode_id}: V2 certified catalog requires 20 Hz.")
     if not bool(episode.get("accepted_for_balancing")):
         raise DatasetValidationError(f"{episode_id}: technically valid V2 episode was not credited.")
     if source == "semi_markov":
@@ -792,6 +1003,9 @@ def validate_v2_runtime_contract(
             raise DatasetValidationError(f"{episode_id}: mission opening lacked arena context.")
         if episode.get("v2_mission_event_frame") is None:
             raise DatasetValidationError(f"{episode_id}: named interaction evidence is absent.")
+        event_frame = int(episode["v2_mission_event_frame"])
+        if not 0 <= event_frame < len(frames):
+            raise DatasetValidationError(f"{episode_id}: named interaction frame is invalid.")
         mission_frames = [frame for frame in frames if frame.get("v2_mission_type") == mission_type]
         if len(mission_frames) != len(frames):
             raise DatasetValidationError(f"{episode_id}: frame mission identity is not immutable.")
@@ -807,7 +1021,7 @@ def validate_v2_runtime_contract(
         raise DatasetValidationError(f"{episode_id}: accepted throw count disagrees with transitions.")
 
     policy = str(dataset.get("collection_policy", ""))
-    if source == "semi_markov" and policy == "training_v2_combined_sixty_missions_v1":
+    if source == "semi_markov" and policy == "training_v2_combined_sixty_two_missions_v1":
         observation_rate = int(dataset.get("observation_rate_hz") or 0)
         if observation_rate <= 0:
             raise DatasetValidationError(f"{episode_id}: invalid observation rate.")
@@ -828,21 +1042,26 @@ def validate_v2_runtime_contract(
             f"{episode_id}: preview and realized grenade physics diverged."
         )
     if source == "mission":
-        if len(throw_rows) != 1:
+        manual_toggle = episode.get("v2_event_kind") == "trajectory_manual_toggle"
+        expected_throw_count = 0 if manual_toggle else 1
+        if len(throw_rows) != expected_throw_count:
             raise DatasetValidationError(
-                f"{episode_id}: prescribed V2 mission must contain one canonical throw."
+                f"{episode_id}: prescribed V2 mission has the wrong canonical throw count."
             )
+        if manual_toggle:
+            return
         throw = throw_rows[0]
         if throw.get("physics_config_identity") != "grenade-sim-config-r1":
             raise DatasetValidationError(
                 f"{episode_id}: mission throw used a non-canonical physics config."
             )
-        if not isinstance(throw.get("launch_position"), dict) or not isinstance(
-            throw.get("launch_velocity"), dict
+        if episode.get("v2_canonical_physics_id") != (
+            "grenade-sim-config-r1+launch-1400cmps+cooldown-2s"
         ):
             raise DatasetValidationError(
-                f"{episode_id}: mission throw lacks physical launch-state evidence."
+                f"{episode_id}: mission episode lacks canonical configuration evidence."
             )
+        _validate_named_mission_evidence(episode_id, episode, throw)
 
 def validate_run_distributions(
     dataset: dict[str, Any],
@@ -1162,6 +1381,15 @@ def validate_dataset(
         raise DatasetValidationError(
             f"Dataset is marked incomplete: {dataset.get('error', 'unknown error')}"
         )
+    requested_episodes = int(dataset.get("requested_episode_count", 0))
+    completed_episodes = int(dataset.get("completed_episode_count", 0))
+    if requested_episodes <= 0 or completed_episodes != requested_episodes:
+        raise DatasetValidationError(
+            "Complete dataset must contain every requested episode: "
+            f"requested {requested_episodes}, completed {completed_episodes}."
+        )
+    if int(dataset.get("observation_count", 0)) <= 0:
+        raise DatasetValidationError("Complete dataset contains no observations.")
     shards = dataset.get("shards")
     if not isinstance(shards, list) or len(shards) != 1:
         raise DatasetValidationError(
@@ -1205,7 +1433,7 @@ def validate_dataset(
                 f"Transition count {len(transitions)} != manifest "
                 f"{dataset['transition_count']}"
             )
-        if len(episodes) != int(dataset["completed_episode_count"]):
+        if len(episodes) != completed_episodes:
             raise DatasetValidationError(
                 f"Episode count {len(episodes)} != manifest "
                 f"{dataset['completed_episode_count']}"

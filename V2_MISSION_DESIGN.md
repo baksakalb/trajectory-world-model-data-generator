@@ -3,9 +3,9 @@
 ## Status
 
 The catalog, construction-time certification, runtime playback, immutable
-planner, schemas, validators, and 180-recipe review tooling described here are
-implemented. Human visual review has not been performed, so production remains
-unauthorized.
+planner, schemas, full-plan verifier, validators, and 186-recipe review tooling
+described here are implemented. The current full-plan report certifies 179
+recipes and rejects seven, so recording and production remain unauthorized.
 
 ## Purpose
 
@@ -39,10 +39,10 @@ corners, and arena exits.
    Subsequent bounce count, roll, rest, and final position remain natural.
 8. No privileged trajectory points or solver geometry become learning targets.
 
-## Catalog: 60 meaningful types
+## Catalog: 62 meaningful types
 
-Each type receives 0.5% of total dataset frames. Variations within a type are
-continuous samples, not additional semantic labels.
+Each type receives `3/620` (approximately 0.4839%) of total dataset frames.
+Variations within a type are continuous samples, not additional semantic labels.
 
 ### 1. Broad object-surface impacts — 13 types, 6.5%
 
@@ -173,6 +173,14 @@ Directness, obliqueness, and exit height vary. The chosen boundary and useful
 arena context remain visible. Natural out-of-bounds throws also remain legal in
 semi-Markov play.
 
+### 7. Trajectory-control demonstrations — 2 types, approximately 0.9677%
+
+1. manual trajectory-preview toggle cycle;
+2. throw, cooldown-hidden preview, reload, and unchanged-angle preview reopen.
+
+These demonstrate the global Q/E state machine. They do not alter grenade
+physics or create additional trajectory behavior modes.
+
 ## Constructing a mission solution
 
 ### Controllable variables
@@ -207,9 +215,12 @@ it does not select another production seed.
 
 ### Certified variation region
 
-Every type owns a bounded, known-working solution region. Repetitions use a
-deterministic low-discrepancy or farthest-point sequence across its legitimate
-dimensions:
+Every type owns a bounded, known-working solution region. Repetitions first
+progress through deterministic discrete coverage cells and then refine those
+cells with seeded continuous offsets. The cell identity is stored independently
+from the exact recipe identity, so a larger frame budget extends the same
+coverage prefix instead of starting a new random schedule. Legitimate dimensions
+include:
 
 - launch distance;
 - position along a surface, edge, rim, or boundary;
@@ -221,8 +232,10 @@ dimensions:
 
 The first repetition uses a stable central solution. Later repetitions spread
 progressively across the certified region instead of clustering randomly.
-Seeds determine deterministic variations but never determine whether a mission
-works.
+Two-wall missions explicitly cover both valid first/second contact orders. Wall
+targets remain on their physical wall plane; sphere and hoop targets remain on
+their physical surface or rim centerline. Seeds determine deterministic safe
+mutations but never determine whether a mission works.
 
 ## Camera and action railguards
 
@@ -265,19 +278,19 @@ free to produce rare short or contradictory controls.
 
 ## Immutable planning and frame allocation
 
-The planner first emits one mandatory recipe for every one of the 60 types. It
+The planner first emits one mandatory recipe for every one of the 62 types. It
 interleaves families and spatial regions so early partial runs are not localized
 to one arena area.
 
 After the mandatory pass, it selects the type with the largest credited-frame
-deficit relative to its 0.5% target. Selection is frame-based, not episode-count
+deficit relative to its `3/620` target. Selection is frame-based, not episode-count
 based, so longer flights do not receive accidental excess weight.
 
 At a 700,000-frame budget:
 
 - semi-Markov receives 490,000 frames;
 - all missions receive 210,000 frames;
-- each mission type receives approximately 3,500 frames.
+- each mission type receives approximately 3,387 frames.
 
 ### Minimum feasible budget
 
@@ -294,16 +307,44 @@ minimum_total_budget = max(
 ```
 
 The planner refuses a production budget below this floor. Every feasible plan
-contains all 60 mission types at least once. No runtime recipe is invented to
+contains all 62 mission types at least once. No runtime recipe is invented to
 repair a plan.
 
-With the default 150-second semi-Markov duration and 20 Hz observation rate,
-the calculated floor is 32,200 frames. The planner derives and recomputes this
-value from mandatory durations and shares rather than storing it as a legacy
-constant.
+With the default 150-second semi-Markov duration and the certified 20 Hz
+observation rate, the calculated floor is 33,280 frames. The planner derives and
+recomputes this value from mandatory durations and shares rather than storing it
+as a legacy constant. Observation rates other than 20 Hz are rejected until they
+have their own physics and camera certification.
 
 Train/evaluation assignment uses deterministic, disjoint recipe identities and
 seeds. When the budget permits, every type is represented in both splits.
+
+## Full-plan construction verification
+
+Static planning proves allocation, schema, identity, and catalog consistency;
+it does not prove that every generated launch remains physically feasible in
+the current arena build. Before recording, `Scripts/certify_v2_plan.py` must
+therefore certify the entire immutable plan in one Unreal session.
+
+The verifier loads the arena once and runs the canonical construction simulator
+for every mission recipe without capturing images, encoding WebP, writing
+Parquet, or crediting frames. Semi-Markov recipes are reported as construction
+not applicable. The bound report records every recipe result and fingerprints:
+
+- the collection plan and complete recipes ledger;
+- the sealed assignment set;
+- the generator source;
+- the exact executable and packaged runtime;
+- the canonical physics identity and Unreal version.
+
+Any rejected recipe makes the command exit unsuccessfully and blocks recording.
+The catalog must be fixed globally and a new immutable plan certified. The
+worker repeats construction certification immediately before each mission as a
+second fail-closed check against runtime mismatch.
+
+The verifier is not a candidate search. It never changes a seed, selects a
+replacement, or approves a subset. Its only valid production result is a
+complete report with every recipe certified.
 
 ## Crediting, failures, and validation
 
@@ -318,10 +359,14 @@ replacement seed.
 Machine checks cover:
 
 - immutable recipe identity and complete frame/transition alignment;
+- equality of requested and completed episode counts (empty or partial
+  "complete" shards are invalid);
+- sealed plan/assignment/replay identity through worker output and review media;
 - action and Q/E semantics;
 - canonical physics configuration identity;
 - preview-versus-realized parity;
-- named mission interaction evidence;
+- named mission interaction evidence, including physical position, normal,
+  incoming velocity, direction, clearance, and ordered contacts where relevant;
 - the two camera construction railguards;
 - image and Parquet integrity.
 
@@ -330,7 +375,7 @@ pacing, framing, variation, and interactions are understandable.
 
 ## Human review set
 
-Before production, generate exactly three 384x384 examples for every type: 180
+Before production, generate exactly three 384x384 examples for every type: 186
 videos total.
 
 The three examples sample separated parts of the certified region:
@@ -354,20 +399,23 @@ Implemented:
 
 1. catalog-count, share, deterministic-identity, and no-replacement tests;
 2. focused geometry, timing, camera, variation, and canonical-identity tests for
-   all 60 types;
+   all 62 types;
 3. the construction-time low-branch ballistic and camera solution builder;
 4. frozen deterministic solution regions and immutable mission recipes;
 5. the exact 70/30 frame planner, mandatory pass, deficit scheduling, and
    calculated feasibility floor;
 6. runtime playback using ordinary player inputs and canonical throws;
 7. technical and invariant validation without statistical acceptance gates;
-8. tooling that prepares, validates, and renders the exact 180-video review set.
+8. tooling that prepares, validates, and renders the exact 186-video review set;
+9. one-session full-plan construction certification with immutable build and
+   plan bindings.
 
 Not performed:
 
-1. generating or visually auditing the 180 review videos;
-2. applying any global catalog/region fixes that a human audit may require;
-3. authorizing production.
+1. fixing the seven recipes rejected by the current full-plan report;
+2. generating or visually auditing the 186 review videos;
+3. applying any additional global catalog/region fixes that a human audit may require;
+4. authorizing production.
 
 Movement V1 missions and the shared V1/V2 semi-Markov policy must remain
 unchanged while this work is implemented.

@@ -57,23 +57,29 @@ def create(
 
 
 class ControllerContractTests(unittest.TestCase):
-    def test_complete_catalog_and_worker_independence(self) -> None:
+    def test_complete_catalog_and_single_worker_invariant(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             one = base / "one"
-            four = base / "four"
             create(one, workers=1)
-            create(four, workers=4)
             recipes_one = controller.read_jsonl(one / "plan" / "recipes.jsonl")
-            recipes_four = controller.read_jsonl(four / "plan" / "recipes.jsonl")
             active_one = [recipe for recipe in recipes_one if recipe["active"]]
-            active_four = [recipe for recipe in recipes_four if recipe["active"]]
-            self.assertEqual(active_one, active_four)
             self.assertGreater(len(active_one), sum(controller.MISSION_COUNTS.values()))
+            plan = controller.read_json(one / "plan" / "collection-plan.json")
+            self.assertEqual(plan["worker_count"], 1)
+            self.assertTrue(all(
+                controller.read_json(path)["logical_worker_id"] == 0
+                for path in (one / "assignments").glob("*.json")
+            ))
             self.assertEqual(
                 len({(recipe["mission"], recipe["scenario_index"]) for recipe in active_one[: sum(controller.MISSION_COUNTS.values())]}),
                 sum(controller.MISSION_COUNTS.values()),
             )
+
+    def test_multiple_workers_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "exactly one worker"):
+                create(Path(temporary) / "four", workers=4)
 
     def test_larger_budget_extends_same_canonical_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -435,6 +435,8 @@ def build_recipe(calibration: dict[str, Any], plan_id: str, recipe_index: int, m
 
 
 def create_plan(args: argparse.Namespace) -> None:
+    if args.workers != 1:
+        raise ValueError("Movement V1 planning requires exactly one worker")
     root = args.collection.resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError(f"collection directory is not empty: {root}")
@@ -520,7 +522,7 @@ def create_plan(args: argparse.Namespace) -> None:
         block_limit = len(active) if cursor >= base_count else base_count
         block = active[cursor : min(block_limit, cursor + block_size)]
         assignment_number = len(assignments)
-        logical_worker_id = assignment_number % args.workers
+        logical_worker_id = 0
         assignment_id = f"assignment-{assignment_number:06d}"
         assignments.append({
             "schema_version": 1,
@@ -528,7 +530,7 @@ def create_plan(args: argparse.Namespace) -> None:
             "plan_version": PLAN_VERSION,
             "assignment_id": assignment_id,
             "assignment_number": assignment_number,
-            "dispatch_wave": assignment_number // args.workers,
+            "dispatch_wave": assignment_number,
             "logical_worker_id": logical_worker_id,
             "split": args.split,
             "schedule_phase": block[0]["schedule_phase"],
@@ -577,7 +579,7 @@ def create_plan(args: argparse.Namespace) -> None:
             "count only semantically credited observations; require complete discrete coverage; stop before new work once target is reached"
         ),
         "candidate_exhaustion_policy": "insufficient_capacity; never invent runtime recipes",
-        "worker_count": args.workers,
+        "worker_count": 1,
         "recipes_per_assignment": args.recipes_per_assignment,
         "tail_single_recipes": args.tail_single_recipes,
         "assignment_count": len(assignments),
@@ -868,7 +870,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow a below-floor diagnostic plan that stops at its frame budget without claiming complete coverage",
     )
-    plan.add_argument("--workers", type=int, default=1)
+    plan.add_argument("--workers", type=int, choices=(1,), default=1)
     plan.add_argument("--recipes-per-assignment", type=int, default=32)
     plan.add_argument("--tail-single-recipes", type=int, default=64)
     plan.add_argument("--episode-seconds", type=int, default=150)

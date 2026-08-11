@@ -8,7 +8,7 @@ import re
 import unittest
 from pathlib import Path
 
-from v2_dataset_controller import CONTRACT_VERSION
+from v2_dataset_controller import CONTRACT_VERSION, FORBIDDEN_V2_KEYS
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +25,7 @@ V1_FUNCTION_HASHES = {
     "ConfigureHoopMission": "71b0656f3cc67a90199790413a9c58606dd21e8a48d0a097ae971e795aaac6c1",
     "GetCoverageMissionSpawn": "04809fcd1adc52bb938c3f7842ef2f21c45399f9efe9db9a4c0433d09e552e92",
 }
-V1_CONTROLLER_HASH = "50259ffa2bbdf0dca84307ffc8ffda11f86f1d9bf1a354df14736203095dbf07"
+V1_CONTROLLER_HASH = "45b7f65502b4d32e8f084f31b222921ebc70e9c38ebf349360245bb897a43a23"
 
 
 def function_text(source: str, name: str) -> str:
@@ -66,7 +66,7 @@ class SharedCanonicalRegressionTests(unittest.TestCase):
         self.assertNotIn("CurriculumStage", selector)
         self.assertIn("GrenadeActionRandom", selector)
 
-    def test_v1_guided_planner_and_mission_functions_are_byte_preserved(self) -> None:
+    def test_v1_single_worker_planner_and_mission_functions_are_frozen(self) -> None:
         normalized_controller = V1_CONTROLLER.read_text(encoding="utf-8").encode()
         self.assertEqual(hashlib.sha256(normalized_controller).hexdigest(), V1_CONTROLLER_HASH)
         for name, expected in V1_FUNCTION_HASHES.items():
@@ -96,18 +96,39 @@ class SharedCanonicalRegressionTests(unittest.TestCase):
             r"StopSpeedCmPerSec|RestSpeedCmPerSec|MaxBounces)\s*=",
         )
 
+    def test_named_missions_capture_from_the_certified_eye_transform(self) -> None:
+        camera = function_text(self.source, "GetObservationCameraTransform")
+        self.assertIn("bV2MissionRecipe", camera)
+        self.assertIn("CurrentV2MissionAimPitch", camera)
+        self.assertIn("CurrentV2MissionAimYaw", camera)
+        capture = function_text(self.source, "CaptureObservation")
+        self.assertIn("GetObservationCameraTransform()", capture)
+        preview = function_text(self.source, "DrawTrajectoryOverlay")
+        self.assertIn("GetObservationCameraTransform()", preview)
+
+    def test_v2_preview_requires_a_fresh_ready_q_press_after_reload(self) -> None:
+        capture = function_text(self.source, "CaptureObservation")
+        preview = function_text(self.source, "DrawTrajectoryOverlay")
+        self.assertIn("CooldownRemainingSteps > 0", capture)
+        self.assertIn("CooldownRemainingSteps > 0", preview)
+        self.assertIn("bV2PreviewRequiresFreshReadyQPress", capture)
+        self.assertIn("bV2PreviewRequiresFreshReadyQPress", preview)
+        apply = function_text(self.source, "ApplyAction")
+        self.assertIn("Decision.bQRising && CooldownRemainingSteps <= 0", apply)
+
     def test_combined_contract_and_no_replacement_system(self) -> None:
         self.assertEqual(
             CONTRACT_VERSION,
-            "shared-persistent-semi-markov-1+certified-sixty-missions-1",
+            "shared-persistent-semi-markov-1+certified-sixty-two-missions-1",
         )
         self.assertIn("SelectV2MissionAction", self.source)
         self.assertIn("CertifyV2MissionConstruction", self.source)
-        for token in (
-            "activate_reserves", "replacement_seed", "candidate_seed",
-            "reserve_for", "semantic_success_search",
-        ):
-            self.assertNotIn(token, self.controller)
+        self.assertNotIn("activate_reserves", self.controller)
+        self.assertNotIn("semantic_success_search", self.controller)
+        self.assertTrue({
+            "candidate_seed", "reserve_for", "replacement_for",
+        }.issubset(FORBIDDEN_V2_KEYS))
+        self.assertIn("validate_assignment_against_plan", self.controller)
 
     def test_semi_markov_credit_has_no_behavioral_gate(self) -> None:
         worker = (ROOT / "Scripts/dataset_worker.py").read_text(encoding="utf-8")
