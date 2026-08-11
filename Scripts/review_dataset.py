@@ -696,7 +696,7 @@ def validate_v2_runtime_contract(
     transitions: list[dict[str, Any]],
     episode: dict[str, Any] | None = None,
 ) -> None:
-    """Validate V2 semi-Markov action and physical integrity only."""
+    """Validate shared actions plus V2 free-play or certified-mission invariants."""
     if not str(dataset.get("schema_version", "")).startswith("trajectory_throw_v2"):
         return
     if len(frames) != len(transitions) + 1:
@@ -761,23 +761,53 @@ def validate_v2_runtime_contract(
 
     if episode is None:
         return
-    if episode.get("v2_source") != "semi_markov":
-        raise DatasetValidationError(f"{episode_id}: V2 source must be semi_markov.")
-    if episode.get("collection_mission") != "semi_markov":
-        raise DatasetValidationError(f"{episode_id}: V2 collection mission must be semi_markov.")
-    if bool(episode.get("mission_required")) or bool(episode.get("mission_success")):
-        raise DatasetValidationError(f"{episode_id}: V2 must not carry mission semantics.")
-    if episode.get("termination_reason") != "completed":
-        raise DatasetValidationError(f"{episode_id}: V2 free play did not complete normally.")
+    source = episode.get("v2_source")
+    if source not in {"semi_markov", "mission"}:
+        raise DatasetValidationError(f"{episode_id}: invalid V2 source {source!r}.")
+    expected_contract = "shared-persistent-semi-markov-1+certified-sixty-missions-1"
+    if episode.get("v2_contract_version") != expected_contract:
+        raise DatasetValidationError(f"{episode_id}: wrong combined V2 contract version.")
     if not bool(episode.get("accepted_for_balancing")):
-        raise DatasetValidationError(f"{episode_id}: technically valid V2 free play was not credited.")
-    if episode.get("v2_contract_version") != "shared-persistent-semi-markov-1":
-        raise DatasetValidationError(f"{episode_id}: wrong V2 semi-Markov contract version.")
+        raise DatasetValidationError(f"{episode_id}: technically valid V2 episode was not credited.")
+    if source == "semi_markov":
+        if episode.get("collection_mission") != "semi_markov":
+            raise DatasetValidationError(f"{episode_id}: V2 free-play mission changed.")
+        if bool(episode.get("mission_required")) or bool(episode.get("mission_success")):
+            raise DatasetValidationError(f"{episode_id}: free play must not carry mission success.")
+        if episode.get("termination_reason") != "completed":
+            raise DatasetValidationError(f"{episode_id}: V2 free play did not complete normally.")
+    else:
+        mission_type = episode.get("v2_mission_type")
+        if not mission_type or episode.get("collection_mission") != mission_type:
+            raise DatasetValidationError(f"{episode_id}: immutable mission identity disagrees.")
+        if not bool(episode.get("mission_required")) or not bool(episode.get("mission_success")):
+            raise DatasetValidationError(f"{episode_id}: certified mission invariant failed.")
+        if not bool(episode.get("v2_construction_certified")):
+            raise DatasetValidationError(f"{episode_id}: mission was not construction-certified.")
+        if not bool(episode.get("v2_mission_region_visible_all_frames")):
+            raise DatasetValidationError(f"{episode_id}: mission region left the camera view.")
+        if not bool(episode.get("v2_preview_region_visible_all_q_frames")):
+            raise DatasetValidationError(f"{episode_id}: Q preview lost the mission region.")
+        if not bool(episode.get("v2_opening_arena_context_visible")):
+            raise DatasetValidationError(f"{episode_id}: mission opening lacked arena context.")
+        if episode.get("v2_mission_event_frame") is None:
+            raise DatasetValidationError(f"{episode_id}: named interaction evidence is absent.")
+        mission_frames = [frame for frame in frames if frame.get("v2_mission_type") == mission_type]
+        if len(mission_frames) != len(frames):
+            raise DatasetValidationError(f"{episode_id}: frame mission identity is not immutable.")
+        if any(not bool(frame.get("v2_mission_region_visible")) for frame in mission_frames):
+            raise DatasetValidationError(f"{episode_id}: per-frame mission region visibility failed.")
+        if any(
+            bool(frame.get("q_visibility"))
+            and not bool(frame.get("v2_preview_region_visible"))
+            for frame in mission_frames
+        ):
+            raise DatasetValidationError(f"{episode_id}: preview/region co-visibility failed.")
     if int(episode.get("v2_accepted_throw_count") or 0) != len(accepted_grenade_ids):
         raise DatasetValidationError(f"{episode_id}: accepted throw count disagrees with transitions.")
 
     policy = str(dataset.get("collection_policy", ""))
-    if policy == "training_v2_persistent_semi_markov_only_v1":
+    if source == "semi_markov" and policy == "training_v2_combined_sixty_missions_v1":
         observation_rate = int(dataset.get("observation_rate_hz") or 0)
         if observation_rate <= 0:
             raise DatasetValidationError(f"{episode_id}: invalid observation rate.")
@@ -797,6 +827,22 @@ def validate_v2_runtime_contract(
         raise DatasetValidationError(
             f"{episode_id}: preview and realized grenade physics diverged."
         )
+    if source == "mission":
+        if len(throw_rows) != 1:
+            raise DatasetValidationError(
+                f"{episode_id}: prescribed V2 mission must contain one canonical throw."
+            )
+        throw = throw_rows[0]
+        if throw.get("physics_config_identity") != "grenade-sim-config-r1":
+            raise DatasetValidationError(
+                f"{episode_id}: mission throw used a non-canonical physics config."
+            )
+        if not isinstance(throw.get("launch_position"), dict) or not isinstance(
+            throw.get("launch_velocity"), dict
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: mission throw lacks physical launch-state evidence."
+            )
 
 def validate_run_distributions(
     dataset: dict[str, Any],
@@ -1254,9 +1300,11 @@ def validate_dataset(
                     "-preflight-10",
                     "-preflight-11",
                     "-preflight-12",
+                    "-preflight-13",
                     "-production-1",
                     "-production-11",
                     "-production-12",
+                    "-production-13",
                 )
             )
             if (
@@ -1313,7 +1361,11 @@ def validate_dataset(
                 )
 
             if schema_version.endswith(
-                ("-preflight-11", "-production-11", "-preflight-12", "-production-12")
+                (
+                    "-preflight-11", "-production-11",
+                    "-preflight-12", "-production-12",
+                    "-preflight-13", "-production-13",
+                )
             ):
                 validate_v2_runtime_contract(
                     dataset,
@@ -1346,9 +1398,11 @@ def validate_dataset(
                 "-preflight-10",
                 "-preflight-11",
                 "-preflight-12",
+                "-preflight-13",
                 "-production-1",
                 "-production-11",
                 "-production-12",
+                "-production-13",
             )
         ):
             validate_run_distributions(dataset, episodes)

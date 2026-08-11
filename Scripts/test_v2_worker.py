@@ -6,8 +6,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from dataset_worker import bind_execution_build, command_for
+from dataset_worker import bind_execution_build, build_validated_result, command_for
 
 
 class V2WorkerBuildBindingTests(unittest.TestCase):
@@ -53,6 +54,42 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
             runtime.write_bytes(b"runtime-two")
             with self.assertRaisesRegex(ValueError, "immutable execution-build.json"):
                 bind_execution_build(root / "collection", executable, plan)
+
+    def test_technically_valid_semi_markov_is_unconditionally_credited(self) -> None:
+        assignment = {
+            "plan_id": "p", "plan_version": "trajectory-throw-v2-sixty-missions-1",
+            "assignment_id": "a", "recipes": [{
+                "recipe_id": "r", "mission": "semi_markov",
+                "mission_type": None, "source": "semi_markov", "family": "semi_markov",
+                "scenario_index": 0, "planned_credited_frames": 100,
+            }],
+        }
+        row = {
+            "recipe_id": "r", "observation_count": 101,
+            "v2_source": "semi_markov", "mission_success": False,
+        }
+        with patch("dataset_worker.read_episode_rows", return_value=[row]):
+            result = build_validated_result(assignment, "attempt-000", "worker", Path("unused"))
+        self.assertEqual(result["accepted_observation_frames"], 100)
+        self.assertEqual(result["semantic_failure_recipe_ids"], [])
+
+    def test_certified_mission_failure_is_a_regression_not_replacement(self) -> None:
+        assignment = {
+            "plan_id": "p", "plan_version": "trajectory-throw-v2-sixty-missions-1",
+            "assignment_id": "a", "recipes": [{
+                "recipe_id": "r", "mission": "rectangle_north_face",
+                "mission_type": "rectangle_north_face", "source": "mission",
+                "family": "broad_object_surface", "scenario_index": 0,
+                "planned_credited_frames": 100,
+            }],
+        }
+        row = {
+            "recipe_id": "r", "observation_count": 101,
+            "v2_source": "mission", "mission_success": False,
+        }
+        with patch("dataset_worker.read_episode_rows", return_value=[row]):
+            with self.assertRaisesRegex(ValueError, "invariant failed"):
+                build_validated_result(assignment, "attempt-000", "worker", Path("unused"))
 
 
 if __name__ == "__main__":

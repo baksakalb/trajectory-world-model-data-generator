@@ -171,11 +171,24 @@ def build_validated_result(
         produced_frames += observation_count
         mission = recipe["mission"]
         is_v2 = str(assignment.get("plan_version", "")).startswith("trajectory-throw-v2")
-        # V2 contains persistent semi-Markov play only. It has no mission
-        # semantics, semantic rejection, reserve recipes, or replacement path.
-        if is_v2 and mission != "semi_markov":
-            raise ValueError(f"V2 assignment contains forbidden mission {mission!r}")
-        creditable = mission == "semi_markov" or bool(row["mission_success"])
+        source = str(recipe.get("source") or "")
+        if is_v2:
+            if source not in {"semi_markov", "mission"}:
+                raise ValueError(f"V2 recipe {recipe_id} has invalid source {source!r}")
+            if row.get("v2_source") != source:
+                raise ValueError(f"V2 recipe {recipe_id} source disagrees with runtime output")
+            if source == "semi_markov" and mission != "semi_markov":
+                raise ValueError(f"V2 semi-Markov recipe has mission {mission!r}")
+            if source == "mission" and mission != recipe.get("mission_type"):
+                raise ValueError(f"V2 mission recipe {recipe_id} changed mission identity")
+            # A certified mission disagreement is a code/physics regression.
+            # It is never a semantic result eligible for a different seed.
+            if source == "mission" and not bool(row["mission_success"]):
+                raise ValueError(
+                    f"certified V2 mission invariant failed for immutable recipe {recipe_id}"
+                )
+        creditable = source == "semi_markov" if is_v2 else mission == "semi_markov"
+        creditable = creditable or bool(row["mission_success"])
         if creditable:
             successful.append(recipe_id)
             credited_frame_cap = int(recipe.get("planned_credited_frames", observation_count))
@@ -184,6 +197,9 @@ def build_validated_result(
             accepted_frames_by_mission[mission] = accepted_frames_by_mission.get(mission, 0) + credited_frames
             credited_cells.append({
                 "mission": mission,
+                "mission_type": recipe.get("mission_type"),
+                "source": source or ("semi_markov" if mission == "semi_markov" else "mission"),
+                "family": recipe.get("family"),
                 "scenario_index": int(recipe["scenario_index"]),
                 "cell_id": recipe.get("cell_id"),
                 "recipe_id": recipe_id,

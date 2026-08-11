@@ -2,9 +2,10 @@
 
 ## Status
 
-This file is the agreed implementation specification for rebuilding V2
-missions. The mission code does not yet exist. The active V2 generator remains
-semi-Markov-only until this specification is implemented and visually approved.
+The catalog, construction-time certification, runtime playback, immutable
+planner, schemas, validators, and 180-recipe review tooling described here are
+implemented. Human visual review has not been performed, so production remains
+unauthorized.
 
 ## Purpose
 
@@ -296,6 +297,11 @@ The planner refuses a production budget below this floor. Every feasible plan
 contains all 60 mission types at least once. No runtime recipe is invented to
 repair a plan.
 
+With the default 150-second semi-Markov duration and 20 Hz observation rate,
+the calculated floor is 32,200 frames. The planner derives and recomputes this
+value from mandatory durations and shares rather than storing it as a legacy
+constant.
+
 Train/evaluation assignment uses deterministic, disjoint recipe identities and
 seeds. When the budget permits, every type is represented in both splits.
 
@@ -342,20 +348,26 @@ seed.
 No complete production generation begins until this review is accepted by the
 human auditor.
 
-## Implementation sequence
+## Implementation status
 
-1. Add catalog-count, share, deterministic-identity, and no-replacement tests.
-2. Add focused geometry tests for all 60 types and canonical config identity.
-3. Implement the construction-time ballistic and camera solution builder.
-4. Freeze certified solution regions and exact mission recipes.
-5. Extend the immutable V2 planner to the 70/30 frame schedule and calculated
-   feasibility floor.
-6. Implement runtime playback using only ordinary player inputs and canonical
-   throws.
-7. Add technical/invariant validation without statistical acceptance gates.
-8. Generate and visually audit the 180-video review set.
-9. Fix definitions globally if the audit finds a defect.
-10. Authorize production only after explicit human approval.
+Implemented:
+
+1. catalog-count, share, deterministic-identity, and no-replacement tests;
+2. focused geometry, timing, camera, variation, and canonical-identity tests for
+   all 60 types;
+3. the construction-time low-branch ballistic and camera solution builder;
+4. frozen deterministic solution regions and immutable mission recipes;
+5. the exact 70/30 frame planner, mandatory pass, deficit scheduling, and
+   calculated feasibility floor;
+6. runtime playback using ordinary player inputs and canonical throws;
+7. technical and invariant validation without statistical acceptance gates;
+8. tooling that prepares, validates, and renders the exact 180-video review set.
+
+Not performed:
+
+1. generating or visually auditing the 180 review videos;
+2. applying any global catalog/region fixes that a human audit may require;
+3. authorizing production.
 
 Movement V1 missions and the shared V1/V2 semi-Markov policy must remain
 unchanged while this work is implemented.

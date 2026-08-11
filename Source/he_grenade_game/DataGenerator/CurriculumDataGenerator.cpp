@@ -830,6 +830,15 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 	const bool bMissionTimedOut =
 		!bCoverageMissionSucceeded
 		&& FrameIndex >= TransitionsPerEpisode;
+	if (bV2MissionRecipe && (bCoverageMissionFailed || bMissionTimedOut))
+	{
+		FinishRun(
+			false,
+			FString::Printf(
+				TEXT("Certified V2 mission invariant failed for immutable recipe %s."),
+				*CurrentRecipeId));
+		return;
+	}
 	if (bPostSuccessRolloutComplete
 		|| bCoverageMissionFailed
 		|| bMissionTimedOut)
@@ -1162,17 +1171,17 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	}
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 		&& bPrescribedRecipes
-		&& !bV2SemiMarkovRecipe)
+		&& !bV2RecipeManifest)
 	{
 		LastError =
-			TEXT("V2 prescribed collection requires a semi-Markov V2 recipe manifest.");
+			TEXT("V2 prescribed collection requires an immutable V2 recipe manifest.");
 		return false;
 	}
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-		&& !bV2SemiMarkovRecipe)
+		&& !bV2RecipeManifest)
 	{
 		LastError =
-			TEXT("V2 requires a persistent semi-Markov recipe manifest.");
+			TEXT("V2 requires an immutable combined recipe manifest.");
 		return false;
 	}
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
@@ -1265,7 +1274,7 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 				|| StageValue == TEXT("trajectory_throw_v2"))
 			{
 				CurriculumStage = ECurriculumStage::TrajectoryThrowV2;
-				bV2SemiMarkovRecipe = true;
+				bV2RecipeManifest = true;
 			}
 			else
 			{
@@ -1411,16 +1420,118 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 		RecipeObject->TryGetStringField(TEXT("cell_id"), Recipe.CellId);
 		RecipeObject->TryGetStringField(TEXT("replay_identity"), Recipe.ReplayIdentity);
 		RecipeObject->TryGetStringField(TEXT("split"), Recipe.Split);
+		RecipeObject->TryGetStringField(TEXT("mission_type"), Recipe.MissionType);
+		RecipeObject->TryGetStringField(TEXT("family"), Recipe.Family);
 		if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-			&& (Recipe.Mission != TEXT("semi_markov")
-				|| Recipe.Source != TEXT("semi_markov")
+			&& ((Recipe.Source != TEXT("semi_markov")
+					&& Recipe.Source != TEXT("mission"))
+				|| (Recipe.Source == TEXT("semi_markov")
+					&& Recipe.Mission != TEXT("semi_markov"))
+				|| (Recipe.Source == TEXT("mission")
+					&& (Recipe.MissionType.IsEmpty()
+						|| Recipe.Mission != Recipe.MissionType))
 				|| Recipe.ReplayIdentity.IsEmpty()
 				|| Recipe.Split.IsEmpty()))
 		{
 			LastError = FString::Printf(
-				TEXT("V2 recipe %s must be a persistent semi-Markov recipe."),
+				TEXT("V2 recipe %s violates the immutable source/mission contract."),
 				*Recipe.RecipeId);
 			return false;
+		}
+		if (Recipe.Source == TEXT("mission"))
+		{
+			const TSharedPtr<FJsonObject>* Solution = nullptr;
+			if (!RecipeObject->TryGetObjectField(TEXT("mission_solution"), Solution)
+				|| !Solution || !Solution->IsValid())
+			{
+				LastError = FString::Printf(
+					TEXT("V2 mission recipe %s has no frozen solution."),
+					*Recipe.RecipeId);
+				return false;
+			}
+			(*Solution)->TryGetStringField(TEXT("event_kind"), Recipe.EventKind);
+			(*Solution)->TryGetStringField(TEXT("target_actor"), Recipe.TargetActor);
+			(*Solution)->TryGetStringField(TEXT("target_region"), Recipe.TargetRegion);
+			(*Solution)->TryGetStringField(
+				TEXT("canonical_physics_id"), Recipe.CanonicalPhysicsId);
+			(*Solution)->TryGetStringField(TEXT("boundary"), Recipe.Boundary);
+			(*Solution)->TryGetStringField(TEXT("direction"), Recipe.Direction);
+			if (Recipe.CanonicalPhysicsId
+				!= TEXT("grenade-sim-config-r1+launch-1400cmps+cooldown-2s"))
+			{
+				LastError = FString::Printf(
+					TEXT("V2 mission recipe %s has a non-canonical physics identity."),
+					*Recipe.RecipeId);
+				return false;
+			}
+			const auto ReadVector = [&NumberValue](
+				const TSharedPtr<FJsonObject>& Object,
+				const TCHAR* Field,
+				FVector& OutVector) -> bool
+			{
+				const TSharedPtr<FJsonObject>* VectorObject = nullptr;
+				if (!Object->TryGetObjectField(Field, VectorObject)
+					|| !VectorObject || !VectorObject->IsValid())
+				{
+					return false;
+				}
+				if (!(*VectorObject)->TryGetNumberField(TEXT("x"), NumberValue)) return false;
+				OutVector.X = NumberValue;
+				if (!(*VectorObject)->TryGetNumberField(TEXT("y"), NumberValue)) return false;
+				OutVector.Y = NumberValue;
+				if (!(*VectorObject)->TryGetNumberField(TEXT("z"), NumberValue)) return false;
+				OutVector.Z = NumberValue;
+				return true;
+			};
+			if (!ReadVector(*Solution, TEXT("target_point"), Recipe.MissionTargetPoint)
+				|| !ReadVector(*Solution, TEXT("player_spawn"), Recipe.MissionPlayerSpawn)
+				|| !(*Solution)->TryGetNumberField(TEXT("region_radius_cm"), NumberValue))
+			{
+				LastError = FString::Printf(
+					TEXT("V2 mission recipe %s has incomplete frozen geometry."),
+					*Recipe.RecipeId);
+				return false;
+			}
+			Recipe.MissionRegionRadiusCm = NumberValue;
+			const TSharedPtr<FJsonObject>* Timing = nullptr;
+			if (!(*Solution)->TryGetObjectField(TEXT("timing"), Timing)
+				|| !Timing || !Timing->IsValid())
+			{
+				LastError = TEXT("V2 mission solution has no frozen timing.");
+				return false;
+			}
+			if (!(*Timing)->TryGetNumberField(TEXT("establish_steps"), NumberValue)) return false;
+			Recipe.EstablishSteps = FMath::RoundToInt(NumberValue);
+			if (!(*Timing)->TryGetNumberField(TEXT("camera_adjust_steps"), NumberValue)) return false;
+			Recipe.CameraAdjustSteps = FMath::RoundToInt(NumberValue);
+			if (!(*Timing)->TryGetNumberField(TEXT("preview_dwell_steps"), NumberValue)) return false;
+			Recipe.PreviewDwellSteps = FMath::RoundToInt(NumberValue);
+			if (!(*Timing)->TryGetNumberField(TEXT("total_observation_frames"), NumberValue)) return false;
+			Recipe.MissionObservationFrames = FMath::RoundToInt(NumberValue);
+			const TArray<TSharedPtr<FJsonValue>>* ContactOrder = nullptr;
+			if ((*Solution)->TryGetArrayField(TEXT("expected_contact_order"), ContactOrder)
+				&& ContactOrder)
+			{
+				for (const TSharedPtr<FJsonValue>& Value : *ContactOrder)
+				{
+					FString Contact;
+					if (Value.IsValid() && Value->TryGetString(Contact))
+					{
+						Recipe.ExpectedContactOrder.Add(Contact);
+					}
+				}
+			}
+			if (Recipe.EventKind.IsEmpty() || Recipe.TargetActor.IsEmpty()
+				|| Recipe.EstablishSteps < ObservationRate * 3 / 4
+				|| Recipe.PreviewDwellSteps < ObservationRate * 3 / 5
+				|| Recipe.CameraAdjustSteps < 3
+				|| Recipe.MissionObservationFrames <= 1)
+			{
+				LastError = FString::Printf(
+					TEXT("V2 mission recipe %s violates construction/timing railguards."),
+					*Recipe.RecipeId);
+				return false;
+			}
 		}
 		RecipeIds.Add(Recipe.RecipeId);
 		EpisodeIndices.Add(Recipe.EpisodeIndex);
@@ -1431,6 +1542,8 @@ bool ACurriculumDataGenerator::LoadRecipeManifest(const FString& ManifestPath)
 	EpisodeCount = PrescribedRecipes.Num();
 	EpisodeIndex = PrescribedRecipes[0].EpisodeIndex;
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2
+		&& Algo::AnyOf(PrescribedRecipes, [](const FPrescribedRecipe& Recipe)
+			{ return Recipe.Source == TEXT("semi_markov"); })
 		&& (EpisodeSeconds < 120 || EpisodeSeconds > 180))
 	{
 		LastError = TEXT("V2 semi-Markov episodes must last between two and three minutes.");
@@ -1529,6 +1642,27 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		DatasetSplit = Recipe.Split;
 		CurrentV2Source = Recipe.Source;
 		CurrentV2ReplayIdentity = Recipe.ReplayIdentity;
+		bV2SemiMarkovRecipe = Recipe.Source == TEXT("semi_markov");
+		bV2MissionRecipe = Recipe.Source == TEXT("mission");
+		CurrentV2MissionType = Recipe.MissionType;
+		CurrentV2Family = Recipe.Family;
+		CurrentV2EventKind = Recipe.EventKind;
+		CurrentV2TargetActor = Recipe.TargetActor;
+		CurrentV2TargetRegion = Recipe.TargetRegion;
+		CurrentV2CanonicalPhysicsId = Recipe.CanonicalPhysicsId;
+		CurrentV2Boundary = Recipe.Boundary;
+		CurrentV2Direction = Recipe.Direction;
+		CurrentV2MissionTargetPoint = Recipe.MissionTargetPoint;
+		CurrentV2MissionPlayerSpawn = Recipe.MissionPlayerSpawn;
+		CurrentV2MissionRegionRadiusCm = Recipe.MissionRegionRadiusCm;
+		CurrentV2EstablishSteps = Recipe.EstablishSteps;
+		CurrentV2CameraAdjustSteps = Recipe.CameraAdjustSteps;
+		CurrentV2PreviewDwellSteps = Recipe.PreviewDwellSteps;
+		CurrentV2MissionObservationFrames = Recipe.MissionObservationFrames;
+		CurrentV2ExpectedContactOrder = Recipe.ExpectedContactOrder;
+		TransitionsPerEpisode = bV2MissionRecipe
+			? FMath::Max(1, CurrentV2MissionObservationFrames - 1)
+			: EpisodeSeconds * ObservationRate;
 	}
 
 	const int32 EpisodeSeed = SeedStart + EpisodeIndex;
@@ -1550,7 +1684,9 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	float Yaw = 0.0f;
 	float Pitch = 0.0f;
 	const bool bHasMissionSpawn =
-		(bCoverageGuided
+		(bV2MissionRecipe
+			&& ConfigureV2MissionSpawn(SpawnLocation, Yaw, Pitch))
+		|| (bCoverageGuided
 			&& CoverageMission != ECoverageMission::SemiMarkov
 			&& GetCoverageMissionSpawn(SpawnLocation, Yaw, Pitch));
 	if (!bHasMissionSpawn && !FindEpisodeSpawn(SpawnLocation))
@@ -1577,6 +1713,13 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		Movement->StopMovementImmediately();
 	}
 	Character->GetController()->SetControlRotation(FRotator(Pitch, Yaw, 0.0f));
+	if (bV2MissionRecipe && !CertifyV2MissionConstruction())
+	{
+		LastError = FString::Printf(
+			TEXT("Immutable V2 mission %s failed canonical construction certification."),
+			*CurrentV2MissionType);
+		return false;
+	}
 
 	FrameIndex = 0;
 	HoldStepsRemaining = 0;
@@ -1590,6 +1733,11 @@ bool ACurriculumDataGenerator::BeginEpisode()
 	ActionScriptStepsRemaining = 0;
 	NextThrowRequestFrame = EpisodeRandom.RandRange(20, 80);
 	CurrentV2AcceptedThrowCount = 0;
+	CurrentV2MissionEventFrame = INDEX_NONE;
+	bV2MissionEventObserved = false;
+	bV2MissionRegionVisibleAllFrames = true;
+	bV2PreviewRegionVisibleAllQFrames = true;
+	bV2OpeningArenaContextVisible = true;
 	CurrentV2PreviewStartFrame = 5;
 	CurrentV2ERequestCount = 0;
 	CurrentV2QRisingCount = 0;
@@ -1638,7 +1786,7 @@ void ACurriculumDataGenerator::EndEpisode()
 {
 	ApplyAction(0);
 	const bool bMissionRequired =
-		CoverageMission != ECoverageMission::SemiMarkov;
+		bV2MissionRecipe || CoverageMission != ECoverageMission::SemiMarkov;
 	const bool bAcceptedForBalancing =
 		!bMissionRequired || bCoverageMissionSucceeded;
 	const int32 MissionObservationFrames =
@@ -1798,7 +1946,30 @@ void ACurriculumDataGenerator::EndEpisode()
 				/ static_cast<float>(CurrentEpisodeFacingMovingFrames)
 			: 0.0f;
 	FString MissionParameters = TEXT("{}");
-	if (CoverageMission == ECoverageMission::ObjectView)
+	if (bV2MissionRecipe)
+	{
+		MissionParameters = FString::Printf(
+			TEXT("{\"mission_type\":\"%s\",\"family\":\"%s\",")
+			TEXT("\"event_kind\":\"%s\",\"target_actor\":\"%s\",")
+			TEXT("\"target_region\":\"%s\",\"target_point\":%s,")
+			TEXT("\"player_spawn\":%s,\"region_radius_cm\":%s,")
+			TEXT("\"establish_steps\":%d,\"camera_adjust_steps\":%d,")
+			TEXT("\"preview_dwell_steps\":%d,\"ballistic_branch\":\"low\",")
+			TEXT("\"canonical_physics_id\":\"%s\"}"),
+			*CurrentV2MissionType.ReplaceCharWithEscapedChar(),
+			*CurrentV2Family.ReplaceCharWithEscapedChar(),
+			*CurrentV2EventKind.ReplaceCharWithEscapedChar(),
+			*CurrentV2TargetActor.ReplaceCharWithEscapedChar(),
+			*CurrentV2TargetRegion.ReplaceCharWithEscapedChar(),
+			*JsonVector(CurrentV2MissionTargetPoint),
+			*JsonVector(CurrentV2MissionPlayerSpawn),
+			*JsonNumber(CurrentV2MissionRegionRadiusCm),
+			CurrentV2EstablishSteps,
+			CurrentV2CameraAdjustSteps,
+			CurrentV2PreviewDwellSteps,
+			*CurrentV2CanonicalPhysicsId.ReplaceCharWithEscapedChar());
+	}
+	else if (CoverageMission == ECoverageMission::ObjectView)
 	{
 		MissionParameters = FString::Printf(
 			TEXT("{\"scenario_index\":%d,\"mode\":\"%s\",\"start\":%s,\"goal\":%s,")
@@ -1942,6 +2113,9 @@ void ACurriculumDataGenerator::EndEpisode()
 		TEXT("\"plan_version\":%s,\"assignment_id\":%s,\"attempt_id\":%s,")
 		TEXT("\"executor_id\":%s,\"split\":%s,\"recipe_id\":%s,")
 		TEXT("\"v2_contract_version\":%s,\"v2_source\":%s,\"v2_replay_identity\":%s,")
+		TEXT("\"v2_mission_type\":%s,\"v2_mission_family\":%s,")
+		TEXT("\"v2_event_kind\":%s,\"v2_target_actor\":%s,")
+		TEXT("\"v2_target_region\":%s,\"v2_canonical_physics_id\":%s,")
 		TEXT("\"continuous_sample_ordinal\":%s,\"refinement_level\":%s,")
 		TEXT("\"repetition_index\":%s,\"prescribed_scenario_index\":%s,")
 		TEXT("\"requested_transitions\":%d,\"actual_transitions\":%d,")
@@ -1981,6 +2155,11 @@ void ACurriculumDataGenerator::EndEpisode()
 		TEXT("\"mission_required\":%s,\"mission_success\":%s,")
 		TEXT("\"mission_parameters\":%s,")
 		TEXT("\"v2_accepted_throw_count\":%d,")
+		TEXT("\"v2_mission_event_frame\":%s,")
+		TEXT("\"v2_construction_certified\":%s,")
+		TEXT("\"v2_mission_region_visible_all_frames\":%s,")
+		TEXT("\"v2_preview_region_visible_all_q_frames\":%s,")
+		TEXT("\"v2_opening_arena_context_visible\":%s,")
 		TEXT("\"planned_credited_frames\":%d,\"v2_throws\":%s,")
 		TEXT("\"termination_reason\":\"%s\"}\n"),
 		*MakeEpisodeId(),
@@ -2010,16 +2189,34 @@ void ACurriculumDataGenerator::EndEpisode()
 			? *FString::Printf(TEXT("\"%s\""), *CurrentRecipeId.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-			? TEXT("\"shared-persistent-semi-markov-1\"")
+			? TEXT("\"shared-persistent-semi-markov-1+certified-sixty-missions-1\"")
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-			? (bV2SemiMarkovRecipe
-				? *FString::Printf(TEXT("\"%s\""), *CurrentV2Source.ReplaceCharWithEscapedChar())
-				: TEXT("\"semi_markov\""))
+			? *FString::Printf(
+				TEXT("\"%s\""),
+				*CurrentV2Source.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 			&& !CurrentV2ReplayIdentity.IsEmpty()
 			? *FString::Printf(TEXT("\"%s\""), *CurrentV2ReplayIdentity.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bV2MissionRecipe
+			? *FString::Printf(TEXT("\"%s\""), *CurrentV2MissionType.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bV2MissionRecipe
+			? *FString::Printf(TEXT("\"%s\""), *CurrentV2Family.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bV2MissionRecipe
+			? *FString::Printf(TEXT("\"%s\""), *CurrentV2EventKind.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bV2MissionRecipe
+			? *FString::Printf(TEXT("\"%s\""), *CurrentV2TargetActor.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bV2MissionRecipe
+			? *FString::Printf(TEXT("\"%s\""), *CurrentV2TargetRegion.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		bV2MissionRecipe
+			? *FString::Printf(TEXT("\"%s\""), *CurrentV2CanonicalPhysicsId.ReplaceCharWithEscapedChar())
 			: TEXT("null"),
 		bPrescribedRecipes ? *FString::FromInt(CurrentContinuousSampleOrdinal) : TEXT("null"),
 		bPrescribedRecipes ? *FString::FromInt(CurrentRefinementLevel) : TEXT("null"),
@@ -2028,7 +2225,9 @@ void ACurriculumDataGenerator::EndEpisode()
 		TransitionsPerEpisode,
 		FrameIndex,
 		FrameIndex + 1,
-		bV2SemiMarkovRecipe ? *CurrentV2Source : *GetCoverageMissionSlug(),
+		bV2MissionRecipe
+			? *CurrentV2MissionType
+			: (bV2SemiMarkovRecipe ? *CurrentV2Source : *GetCoverageMissionSlug()),
 		bMissionReviewSuite
 				? *FString::Printf(TEXT("\"%s\""), *GetMissionReviewSlug())
 				: TEXT("null"),
@@ -2126,6 +2325,12 @@ void ACurriculumDataGenerator::EndEpisode()
 		JsonBool(bCoverageMissionSucceeded),
 		*MissionParameters,
 		CurrentV2AcceptedThrowCount,
+		CurrentV2MissionEventFrame == INDEX_NONE
+			? TEXT("null") : *FString::FromInt(CurrentV2MissionEventFrame),
+		bV2MissionRecipe ? JsonBool(bV2ConstructionCertified) : TEXT("null"),
+		bV2MissionRecipe ? JsonBool(bV2MissionRegionVisibleAllFrames) : TEXT("null"),
+		bV2MissionRecipe ? JsonBool(bV2PreviewRegionVisibleAllQFrames) : TEXT("null"),
+		bV2MissionRecipe ? JsonBool(bV2OpeningArenaContextVisible) : TEXT("null"),
 		CurrentPlannedCreditedFrames,
 		*BuildV2ThrowsJson(),
 		TerminationReason);
@@ -2486,6 +2691,40 @@ bool ACurriculumDataGenerator::CaptureObservation(
 	const bool bAimLockActive =
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
 		&& bQVisible;
+	const bool bV2MissionRegionVisible =
+		!bV2MissionRecipe || IsV2MissionRegionVisible();
+	const float V2MissionYawError = FMath::Abs(FMath::FindDeltaAngleDegrees(
+		OutState.CameraRotation.Yaw,
+		CurrentV2MissionAimYaw));
+	const float V2MissionPitchError = FMath::Abs(
+		OutState.CameraRotation.Pitch - CurrentV2MissionAimPitch);
+	const bool bV2PreviewRegionVisible = !bV2MissionRecipe
+		|| !bQVisible
+		|| (bV2MissionRegionVisible
+			&& V2MissionYawError <= 2.0f
+			&& V2MissionPitchError <= 2.0f);
+	if (bV2MissionRecipe)
+	{
+		bV2MissionRegionVisibleAllFrames &= bV2MissionRegionVisible;
+		if (bQVisible)
+		{
+			bV2PreviewRegionVisibleAllQFrames &= bV2PreviewRegionVisible;
+		}
+		if (ObservationIndex == 0)
+		{
+			bV2OpeningArenaContextVisible = bV2MissionRegionVisible
+				&& FMath::Abs(OutState.CameraRotation.Pitch) < 55.0f;
+		}
+		if (!bV2MissionRegionVisible || !bV2PreviewRegionVisible
+			|| !bV2OpeningArenaContextVisible)
+		{
+			LastError = FString::Printf(
+				TEXT("V2 camera railguard failed for immutable mission %s at frame %d."),
+				*CurrentV2MissionType,
+				ObservationIndex);
+			return false;
+		}
+	}
 	int32 FlyingGrenadeCount = 0;
 	int32 RestingGrenadeCount = 0;
 	int32 VisibleGrenadeCount = 0;
@@ -2544,7 +2783,9 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		TEXT("\"aim_lock_active\":%s,\"trajectory_visible\":%s,")
 		TEXT("\"flying_grenade_count\":%d,\"resting_grenade_count\":%d,")
 		TEXT("\"visible_grenade_count\":%d,\"total_grenade_count\":%d,")
-		TEXT("\"v2_episode_phase\":\"%s\",\"grenades\":%s,")
+		TEXT("\"v2_episode_phase\":\"%s\",\"v2_mission_type\":%s,")
+		TEXT("\"v2_mission_region_visible\":%s,")
+		TEXT("\"v2_preview_region_visible\":%s,\"grenades\":%s,")
 		TEXT("\"collection_mission\":\"%s\",\"mission_phase\":\"%s\",")
 		TEXT("\"mission_success_frame_index\":%s,\"coverage_target\":%s,")
 		TEXT("\"mission_review_slug\":%s,")
@@ -2604,8 +2845,17 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		VisibleGrenadeCount,
 		Grenades.Num(),
 		*GetV2EpisodePhaseSlug(),
+		bV2MissionRecipe
+			? *FString::Printf(
+				TEXT("\"%s\""),
+				*CurrentV2MissionType.ReplaceCharWithEscapedChar())
+			: TEXT("null"),
+		JsonBool(bV2MissionRegionVisible),
+		JsonBool(bV2PreviewRegionVisible),
 		*GrenadesJson,
-		bV2SemiMarkovRecipe ? *CurrentV2Source : *GetCoverageMissionSlug(),
+		bV2MissionRecipe
+			? *CurrentV2MissionType
+			: (bV2SemiMarkovRecipe ? *CurrentV2Source : *GetCoverageMissionSlug()),
 		*GetMissionPhaseSlug(),
 		CoverageMissionSuccessFrameIndex != INDEX_NONE
 			? *FString::FromInt(CoverageMissionSuccessFrameIndex)
@@ -3728,6 +3978,290 @@ int32 ACurriculumDataGenerator::SelectPersistentSemiMarkovHoldSteps()
 	// consecutive decisions still permit longer coherent motion when the newly
 	// sampled action differs (for example, forward into forward+camera).
 	return EpisodeRandom.RandRange(81, 96);
+}
+
+uint16 ACurriculumDataGenerator::SelectV2MissionAction() const
+{
+	// The frozen action sequence is deliberately paced: scene establishment,
+	// a multi-frame ordinary-input adjustment, visible Q dwell, one E edge,
+	// then a stationary aftermath that preserves the intended region.
+	if (FrameIndex < CurrentV2EstablishSteps)
+	{
+		return 0;
+	}
+	const int32 AdjustmentEnd =
+		CurrentV2EstablishSteps + CurrentV2CameraAdjustSteps;
+	if (FrameIndex < AdjustmentEnd)
+	{
+		return (CurrentRepetitionIndex & 1) == 0
+			? CurriculumAction::ArrowLeft
+			: CurriculumAction::ArrowRight;
+	}
+	const int32 ThrowFrame = AdjustmentEnd + CurrentV2PreviewDwellSteps;
+	if (FrameIndex < ThrowFrame)
+	{
+		return CurriculumAction::Q;
+	}
+	if (FrameIndex == ThrowFrame)
+	{
+		return CurriculumAction::Q | CurriculumAction::E;
+	}
+	return 0;
+}
+
+bool ACurriculumDataGenerator::ConfigureV2MissionSpawn(
+	FVector& OutLocation,
+	float& OutYaw,
+	float& OutPitch)
+{
+	if (!bV2MissionRecipe)
+	{
+		return false;
+	}
+	OutLocation = CurrentV2MissionPlayerSpawn;
+	const FVector CameraLocation = OutLocation + FVector(0.0f, 0.0f, 64.0f);
+	float AimYaw = (CurrentV2MissionTargetPoint - CameraLocation).Rotation().Yaw;
+	float AimPitch = 0.0f;
+	for (int32 Iteration = 0; Iteration < 4; ++Iteration)
+	{
+		const FRotator Rotation(AimPitch, AimYaw, 0.0f);
+		const FVector LaunchPoint = CameraLocation
+			+ Rotation.Vector() * 30.0f
+			+ FRotationMatrix(Rotation).GetScaledAxis(EAxis::Y) * 10.0f
+			- FRotationMatrix(Rotation).GetScaledAxis(EAxis::Z) * 10.0f;
+		AimYaw = (CurrentV2MissionTargetPoint - LaunchPoint).Rotation().Yaw;
+		if (!SolveBallisticPitchDegrees(
+			LaunchPoint,
+			CurrentV2MissionTargetPoint,
+			false,
+			CurriculumThrowSpeedCmPerSecond,
+			AimPitch))
+		{
+			LastError = FString::Printf(
+				TEXT("Low ballistic branch is unreachable for V2 mission %s."),
+				*CurrentV2MissionType);
+			return false;
+		}
+	}
+	// Near-vertical or sky-only construction is forbidden. Relocation belongs
+	// in the certified region, not in a runtime alternate-root fallback.
+	if (AimPitch < -25.0f || AimPitch > 52.0f)
+	{
+		LastError = FString::Printf(
+			TEXT("V2 mission %s violates the readable low-arc pitch railguard."),
+			*CurrentV2MissionType);
+		return false;
+	}
+	CurrentV2MissionAimYaw = FRotator::NormalizeAxis(AimYaw);
+	CurrentV2MissionAimPitch = AimPitch;
+	// Matches the fixed binary arrow-key yaw rate used by the character.
+	constexpr float CameraRate = 90.0f;
+	const float OpeningOffset = CameraRate
+		/ static_cast<float>(FMath::Max(1, ObservationRate))
+		* static_cast<float>(CurrentV2CameraAdjustSteps);
+	OutYaw = FRotator::NormalizeAxis(
+		CurrentV2MissionAimYaw
+		+ (((CurrentRepetitionIndex & 1) == 0) ? OpeningOffset : -OpeningOffset));
+	OutPitch = CurrentV2MissionAimPitch;
+	return true;
+}
+
+bool ACurriculumDataGenerator::CertifyV2MissionConstruction()
+{
+	if (!bV2MissionRecipe || !GetWorld() || !PlayerCamera)
+	{
+		return false;
+	}
+	const FRotator ThrowRotation(
+		CurrentV2MissionAimPitch,
+		CurrentV2MissionAimYaw,
+		0.0f);
+	const FVector CameraLocation = PlayerCamera->GetComponentLocation();
+	CurrentV2CertifiedLaunchPosition = CameraLocation
+		+ ThrowRotation.Vector() * 30.0f
+		+ FRotationMatrix(ThrowRotation).GetScaledAxis(EAxis::Y) * 10.0f
+		- FRotationMatrix(ThrowRotation).GetScaledAxis(EAxis::Z) * 10.0f;
+	CurrentV2CertifiedLaunchVelocity =
+		ThrowRotation.Vector() * CurriculumThrowSpeedCmPerSecond;
+	FGrenadeSimState State;
+	FGrenadeSim::InitializeState(
+		State,
+		CurrentV2CertifiedLaunchPosition,
+		CurrentV2CertifiedLaunchVelocity,
+		3600.0f);
+	TArray<FString> ContactOrder;
+	bool bObserved = false;
+	const float StepDt = FMath::Max(0.001f, GrenadeSimConfig.FixedStepSeconds);
+	for (int32 StepIndex = 0;
+		StepIndex < MaxTrajectorySimulationSteps && !State.bMotionStopped;
+		++StepIndex)
+	{
+		const FVector PreviousPosition = State.Position;
+		const FGrenadeSimStepResult Result = FGrenadeSim::Step(
+			GetWorld(),
+			GrenadeSimConfig,
+			State,
+			StepDt,
+			Character,
+			[](const FHitResult&) { return static_cast<ABreakableTile*>(nullptr); });
+		FString ContactSlug;
+		if (Result.bHadHit && Result.Hit.GetActor())
+		{
+			for (const FName Tag : Result.Hit.GetActor()->Tags)
+			{
+				const FString Text = Tag.ToString();
+				if (Text.StartsWith(TEXT("Curriculum"))
+					&& Text != TEXT("CurriculumArena"))
+				{
+					ContactSlug = Text;
+					break;
+				}
+			}
+			if (!ContactSlug.IsEmpty()
+				&& (ContactOrder.IsEmpty() || ContactOrder.Last() != ContactSlug))
+			{
+				ContactOrder.Add(ContactSlug);
+			}
+		}
+		if (CurrentV2EventKind == TEXT("arena_exit"))
+		{
+			bObserved = (CurrentV2Boundary == TEXT("north") && State.Position.X > 1650.0f)
+				|| (CurrentV2Boundary == TEXT("south") && State.Position.X < -1650.0f)
+				|| (CurrentV2Boundary == TEXT("east") && State.Position.Y > 1650.0f)
+				|| (CurrentV2Boundary == TEXT("west") && State.Position.Y < -1650.0f);
+		}
+		else if (CurrentV2EventKind == TEXT("hoop_passage"))
+		{
+			const bool bCrossed = (PreviousPosition.X - 700.0f)
+				* (State.Position.X - 700.0f) <= 0.0f;
+			bObserved = bCrossed
+				&& FMath::Abs(State.Position.Y + 700.0f) <= 72.0f
+				&& FMath::Abs(State.Position.Z - 145.0f) <= 72.0f;
+		}
+		else if (CurrentV2EventKind == TEXT("ramp_crossover"))
+		{
+			const bool bCrossed = PreviousPosition.Y * State.Position.Y <= 0.0f;
+			bObserved = bCrossed
+				&& FMath::Abs(State.Position.X) <= 250.0f
+				&& State.Position.Z >= RampTopSurfaceZ(State.Position.X) - 20.0f;
+		}
+		else if (CurrentV2EventKind == TEXT("two_wall_contact"))
+		{
+			bObserved = CurrentV2ExpectedContactOrder.Num() >= 2
+				&& ContactOrder.Num() >= 2
+				&& ContactOrder[0] == CurrentV2ExpectedContactOrder[0]
+				&& ContactOrder[1] == CurrentV2ExpectedContactOrder[1];
+		}
+		else if (Result.bHadHit && ContactSlug == CurrentV2TargetActor)
+		{
+			const float Tolerance = CurrentV2MissionRegionRadiusCm
+				+ GrenadeSimConfig.RadiusCm + 15.0f;
+			bObserved = FVector::Distance(
+				Result.Hit.Location,
+				CurrentV2MissionTargetPoint) <= Tolerance;
+		}
+		if (bObserved)
+		{
+			break;
+		}
+	}
+	bV2ConstructionCertified = bObserved;
+	return bObserved;
+}
+
+bool ACurriculumDataGenerator::IsV2MissionRegionVisible() const
+{
+	if (!bV2MissionRecipe || !PlayerCamera)
+	{
+		return true;
+	}
+	FVector2D Pixel;
+	return ProjectToCapture(
+		CurrentV2MissionTargetPoint,
+		PlayerCamera->GetComponentTransform(),
+		PlayerCamera->FieldOfView,
+		CaptureWidth,
+		CaptureHeight,
+		Pixel)
+		&& Pixel.X >= 2.0f
+		&& Pixel.X <= static_cast<float>(CaptureWidth - 2)
+		&& Pixel.Y >= 2.0f
+		&& Pixel.Y <= static_cast<float>(CaptureHeight - 2);
+}
+
+void ACurriculumDataGenerator::UpdateV2MissionEvidence(
+	const FGeneratedGrenade& Grenade,
+	const FGrenadeSimStepResult& StepResult,
+	const FVector& PreviousPosition)
+{
+	if (!bV2MissionRecipe || bV2MissionEventObserved)
+	{
+		return;
+	}
+	bool bObserved = false;
+	if (CurrentV2EventKind == TEXT("arena_exit"))
+	{
+		bObserved =
+			(CurrentV2Boundary == TEXT("north") && Grenade.State.Position.X > 1650.0f)
+			|| (CurrentV2Boundary == TEXT("south") && Grenade.State.Position.X < -1650.0f)
+			|| (CurrentV2Boundary == TEXT("east") && Grenade.State.Position.Y > 1650.0f)
+			|| (CurrentV2Boundary == TEXT("west") && Grenade.State.Position.Y < -1650.0f);
+	}
+	else if (CurrentV2EventKind == TEXT("hoop_passage"))
+	{
+		const bool bCrossed = (PreviousPosition.X - 700.0f)
+			* (Grenade.State.Position.X - 700.0f) <= 0.0f;
+		bObserved = bCrossed
+			&& FMath::Abs(Grenade.State.Position.Y + 700.0f) <= 72.0f
+			&& FMath::Abs(Grenade.State.Position.Z - 145.0f) <= 72.0f;
+	}
+	else if (CurrentV2EventKind == TEXT("ramp_crossover"))
+	{
+		const bool bCrossed =
+			PreviousPosition.Y * Grenade.State.Position.Y <= 0.0f;
+		bObserved = bCrossed
+			&& FMath::Abs(Grenade.State.Position.X) <= 250.0f
+			&& Grenade.State.Position.Z
+				>= RampTopSurfaceZ(Grenade.State.Position.X) - 20.0f;
+	}
+	else if (CurrentV2EventKind == TEXT("two_wall_contact"))
+	{
+		bObserved = CurrentV2ExpectedContactOrder.Num() >= 2
+			&& Grenade.ContactOrder.Num() >= 2
+			&& Grenade.ContactOrder[0] == CurrentV2ExpectedContactOrder[0]
+			&& Grenade.ContactOrder[1] == CurrentV2ExpectedContactOrder[1];
+	}
+	else if (StepResult.bHadHit && StepResult.Hit.GetActor())
+	{
+		FString ContactSlug;
+		for (const FName Tag : StepResult.Hit.GetActor()->Tags)
+		{
+			const FString Text = Tag.ToString();
+			if (Text.StartsWith(TEXT("Curriculum"))
+				&& Text != TEXT("CurriculumArena"))
+			{
+				ContactSlug = Text;
+				break;
+			}
+		}
+		const float Tolerance = CurrentV2MissionRegionRadiusCm
+			+ GrenadeSimConfig.RadiusCm + 15.0f;
+		bObserved = ContactSlug == CurrentV2TargetActor
+			&& FVector::Distance(
+				StepResult.Hit.Location,
+				CurrentV2MissionTargetPoint) <= Tolerance;
+	}
+	if (bObserved)
+	{
+		bV2MissionEventObserved = true;
+		CurrentV2MissionEventFrame = FrameIndex + 1;
+		bCoveragePrimaryObjectiveAchieved = true;
+		bCoverageMissionSucceeded = true;
+		CoverageMissionSuccessFrameIndex = CurrentV2MissionEventFrame;
+		CoverageRequiredPostSuccessSteps = FMath::Max(
+			1,
+			TransitionsPerEpisode - CurrentV2MissionEventFrame + 1);
+	}
 }
 
 uint16 ACurriculumDataGenerator::SelectPersistentSemiMarkovMovementBits()
@@ -6904,6 +7438,16 @@ FString ACurriculumDataGenerator::GetHoopPathProfileSlug() const
 
 FString ACurriculumDataGenerator::GetMissionPhaseSlug() const
 {
+	if (bV2MissionRecipe)
+	{
+		if (bV2MissionEventObserved) return TEXT("aftermath");
+		if (CurrentV2AcceptedThrowCount > 0) return TEXT("flight");
+		const int32 AdjustmentEnd =
+			CurrentV2EstablishSteps + CurrentV2CameraAdjustSteps;
+		if (FrameIndex >= AdjustmentEnd) return TEXT("trajectory_dwell");
+		if (FrameIndex >= CurrentV2EstablishSteps) return TEXT("camera_adjustment");
+		return TEXT("scene_establishment");
+	}
 	if (CoverageMission == ECoverageMission::SemiMarkov)
 	{
 		return TEXT("semi_markov");
@@ -7093,7 +7637,7 @@ void ACurriculumDataGenerator::ApplyAction(const uint16 ActionMask)
 		{
 			++CurrentV2RejectedCooldownCount;
 		}
-		if (bV2SemiMarkovRecipe && Decision.bQRising)
+		if ((bV2SemiMarkovRecipe || bV2MissionRecipe) && Decision.bQRising)
 		{
 			CurrentV2PreviewStartFrame = FrameIndex;
 		}
@@ -7123,6 +7667,11 @@ void ACurriculumDataGenerator::ApplyAction(const uint16 ActionMask)
 void ACurriculumDataGenerator::PrepareNextAction()
 {
 	bNaturalPlayEscapeActionActive = false;
+	if (bV2MissionRecipe)
+	{
+		ApplyAction(SelectV2MissionAction());
+		return;
+	}
 	if (bTrajectoryShowcase && CurriculumStage == ECurriculumStage::LegacyTrajectory)
 	{
 		ApplyAction(SelectTrajectoryShowcaseAction());
@@ -7296,6 +7845,7 @@ void ACurriculumDataGenerator::ResetStageState()
 	CurrentERejectionReason =
 		V2ActionSemantics::EThrowRejectionReason::None;
 	LastAppliedActionMask = 0;
+	bV2ConstructionCertified = false;
 	ResetStableCameraSteering();
 }
 
@@ -7337,6 +7887,16 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 	{
 		return INDEX_NONE;
 	}
+	if (bV2MissionRecipe
+		&& (FVector::Distance(SpawnLocation, CurrentV2CertifiedLaunchPosition) > 1.0f
+			|| FVector::Distance(InitialVelocity, CurrentV2CertifiedLaunchVelocity) > 1.0f))
+	{
+		LastError = FString::Printf(
+			TEXT("V2 mission %s launch diverged from its certified immutable state."),
+			*CurrentV2MissionType);
+		bCoverageMissionFailed = true;
+		return INDEX_NONE;
+	}
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride =
@@ -7371,6 +7931,8 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 	Grenade.PreviewStartFrame = CurrentV2PreviewStartFrame;
 	Grenade.ThrowSourceFrame = FrameIndex;
 	Grenade.ThrowCamera = PlayerCamera->GetComponentRotation();
+	Grenade.LaunchPosition = SpawnLocation;
+	Grenade.LaunchVelocity = InitialVelocity;
 	Grenade.SimConfig = GrenadeSimConfig;
 	Grenade.VisualActor = VisualActor;
 	FGrenadeSim::InitializeState(
@@ -7438,7 +8000,7 @@ int32 ACurriculumDataGenerator::AcceptThrow()
 	Grenade.PredictedRestPosition = PredictedState.Position;
 	CooldownRemainingSteps =
 		V2ActionSemantics::GetCooldownDurationSteps(ObservationRate);
-	if (bV2SemiMarkovRecipe)
+	if (bV2SemiMarkovRecipe || bV2MissionRecipe)
 	{
 		++CurrentV2AcceptedThrowCount;
 		CurrentV2PreviewStartFrame = FrameIndex + 1;
@@ -7503,6 +8065,7 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 		{
 			for (int32 Substep = 0; Substep < SubstepCount; ++Substep)
 			{
+				const FVector PreviousGrenadePosition = Grenade.State.Position;
 				const FGrenadeSimStepResult StepResult = FGrenadeSim::Step(
 					GetWorld(),
 					Grenade.SimConfig,
@@ -7535,8 +8098,13 @@ void ACurriculumDataGenerator::AdvanceGrenades()
 					{
 						Grenade.FirstContactFrame = FrameIndex + 1;
 						Grenade.RealizedTarget = ContactSlug;
+						Grenade.FirstContactPosition = StepResult.Hit.Location;
 					}
 				}
+				UpdateV2MissionEvidence(
+					Grenade,
+					StepResult,
+					PreviousGrenadePosition);
 				if (Grenade.State.bMotionStopped)
 				{
 					if (Grenade.RestFrame == INDEX_NONE)
@@ -7734,8 +8302,11 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 		Result += FString::Printf(
 			TEXT("{\"grenade_id\":%d,\"preview_start_frame\":%d,")
 			TEXT("\"throw_source_frame\":%d,\"camera_yaw\":%s,\"camera_pitch\":%s,")
+			TEXT("\"launch_position\":%s,\"launch_velocity\":%s,")
+			TEXT("\"physics_config_identity\":\"grenade-sim-config-r1\",")
 			TEXT("\"realized_target\":%s,\"realized_contact_order\":%s,")
-			TEXT("\"first_contact_frame\":%s,\"bounce_count\":%d,")
+			TEXT("\"first_contact_frame\":%s,\"first_contact_position\":%s,")
+			TEXT("\"bounce_count\":%d,")
 			TEXT("\"rest_frame\":%s,\"post_rest_tail_steps\":%d,")
 			TEXT("\"arena_exit_frame\":%s,\"arena_exit_direction\":%s,")
 			TEXT("\"visible_observation_count\":%d,")
@@ -7745,12 +8316,16 @@ FString ACurriculumDataGenerator::BuildV2ThrowsJson() const
 			Grenade.ThrowSourceFrame,
 			*JsonNumber(Grenade.ThrowCamera.Yaw),
 			*JsonNumber(Grenade.ThrowCamera.Pitch),
+			*JsonVector(Grenade.LaunchPosition),
+			*JsonVector(Grenade.LaunchVelocity),
 			Grenade.RealizedTarget.IsEmpty()
 				? TEXT("null")
 				: *FString::Printf(TEXT("\"%s\""), *Grenade.RealizedTarget.ReplaceCharWithEscapedChar()),
 			*Contacts,
 			Grenade.FirstContactFrame == INDEX_NONE
 				? TEXT("null") : *FString::FromInt(Grenade.FirstContactFrame),
+			Grenade.FirstContactFrame == INDEX_NONE
+				? TEXT("null") : *JsonVector(Grenade.FirstContactPosition),
 			Grenade.State.BounceCount,
 			Grenade.RestFrame == INDEX_NONE
 				? TEXT("null") : *FString::FromInt(Grenade.RestFrame),
@@ -7825,7 +8400,7 @@ FString ACurriculumDataGenerator::GetStageSchemaVersion() const
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 	{
 		return FString::Printf(
-			TEXT("%s-%s-12"),
+			TEXT("%s-%s-13"),
 			*GetStageSlug(),
 			StorageFormat == EStorageFormat::WebPParquet
 				? TEXT("production")
@@ -7881,7 +8456,7 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 	}
 	const TCHAR* CollectionPolicy =
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2
-		? TEXT("training_v2_persistent_semi_markov_only_v1")
+		? TEXT("training_v2_combined_sixty_missions_v1")
 		: (bPrescribedRecipes
 		? TEXT("training_central_prescribed_recipes_v1")
 		: (bTrajectoryShowcase

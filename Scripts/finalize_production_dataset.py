@@ -41,9 +41,13 @@ V2_THROW = pa.struct(
         pa.field("throw_source_frame", pa.int32(), nullable=False),
         pa.field("camera_yaw", pa.float64(), nullable=False),
         pa.field("camera_pitch", pa.float64(), nullable=False),
+        pa.field("launch_position", VECTOR3),
+        pa.field("launch_velocity", VECTOR3),
+        pa.field("physics_config_identity", pa.string()),
         pa.field("realized_target", pa.string()),
         pa.field("realized_contact_order", pa.list_(pa.string()), nullable=False),
         pa.field("first_contact_frame", pa.int32()),
+        pa.field("first_contact_position", VECTOR3),
         pa.field("bounce_count", pa.int32(), nullable=False),
         pa.field("rest_frame", pa.int32()),
         pa.field("post_rest_tail_steps", pa.int32(), nullable=False),
@@ -86,6 +90,9 @@ FRAME_SCHEMA = pa.schema(
         pa.field("visible_grenade_count", pa.int32(), nullable=False),
         pa.field("total_grenade_count", pa.int32(), nullable=False),
         pa.field("v2_episode_phase", pa.string(), nullable=False),
+        pa.field("v2_mission_type", pa.string()),
+        pa.field("v2_mission_region_visible", pa.bool_(), nullable=False),
+        pa.field("v2_preview_region_visible", pa.bool_(), nullable=False),
         pa.field("grenades", pa.list_(GRENADE), nullable=False),
         pa.field("collection_mission", pa.string(), nullable=False),
         pa.field("mission_phase", pa.string(), nullable=False),
@@ -204,6 +211,12 @@ EPISODE_SCHEMA = pa.schema(
                 "v2_contract_version",
                 "v2_source",
                 "v2_replay_identity",
+                "v2_mission_type",
+                "v2_mission_family",
+                "v2_event_kind",
+                "v2_target_actor",
+                "v2_target_region",
+                "v2_canonical_physics_id",
             )
         ],
         *[
@@ -301,6 +314,11 @@ EPISODE_SCHEMA = pa.schema(
         pa.field("mission_success", pa.bool_(), nullable=False),
         pa.field("mission_parameters_json", pa.string(), nullable=False),
         pa.field("v2_accepted_throw_count", pa.int32()),
+        pa.field("v2_mission_event_frame", pa.int32()),
+        pa.field("v2_construction_certified", pa.bool_()),
+        pa.field("v2_mission_region_visible_all_frames", pa.bool_()),
+        pa.field("v2_preview_region_visible_all_q_frames", pa.bool_()),
+        pa.field("v2_opening_arena_context_visible", pa.bool_()),
         pa.field("planned_credited_frames", pa.int32()),
         pa.field("v2_throws", pa.list_(V2_THROW)),
         pa.field("termination_reason", pa.string(), nullable=False),
@@ -342,6 +360,9 @@ def parquet_bytes(
             record.setdefault("visible_grenade_count", 0)
             record.setdefault("total_grenade_count", len(grenades))
             record.setdefault("v2_episode_phase", "not_applicable")
+            record.setdefault("v2_mission_type", None)
+            record.setdefault("v2_mission_region_visible", False)
+            record.setdefault("v2_preview_region_visible", False)
     if "planar_movement_suppressed" in schema.names:
         for record in records:
             record.setdefault("planar_movement_suppressed", False)
@@ -354,6 +375,17 @@ def parquet_bytes(
             record.setdefault("cooldown_after_steps", cooldown)
     if episodes:
         for record in records:
+            record.setdefault("v2_mission_type", None)
+            record.setdefault("v2_mission_family", None)
+            record.setdefault("v2_event_kind", None)
+            record.setdefault("v2_target_actor", None)
+            record.setdefault("v2_target_region", None)
+            record.setdefault("v2_canonical_physics_id", None)
+            record.setdefault("v2_mission_event_frame", None)
+            record.setdefault("v2_construction_certified", None)
+            record.setdefault("v2_mission_region_visible_all_frames", None)
+            record.setdefault("v2_preview_region_visible_all_q_frames", None)
+            record.setdefault("v2_opening_arena_context_visible", None)
             record["mission_parameters_json"] = json.dumps(
                 record.pop("mission_parameters"),
                 separators=(",", ":"),

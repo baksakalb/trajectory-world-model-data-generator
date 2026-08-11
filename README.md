@@ -11,16 +11,16 @@ The curriculum has two stages:
   missions are preserved. New generation uses 70% persistent semi-Markov play
   and 30% guided missions.
 - **Trajectory/Throw V2:** the same persistent semi-Markov policy with trajectory
-  preview and grenade throwing enabled. V2 missions were removed and have not
-  yet been rebuilt. Until that work is implemented, V2 plans contain only
-  semi-Markov episodes.
+  preview and grenade throwing enabled, plus 60 prescribed mission types whose
+  immutable launch/camera solutions are certified with the canonical simulator
+  before capture.
 
-The next V2 implementation will use 70% semi-Markov frames and 30% prescribed
-mission frames. The planned mission catalog contains 60 rare, visually useful
-interaction types. This is a design decision, not implemented behavior.
+V2 plans allocate exactly 70% of credited frames to semi-Markov play and 30% to
+prescribed missions. Each of the 60 mission types receives exactly 0.5% of the
+total frame budget.
 
 Production generation is not authorized until the current semi-Markov policy
-and the future V2 missions pass human visual review.
+and the implemented V2 missions pass human visual review.
 
 ## Canonical action schema
 
@@ -111,11 +111,12 @@ Existing V1 datasets and previously approved videos are unchanged.
 
 ## Trajectory/Throw V2
 
-The active V2 planner currently creates semi-Markov recipes only. It has no
-mission cells, mission success test, qualification pass, reserve recipes,
-replacement seeds, or post-generation behavioral rejection.
+The active V2 planner first emits one semi-Markov opening recipe and one recipe
+for every mission type. It then repeatedly schedules the type with the largest
+credited-frame deficit. The implementation has no candidate qualification,
+reserve recipes, replacement seeds, or post-generation behavioral rejection.
 
-The agreed future V2 mixture is:
+The implemented V2 mixture is:
 
 | Source | Types | Frame share |
 | --- | ---: | ---: |
@@ -141,9 +142,10 @@ from the opening through the required interaction and final frame. During Q
 holds, the useful trajectory preview and interaction region must be visible
 together. A mission may not open on an empty-sky or floor-only view.
 
-The V2 minimum feasible frame budget will be calculated from the finalized
-mission durations and family shares. No historical feasibility floor will be
-copied.
+The V2 minimum feasible frame budget is calculated from the frozen mission
+durations, mandatory semi-Markov opening, and exact family shares. At the
+default 150-second/20 Hz settings it is 32,200 frames. It is recomputed if those
+settings change; no historical feasibility floor is copied.
 
 The complete agreed implementation contract is in `V2_MISSION_DESIGN.md`.
 
@@ -164,7 +166,7 @@ targets.
 
 ## Planning and validation
 
-Create and verify the current semi-Markov-only V2 plan:
+Create and verify a combined V2 plan:
 
 ```powershell
 python Scripts/v2_dataset_controller.py plan Artifacts/V2Plan `
@@ -173,6 +175,19 @@ python Scripts/v2_dataset_controller.py plan Artifacts/V2Plan `
 
 python Scripts/v2_dataset_controller.py verify-plan Artifacts/V2Plan
 ```
+
+Prepare the immutable 180-recipe human-review plan without running Unreal or
+creating videos:
+
+```powershell
+python Scripts/v2_dataset_controller.py review-plan Artifacts/V2ReviewPlan `
+  --observation-rate 20 --workers 4
+```
+
+After review generation is explicitly authorized, `Scripts/build_v2_review_set.py`
+consumes that plan, validates the captures, and renders exactly three 384x384
+videos per mission type. Creating the review plan itself generates no dataset
+and no videos.
 
 Run assignments with `Scripts/dataset_worker.py`, inspect progress with the V1
 or V2 controller's `inventory` command, and validate/render review media with
@@ -190,11 +205,17 @@ distribution.
 - `Source/he_grenade_game/DataGenerator/V2ActionSemantics.*`: Q/E edge and
   cooldown semantics.
 - `Scripts/dataset_controller.py`: immutable Movement V1 planner.
-- `Scripts/v2_dataset_controller.py`: current semi-Markov-only V2 planner.
+- `Scripts/v2_mission_catalog.py`: immutable 60-type catalog and certified
+  deterministic solution regions.
+- `Scripts/v2_dataset_controller.py`: combined V2 planner, verifier, inventory,
+  and 180-recipe review-plan builder.
+- `Scripts/build_v2_review_set.py`: authorized review-capture validator and
+  renderer.
 - `Scripts/dataset_worker.py`: assignment execution and frame crediting.
 - `Scripts/finalize_production_dataset.py`: WebP/Parquet finalization.
 - `Scripts/review_dataset.py`: technical validation and MP4 rendering.
 
-Historical V2 mission code and its audit, calibration, reserve, and replacement
-systems were deleted. They must not be restored as the implementation of the new
-mission design.
+Historical V2 audit, calibration, reserve, and replacement systems remain
+deleted. The implemented mission design uses construction-time certification
+and treats runtime disagreement as a regression, never as a search for a more
+convenient seed.
