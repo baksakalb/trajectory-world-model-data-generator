@@ -689,127 +689,6 @@ def validate_final_agent_mission(
                 )
 
 
-def v2_realized_throw_success(throw: dict[str, Any]) -> bool:
-    """Independently derive one throw's physical outcome from recorded evidence."""
-    family = str(throw.get("intended_family", ""))
-    outcome = str(throw.get("intended_outcome", ""))
-    target = str(throw.get("intended_target", ""))
-    contacts = [str(value) for value in (throw.get("realized_contact_order") or [])]
-    target_index = contacts.index(target) if target in contacts else -1
-    floor_index = contacts.index("CurriculumFloor") if "CurriculumFloor" in contacts else -1
-    if family == "semi_markov":
-        return True
-    exit_direction = throw.get("arena_exit_direction")
-    if family == "out_of_bounds":
-        return bool(exit_direction) and exit_direction == throw.get("intended_exit_direction")
-    if exit_direction:
-        return False
-    if "visible_observation_count" in throw and int(
-        throw.get("visible_observation_count") or 0
-    ) < 1:
-        return False
-    if "visible_event_observation_count" in throw and int(
-        throw.get("visible_event_observation_count") or 0
-    ) < 5:
-        return False
-    movement_profile = str(throw.get("movement_before_next_throw") or "")
-    if movement_profile not in {"", "stationary", "ordinary_semi_markov"}:
-        if int(throw.get("prescribed_movement_steps") or 0) < 20:
-            return False
-        if float(throw.get("maximum_signed_displacement_cm") or 0.0) < 100.0:
-            return False
-    if family in {"trajectory_view", "temporal"}:
-        return bool(throw.get("preview_to_realized_flight_parity"))
-    if family == "solid_object":
-        return target_index == 0
-    if family == "wall_corner":
-        sequence = str(throw.get("intended_contact_sequence", ""))
-        if sequence == "adjacent_wall_bank":
-            return target_index == 0 and any(
-                item.startswith("CurriculumWall_") and item != target
-                for item in contacts
-            )
-        return target_index == 0
-    if family == "floor_observe":
-        return floor_index >= 0
-    if family == "ramp":
-        if outcome == "cross_over":
-            return bool(throw.get("geometric_crossing_pass"))
-        return target_index == 0
-    if family == "hoop":
-        pass_frame = throw.get("hoop_pass_frame")
-        if outcome == "rim_contact":
-            return target_index >= 0
-        return pass_frame is not None and target_index < 0
-    return False
-
-
-def validate_v2_human_action_dwell(
-    episode_id: str,
-    source: str,
-    action_masks: list[int],
-) -> None:
-    """Reject mission twitching while preserving semi-Markov edge coverage."""
-    if source in {"semi_markov", "random_play"} or not action_masks:
-        return
-
-    axes = {
-        "forward/backward": (1 << 2, 1 << 0, False),
-        "left/right movement": (1 << 1, 1 << 3, False),
-        "left/right camera": (1 << 6, 1 << 7, True),
-        "down/up camera": (1 << 5, 1 << 4, True),
-    }
-    for label, (negative_bit, positive_bit, is_camera) in axes.items():
-        states: list[int] = []
-        for mask in action_masks:
-            negative = bool(mask & negative_bit)
-            positive = bool(mask & positive_bit)
-            states.append(0 if negative == positive else (1 if positive else -1))
-
-        runs: list[tuple[int, int]] = []
-        for state in states:
-            if runs and runs[-1][0] == state:
-                prior_state, prior_length = runs[-1]
-                runs[-1] = (prior_state, prior_length + 1)
-            else:
-                runs.append((state, 1))
-
-        # Reject A -> tiny opposite pulse -> A, including at most two neutral
-        # frames around the pulse. A sustained A -> B reversal remains valid.
-        for index, (state, length) in enumerate(runs):
-            if state == 0 or length > 3:
-                continue
-            before = index - 1
-            after = index + 1
-            if before >= 0 and runs[before][0] == 0 and runs[before][1] <= 2:
-                before -= 1
-            if after < len(runs) and runs[after][0] == 0 and runs[after][1] <= 2:
-                after += 1
-            if before < 0 or after >= len(runs):
-                continue
-            before_state, before_length = runs[before]
-            after_state, after_length = runs[after]
-            if (
-                before_state == after_state == -state
-                and before_length >= 4
-                and after_length >= 4
-            ):
-                raise DatasetValidationError(
-                    f"{episode_id}: {label} contains an isolated {length}-frame "
-                    "opposite-direction pulse."
-                )
-
-        if is_camera:
-            short_runs = [
-                (state, length) for state, length in runs if state and length < 3
-            ]
-            if len(short_runs) >= 3:
-                raise DatasetValidationError(
-                    f"{episode_id}: {label} is fragmented into "
-                    f"{len(short_runs)} sub-three-frame gestures."
-                )
-
-
 def validate_v2_runtime_contract(
     dataset: dict[str, Any],
     episode_id: str,
@@ -817,481 +696,107 @@ def validate_v2_runtime_contract(
     transitions: list[dict[str, Any]],
     episode: dict[str, Any] | None = None,
 ) -> None:
-    """Validate schema-11 combined V2 action, overlay, and cooldown semantics."""
-    forbidden_fragments = (
-        "trajectory_mask",
-        "trajectory_points",
-        "trajectory_polyline",
-        "launch_velocity",
-        "grenade_mask",
-    )
-    for record in [dataset, *frames, *transitions]:
-        lowered_keys = {str(key).lower() for key in record}
-        for fragment in forbidden_fragments:
-            if any(fragment in key for key in lowered_keys):
-                raise DatasetValidationError(
-                    f"{episode_id}: forbidden engineered trajectory field {fragment}."
-                )
-
-    expected_cooldown = 2 * int(dataset.get("observation_rate_hz", 20))
-    previous_action_mask = 0
-    for transition in transitions:
-        source_index = int(transition["source_frame_index"])
-        source = frames[source_index]
-        target = frames[source_index + 1]
-        action_mask = int(transition["action_mask"])
-        q_held = bool(action_mask & (1 << 8))
-        e_held = bool(action_mask & (1 << 9))
-        q_was_held = bool(previous_action_mask & (1 << 8))
-        e_was_held = bool(previous_action_mask & (1 << 9))
-        e_edge = e_held and not e_was_held
-        q_rising = q_held and not q_was_held
-        q_falling = not q_held and q_was_held
-        movement_requested = bool(action_mask & 0x0F)
-
-        if bool(transition["q_rising_edge"]) != q_rising:
-            raise DatasetValidationError(f"{episode_id}: inconsistent Q rising edge.")
-        if bool(transition["q_falling_edge"]) != q_falling:
-            raise DatasetValidationError(f"{episode_id}: inconsistent Q falling edge.")
-        if bool(transition["e_request_edge"]) != e_edge:
-            raise DatasetValidationError(f"{episode_id}: inconsistent E request edge.")
-        if bool(transition["planar_movement_suppressed"]) != (
-            q_held and movement_requested
-        ):
-            raise DatasetValidationError(
-                f"{episode_id}: inconsistent Q-priority movement suppression."
-            )
-        if q_held and (
-            float(transition["forward_axis"]) != 0.0
-            or float(transition["right_axis"]) != 0.0
-        ):
-            raise DatasetValidationError(
-                f"{episode_id}: Q-held transition has effective planar movement."
-            )
-
-        cooldown_before = int(transition["cooldown_before_steps"])
-        cooldown_after = int(transition["cooldown_after_steps"])
-        source_q_visible = bool(source["trajectory_visible"])
-        if not e_held:
-            expected_reason = "none"
-        elif not e_edge:
-            expected_reason = "not_rising_edge"
-        elif not q_held:
-            expected_reason = "q_not_held"
-        elif not source_q_visible:
-            expected_reason = "q_not_previously_visible"
-        elif cooldown_before > 0:
-            expected_reason = "cooldown"
-        else:
-            expected_reason = "none"
-        if transition["e_rejection_reason"] != expected_reason:
-            raise DatasetValidationError(
-                f"{episode_id}: E rejection reason is inconsistent."
-            )
-
-        accepted = bool(transition["e_accepted"])
-        if accepted:
-            if not (e_edge and q_held and source_q_visible and cooldown_before == 0):
-                raise DatasetValidationError(
-                    f"{episode_id}: accepted throw violates the Q-before-E gate."
-                )
-            if transition.get("accepted_throw_grenade_id") is None:
-                raise DatasetValidationError(
-                    f"{episode_id}: accepted throw lacks a grenade ID."
-                )
-            if cooldown_after != expected_cooldown:
-                raise DatasetValidationError(
-                    f"{episode_id}: accepted throw did not start exact cooldown."
-                )
-        else:
-            if transition.get("accepted_throw_grenade_id") is not None:
-                raise DatasetValidationError(
-                    f"{episode_id}: rejected/non-request throw has a grenade ID."
-                )
-            if cooldown_after != cooldown_before:
-                raise DatasetValidationError(
-                    f"{episode_id}: rejected request changed cooldown."
-                )
-        if int(target["cooldown_remaining_steps"]) != cooldown_after:
-            raise DatasetValidationError(
-                f"{episode_id}: target frame cooldown disagrees with transition."
-            )
-
-        previous_action_mask = action_mask
-
-    for frame in frames:
-        q_visible = bool(frame["q_visibility"])
-        if bool(frame["trajectory_visible"]) != q_visible:
-            raise DatasetValidationError(
-                f"{episode_id}: trajectory visibility disagrees with Q."
-            )
-        if bool(frame["aim_lock_active"]) != q_visible:
-            raise DatasetValidationError(
-                f"{episode_id}: aim-lock state disagrees with Q."
-            )
-        grenades = frame.get("grenades") or []
-        flying = sum(not grenade.get("resting", False) for grenade in grenades)
-        resting = sum(bool(grenade.get("resting", False)) for grenade in grenades)
-        if int(frame["flying_grenade_count"]) != flying:
-            raise DatasetValidationError(f"{episode_id}: flying count mismatch.")
-        if int(frame["resting_grenade_count"]) != resting:
-            raise DatasetValidationError(f"{episode_id}: resting count mismatch.")
-        if int(frame["total_grenade_count"]) != len(grenades):
-            raise DatasetValidationError(f"{episode_id}: total grenade count mismatch.")
-        expected_crosshair = (
-            "Cooldown" if int(frame["cooldown_remaining_steps"]) > 0 else "Ready"
-        )
-        if frame["crosshair_state"] != expected_crosshair:
-            raise DatasetValidationError(
-                f"{episode_id}: crosshair does not match cooldown state."
-            )
-
-    collection_policy = str(dataset.get("collection_policy", ""))
-    if collection_policy == "training_v2_immutable_local_recipes_v1":
-        if episode is None:
-            raise DatasetValidationError(
-                f"{episode_id}: production V2 validation lacks an episode record."
-            )
-        required = (
-            "v2_contract_version",
-            "v2_source",
-            "v2_cell_id",
-            "v2_replay_identity",
-            "v2_aim_acquisition_profile",
-            "v2_q_retention_profile",
-            "v2_post_throw_movement_profile",
-            "v2_post_throw_camera_profile",
-        )
-        missing = [field for field in required if not episode.get(field)]
-        if missing:
-            raise DatasetValidationError(
-                f"{episode_id}: production V2 metadata is missing {', '.join(missing)}."
-            )
-        if str(episode.get("plan_version", "")) == "trajectory-throw-v2-local-3" and not str(
-            episode.get("v2_contract_version", "")
-        ).startswith("v2-data-generation-spec-3"):
-            raise DatasetValidationError(
-                f"{episode_id}: plan/runtime V2 contract versions do not match."
-            )
-        expected_throw_count = int(episode.get("v2_expected_throw_count", 0))
-        accepted_throw_count = int(episode.get("v2_accepted_throw_count", 0))
-        source = str(episode.get("v2_source", ""))
-        validate_v2_human_action_dwell(
-            episode_id,
-            source,
-            [int(item["action_mask"]) for item in transitions],
-        )
-        free_play = source in {"random_play", "semi_markov"}
-        throw_rows = episode.get("v2_throws") or []
-        accepted_transitions = [item for item in transitions if item["e_accepted"]]
-        credited_episode = bool(episode.get("accepted_for_balancing"))
-        if not free_play and credited_episode and accepted_throw_count != expected_throw_count:
-            raise DatasetValidationError(
-                f"{episode_id}: credited expected/accepted throw counts differ."
-            )
-        if not free_play and accepted_throw_count > expected_throw_count:
-            raise DatasetValidationError(
-                f"{episode_id}: accepted more throws than the recipe expected."
-            )
-        if len(throw_rows) != accepted_throw_count or len(accepted_transitions) != accepted_throw_count:
-            raise DatasetValidationError(
-                f"{episode_id}: per-throw rows do not match accepted E edges."
-            )
-        cell_id = str(episode.get("v2_cell_id", ""))
-        e_requests = [item for item in transitions if item.get("e_request_edge")]
-        rejection_reasons = [str(item.get("e_rejection_reason", "")) for item in e_requests]
-        if expected_throw_count == 0 and not free_play:
-            if cell_id.startswith("R01-"):
-                if e_requests or not any(int(item["action_mask"]) & 0x0F for item in transitions):
-                    raise DatasetValidationError(
-                        f"{episode_id}: R01 did not realize movement-only behavior."
-                    )
-            elif cell_id.startswith(("R02-", "R03-", "R04-", "R05-")):
-                if e_requests or not any(item.get("q_rising_edge") for item in transitions) or not any(item.get("q_falling_edge") for item in transitions):
-                    raise DatasetValidationError(
-                        f"{episode_id}: cancel family did not realize Q acquire/cancel."
-                    )
-            elif cell_id.startswith("R09-") and "q_not_held" not in rejection_reasons:
-                raise DatasetValidationError(
-                    f"{episode_id}: R09 lacks its q_not_held rejection."
-                )
-            elif cell_id.startswith("R10-") and "q_not_previously_visible" not in rejection_reasons:
-                raise DatasetValidationError(
-                    f"{episode_id}: R10 lacks its first-frame Q+E rejection."
-                )
-        if (cell_id.startswith("R11-") or episode.get("v2_sequence_template_id") == "SQ17"):
-            if "cooldown" not in rejection_reasons:
-                raise DatasetValidationError(
-                    f"{episode_id}: cooldown-recovery recipe lacks a cooldown rejection."
-                )
-        planned_credit = int(episode.get("planned_credited_frames", 0))
-        if planned_credit <= 0:
-            raise DatasetValidationError(
-                f"{episode_id}: invalid planned credited-frame cap."
-            )
-        if bool(episode.get("accepted_for_balancing")) != bool(episode.get("mission_success")):
-            raise DatasetValidationError(
-                f"{episode_id}: V2 semantic success and credit decision differ."
-            )
-
-        # Contract 3 rejects the visually dead tails which the earlier semantic
-        # checks allowed: zero input after a short event, one fixed action into a
-        # wall, or a mission ending without its bounded active continuation.
-        if str(episode.get("v2_contract_version", "")).startswith(
-            ("v2-data-generation-spec-3", "v2-canonical-physics-1")
-        ):
-            primary_event_frame = episode.get("v2_primary_event_complete_frame")
-            required_continuation = episode.get("v2_required_continuation_steps")
-            credited_episode = bool(episode.get("accepted_for_balancing"))
-            if not free_play and credited_episode and primary_event_frame is None:
-                raise DatasetValidationError(
-                    f"{episode_id}: bounded recipe lacks its primary-event frame."
-                )
-            if required_continuation is None or int(required_continuation) < 0:
-                raise DatasetValidationError(
-                    f"{episode_id}: invalid required continuation metadata."
-                )
-            observation_rate = int(dataset.get("observation_rate_hz", 20))
-            inactive_zero_run = 0
-            maximum_inactive_zero_run = 0
-            fixed_mask_run = 0
-            maximum_fixed_mask_run = 0
-            previous_mask: int | None = None
-            contact_run = 0
-            maximum_contact_run = 0
-            for transition in transitions:
-                source_index = int(transition["source_frame_index"])
-                source = frames[source_index]
-                target = frames[source_index + 1]
-                mask = int(transition["action_mask"])
-                world_inactive = (
-                    int(source.get("flying_grenade_count") or 0) == 0
-                    and int(source.get("cooldown_remaining_steps") or 0) == 0
-                )
-                inactive_zero_run = (
-                    inactive_zero_run + 1 if mask == 0 and world_inactive else 0
-                )
-                maximum_inactive_zero_run = max(
-                    maximum_inactive_zero_run, inactive_zero_run
-                )
-                fixed_mask_run = (
-                    fixed_mask_run + 1
-                    if world_inactive and mask == previous_mask
-                    else 1
-                )
-                maximum_fixed_mask_run = max(maximum_fixed_mask_run, fixed_mask_run)
-                previous_mask = mask
-                source_position = source.get("position") or {}
-                target_position = target.get("position") or {}
-                planar_step_cm = (
-                    (float(target_position.get("x", 0.0))
-                     - float(source_position.get("x", 0.0))) ** 2
-                    + (float(target_position.get("y", 0.0))
-                       - float(source_position.get("y", 0.0))) ** 2
-                ) ** 0.5
-                # Contact while visibly sliding along a wall is not a dead
-                # tail. Only count contact frames in which locomotion has
-                # actually stalled.
-                stalled_contact = bool(source.get("contact")) and planar_step_cm < 5.0
-                contact_run = contact_run + 1 if stalled_contact else 0
-                maximum_contact_run = max(maximum_contact_run, contact_run)
-
-            if not free_play and maximum_inactive_zero_run > 5 * observation_rate:
-                raise DatasetValidationError(
-                    f"{episode_id}: inactive zero-input run exceeds five seconds."
-                )
-            if not free_play and maximum_fixed_mask_run > 5 * observation_rate:
-                raise DatasetValidationError(
-                    f"{episode_id}: unchanged inactive action run exceeds five seconds."
-                )
-            if not free_play and maximum_contact_run > observation_rate:
-                raise DatasetValidationError(
-                    f"{episode_id}: stalled contact exceeds one second."
-                )
-
-            source = str(episode.get("v2_source", ""))
-            if source in {"random_play", "semi_markov"}:
-                if source == "semi_markov":
-                    if len(transitions) < 120 * observation_rate:
-                        raise DatasetValidationError(
-                            f"{episode_id}: persistent semi-Markov episode is shorter "
-                            "than two minutes."
-                        )
-                    if len(transitions) > 180 * observation_rate + 1:
-                        raise DatasetValidationError(
-                            f"{episode_id}: persistent semi-Markov episode exceeds "
-                            "three minutes."
-                        )
-            elif throw_rows and credited_episode:
-                after_event = len(frames) - 1 - int(primary_event_frame)
-                if after_event < int(required_continuation):
-                    raise DatasetValidationError(
-                        f"{episode_id}: mission lacks its bounded active continuation."
-                    )
-                if after_event > int(required_continuation) + 1:
-                    raise DatasetValidationError(
-                        f"{episode_id}: mission continuation exceeded its bound."
-                    )
-                continuation = [
-                    item
-                    for item in transitions
-                    if int(item["source_frame_index"]) >= int(primary_event_frame)
-                ]
-                continuation_masks = {
-                    int(item["action_mask"]) for item in continuation
-                }
-                if len(continuation_masks) < 2 or not any(
-                    int(item["action_mask"]) & 0x1FF for item in continuation
-                ):
-                    raise DatasetValidationError(
-                        f"{episode_id}: post-mission continuation lacks active variation."
-                    )
-
-        for index, (throw, transition) in enumerate(zip(throw_rows, accepted_transitions)):
-            throw_frame = int(throw["authoritative_pre_throw_frame"])
-            if throw_frame != int(transition["source_frame_index"]):
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} pre-throw frame is inconsistent."
-                )
-            if int(throw["accepted_grenade_id"]) != int(transition["accepted_throw_grenade_id"]):
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} grenade identity is inconsistent."
-                )
-            if int(throw["preview_start_frame"]) >= throw_frame:
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} lacks a preceding preview."
-                )
-            rest_frame = throw.get("rest_frame")
-            if rest_frame is not None and int(rest_frame) > len(frames) - 1:
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} rest frame lies beyond the episode."
-                )
-            if not bool(throw.get("preview_to_realized_flight_parity")):
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} failed preview/flight parity."
-                )
-            realized_throw = throw
-            if episode.get("v2_sequence_template_id") and index + 1 < len(throw_rows):
-                # Connected play moves on to the next action after an earlier
-                # throw. Its physical outcome still has to occur, but only the
-                # final throw owns the episode-ending event-camera dwell.
-                realized_throw = dict(throw)
-                realized_throw.pop("visible_event_observation_count", None)
-            realized_success = v2_realized_throw_success(realized_throw)
-            if bool(throw.get("semantic_success")) != realized_success:
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} semantic flag disagrees with realized physics."
-                )
-            if bool(throw.get("credited")) != bool(episode.get("accepted_for_balancing")):
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} credit flag disagrees with its episode."
-                )
-            if bool(episode.get("accepted_for_balancing")) and not realized_success:
-                raise DatasetValidationError(
-                    f"{episode_id}: throw {index} was credited without realizing its outcome."
-                )
-            if bool(throw.get("trajectory_difference_required")) and index > 0:
-                if not bool(throw.get("trajectory_difference_pass")):
-                    raise DatasetValidationError(
-                        f"{episode_id}: re-aimed throw {index} collapsed to the prior preview."
-                    )
-            if index > 0:
-                prior_id = int(throw_rows[index - 1]["accepted_grenade_id"])
-                source_grenades = frames[throw_frame].get("grenades") or []
-                if prior_id not in {int(item["id"]) for item in source_grenades}:
-                    raise DatasetValidationError(
-                        f"{episode_id}: older grenade disappeared before throw {index}."
-                    )
-        if episode.get("v2_sequence_template_id"):
-            indices = [int(item["sequence_step_index"]) for item in throw_rows]
-            if indices != list(range(len(throw_rows))):
-                raise DatasetValidationError(
-                    f"{episode_id}: sequence step indices are not contiguous."
-                )
+    """Validate V2 semi-Markov action and physical integrity only."""
+    if not str(dataset.get("schema_version", "")).startswith("trajectory_throw_v2"):
         return
-    if collection_policy.startswith("diagnostic_v2_"):
-        if episode is None:
-            raise DatasetValidationError(
-                f"{episode_id}: diagnostic V2 validation lacks an episode record."
-            )
-        if bool(episode.get("accepted_for_balancing")):
-            raise DatasetValidationError(
-                f"{episode_id}: diagnostic V2 episode claimed balancing credit."
-            )
+    if len(frames) != len(transitions) + 1:
+        raise DatasetValidationError(
+            f"{episode_id}: V2 frames/transitions are not one-step aligned."
+        )
 
-    if collection_policy != "diagnostic_v2_trajectory_hold_mission":
-        return
+    previous_mask = 0
+    accepted_grenade_ids: set[int] = set()
+    for index, transition in enumerate(transitions):
+        source = frames[index]
+        target = frames[index + 1]
+        mask = int(transition["action_mask"])
+        q = bool(mask & (1 << 8))
+        e = bool(mask & (1 << 9))
+        previous_q = bool(previous_mask & (1 << 8))
+        previous_e = bool(previous_mask & (1 << 9))
+        q_rising = q and not previous_q
+        q_falling = previous_q and not q
+        e_request_edge = e and not previous_e
+        q_previously_visible = bool(source.get("q_visibility"))
+        cooldown_before = int(transition.get("cooldown_before_steps") or 0)
+        eligible = e_request_edge and q and q_previously_visible and cooldown_before <= 0
+
+        if bool(transition.get("q_rising_edge")) != q_rising:
+            raise DatasetValidationError(f"{episode_id}: incorrect Q rising edge at {index}.")
+        if bool(transition.get("q_falling_edge")) != q_falling:
+            raise DatasetValidationError(f"{episode_id}: incorrect Q falling edge at {index}.")
+        if bool(transition.get("e_request_edge")) != e_request_edge:
+            raise DatasetValidationError(f"{episode_id}: incorrect E request edge at {index}.")
+        if bool(transition.get("e_accepted")) != eligible:
+            raise DatasetValidationError(f"{episode_id}: incorrect E acceptance at {index}.")
+        if bool(target.get("q_visibility")) != q:
+            raise DatasetValidationError(f"{episode_id}: Q visibility disagrees at {index}.")
+        if bool(target.get("aim_lock_active")) != q:
+            raise DatasetValidationError(f"{episode_id}: aim-lock state disagrees at {index}.")
+        if bool(target.get("trajectory_visible")) != q:
+            raise DatasetValidationError(f"{episode_id}: trajectory visibility disagrees at {index}.")
+        if "trajectory_points" in target:
+            raise DatasetValidationError(
+                f"{episode_id}: privileged trajectory geometry leaked into stored data."
+            )
+        if q and (
+            abs(float(transition.get("forward_axis") or 0.0)) > 1e-6
+            or abs(float(transition.get("right_axis") or 0.0)) > 1e-6
+        ):
+            raise DatasetValidationError(
+                f"{episode_id}: Q-held transition retained planar movement at {index}."
+            )
+        if eligible:
+            grenade_id = transition.get("accepted_throw_grenade_id")
+            if grenade_id is None or int(grenade_id) in accepted_grenade_ids:
+                raise DatasetValidationError(
+                    f"{episode_id}: accepted throw lacks a unique grenade ID at {index}."
+                )
+            accepted_grenade_ids.add(int(grenade_id))
+        elif transition.get("accepted_throw_grenade_id") is not None:
+            raise DatasetValidationError(
+                f"{episode_id}: rejected E request recorded a grenade ID at {index}."
+            )
+        previous_mask = mask
+
     if episode is None:
-        raise DatasetValidationError(
-            f"{episode_id}: trajectory-hold validation lacks an episode record."
-        )
-    if episode.get("v2_source") != "random_play" or episode.get("v2_cell_id") != (
-        "R08_throw_hold_cooldown_diagnostic"
-    ):
-        raise DatasetValidationError(
-            f"{episode_id}: trajectory-hold V2 identity is inconsistent."
-        )
-    if not frames or bool(frames[0]["q_visibility"]):
-        raise DatasetValidationError(
-            f"{episode_id}: trajectory-hold mission needs one initial Q-off observation."
-        )
-    if any(not bool(frame["q_visibility"]) for frame in frames[1:]):
-        raise DatasetValidationError(
-            f"{episode_id}: Q was released during the trajectory-hold mission."
-        )
+        return
+    if episode.get("v2_source") != "semi_markov":
+        raise DatasetValidationError(f"{episode_id}: V2 source must be semi_markov.")
+    if episode.get("collection_mission") != "semi_markov":
+        raise DatasetValidationError(f"{episode_id}: V2 collection mission must be semi_markov.")
+    if bool(episode.get("mission_required")) or bool(episode.get("mission_success")):
+        raise DatasetValidationError(f"{episode_id}: V2 must not carry mission semantics.")
+    if episode.get("termination_reason") != "completed":
+        raise DatasetValidationError(f"{episode_id}: V2 free play did not complete normally.")
+    if not bool(episode.get("accepted_for_balancing")):
+        raise DatasetValidationError(f"{episode_id}: technically valid V2 free play was not credited.")
+    if episode.get("v2_contract_version") != "shared-persistent-semi-markov-1":
+        raise DatasetValidationError(f"{episode_id}: wrong V2 semi-Markov contract version.")
+    if int(episode.get("v2_accepted_throw_count") or 0) != len(accepted_grenade_ids):
+        raise DatasetValidationError(f"{episode_id}: accepted throw count disagrees with transitions.")
 
-    observation_rate = int(dataset.get("observation_rate_hz", 20))
-    expected_throw_frame = max(2, (observation_rate + 1) // 2)
-    accepted = [transition for transition in transitions if transition["e_accepted"]]
-    if len(accepted) != 1 or int(accepted[0]["source_frame_index"]) != expected_throw_frame:
-        raise DatasetValidationError(
-            f"{episode_id}: trajectory-hold mission must throw exactly once after "
-            "a half-second preview."
-        )
-    for transition in transitions:
-        source_index = int(transition["source_frame_index"])
-        expected_mask = (1 << 8) | ((1 << 9) if source_index == expected_throw_frame else 0)
-        if int(transition["action_mask"]) != expected_mask:
+    policy = str(dataset.get("collection_policy", ""))
+    if policy == "training_v2_persistent_semi_markov_only_v1":
+        observation_rate = int(dataset.get("observation_rate_hz") or 0)
+        if observation_rate <= 0:
+            raise DatasetValidationError(f"{episode_id}: invalid observation rate.")
+        transition_seconds = len(transitions) / observation_rate
+        if not 120.0 <= transition_seconds <= 180.0:
             raise DatasetValidationError(
-                f"{episode_id}: trajectory-hold action changed at transition "
-                f"{source_index}."
+                f"{episode_id}: V2 semi-Markov duration is outside two to three minutes."
             )
 
-    stable_position = frames[1]["position"]
-    stable_camera = frames[1]["camera"]
-    for frame in frames[1:]:
-        position = frame["position"]
-        camera = frame["camera"]
-        if (
-            abs(float(position["x"]) - float(stable_position["x"])) > 1e-3
-            or abs(float(position["y"]) - float(stable_position["y"])) > 1e-3
-            or abs(float(camera["yaw"]) - float(stable_camera["yaw"])) > 1e-3
-            or abs(float(camera["pitch"]) - float(stable_camera["pitch"])) > 1e-3
-        ):
-            raise DatasetValidationError(
-                f"{episode_id}: trajectory-hold mission moved the player or camera."
-            )
-
-    throw_target_index = expected_throw_frame + 1
-    post_throw_frames = frames[throw_target_index:]
-    if not post_throw_frames or any(
-        not bool(frame["trajectory_visible"]) for frame in post_throw_frames
-    ):
+    throw_rows = episode.get("v2_throws") or []
+    throw_ids = {int(item["grenade_id"]) for item in throw_rows}
+    if throw_ids != accepted_grenade_ids or len(throw_rows) != len(throw_ids):
         raise DatasetValidationError(
-            f"{episode_id}: trajectory was not continuously visible after the throw."
+            f"{episode_id}: physical throw rows disagree with accepted grenade IDs."
         )
-    positive_cooldown_frames = sum(
-        int(frame["cooldown_remaining_steps"]) > 0 for frame in post_throw_frames
-    )
-    if positive_cooldown_frames != expected_cooldown:
+    if any(not bool(item.get("preview_to_realized_flight_parity")) for item in throw_rows):
         raise DatasetValidationError(
-            f"{episode_id}: trajectory-hold mission did not show the complete cooldown."
+            f"{episode_id}: preview and realized grenade physics diverged."
         )
-    if int(frames[-1]["resting_grenade_count"]) != 1:
-        raise DatasetValidationError(
-            f"{episode_id}: trajectory-hold mission ended before its grenade rested."
-        )
-
 
 def validate_run_distributions(
     dataset: dict[str, Any],
@@ -1748,8 +1253,10 @@ def validate_dataset(
                     "-preflight-9",
                     "-preflight-10",
                     "-preflight-11",
+                    "-preflight-12",
                     "-production-1",
                     "-production-11",
+                    "-production-12",
                 )
             )
             if (
@@ -1770,8 +1277,10 @@ def validate_dataset(
                         "-preflight-9",
                         "-preflight-10",
                         "-preflight-11",
+                        "-preflight-12",
                         "-production-1",
                         "-production-11",
+                        "-production-12",
                     )
                 )
             ):
@@ -1784,22 +1293,28 @@ def validate_dataset(
                             "-preflight-9",
                             "-preflight-10",
                             "-preflight-11",
+                            "-preflight-12",
                             "-production-1",
                             "-production-11",
+                            "-production-12",
                         )
                     ),
                     strict_v10=schema_version.endswith(
                         (
                             "-preflight-10",
                             "-preflight-11",
+                            "-preflight-12",
                             "-production-1",
                             "-production-11",
+                            "-production-12",
                         )
                     ),
                     observation_rate_hz=int(dataset.get("observation_rate_hz", 20)),
                 )
 
-            if schema_version.endswith(("-preflight-11", "-production-11")):
+            if schema_version.endswith(
+                ("-preflight-11", "-production-11", "-preflight-12", "-production-12")
+            ):
                 validate_v2_runtime_contract(
                     dataset,
                     episode_id,
@@ -1830,8 +1345,10 @@ def validate_dataset(
                 "-preflight-9",
                 "-preflight-10",
                 "-preflight-11",
+                "-preflight-12",
                 "-production-1",
                 "-production-11",
+                "-production-12",
             )
         ):
             validate_run_distributions(dataset, episodes)

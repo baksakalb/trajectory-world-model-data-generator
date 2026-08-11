@@ -181,73 +181,24 @@ private:
 		Count
 	};
 
-	struct FV2SequenceStep
-	{
-		int32 StepIndex = 0;
-		FString Source;
-		FString Family;
-		FString CellId;
-		FString AimAcquisitionProfile;
-		FString QRetentionProfile;
-		FString PostThrowMovementProfile;
-		FString PostThrowCameraProfile;
-		FString Target;
-		FString TargetRegion;
-		FString Outcome;
-		FString ApproachSector;
-		FString DistanceBand;
-		FString ArcBand;
-		FString Wall;
-		FString HeightBand;
-		FString ContactSequence;
-		FString RampRegion;
-		FString Direction;
-		FString PathProfile;
-		FString BehaviorFamily;
-		FString HoldBand;
-	};
-
 	struct FGeneratedGrenade
 	{
 		int32 Id = 0;
 		FGrenadeSimState State;
 		TWeakObjectPtr<AStaticMeshActor> VisualActor;
-		int32 SequenceStepIndex = 0;
 		int32 PreviewStartFrame = 0;
 		int32 ThrowSourceFrame = INDEX_NONE;
 		int32 FirstContactFrame = INDEX_NONE;
 		int32 RestFrame = INDEX_NONE;
 		int32 PostRestTailSteps = 0;
-		int32 HoopPassFrame = INDEX_NONE;
 		int32 ArenaExitFrame = INDEX_NONE;
 		int32 PredictedFirstContactStep = INDEX_NONE;
-		int32 PredictedHoopPassStep = INDEX_NONE;
 		int32 PredictedRestStep = INDEX_NONE;
 		int32 VisibleObservationCount = 0;
-		int32 VisibleEventObservationCount = 0;
-		int32 PrescribedMovementSteps = 0;
 		int32 PredictedBounceCount = 0;
-		float HoopCrossingY = 0.0f;
-		float HoopCrossingZ = 0.0f;
-		float FirstContactTraveledDistanceCm = 0.0f;
-		float MaximumSignedDisplacementCm = 0.0f;
-		float FirstContactDeflectionDegrees = 0.0f;
-		float FirstContactSpeedRetention = 0.0f;
 		FRotator ThrowCamera = FRotator::ZeroRotator;
-		FVector ThrowPlayerPosition = FVector::ZeroVector;
 		FVector PredictedRestPosition = FVector::ZeroVector;
 		FGrenadeSimConfig SimConfig;
-		FString BaseCellId;
-		FString IntendedTarget;
-		FString IntendedOutcome;
-		FString IntendedFamily;
-		FString IntendedContactSequence;
-		FString IntendedDirection;
-		FString IntendedApproach;
-		FString AimAcquisitionProfile;
-		FString QRetentionProfile;
-		FString PostThrowMovementProfile;
-		FString PostThrowCameraProfile;
 		FString RealizedTarget;
 		FString ArenaExitDirection;
 		FString PredictedExitDirection;
@@ -269,29 +220,6 @@ private:
 		FString CellId;
 		FString ReplayIdentity;
 		FString Split;
-		FString SequenceTemplateId;
-		FString AimAcquisitionProfile;
-		FString QRetentionProfile;
-		FString PostThrowMovementProfile;
-		FString PostThrowCameraProfile;
-		FString Target;
-		FString TargetRegion;
-		FString Outcome;
-		FString ApproachSector;
-		FString DistanceBand;
-		FString ArcBand;
-		FString Wall;
-		FString HeightBand;
-		FString ContactSequence;
-		FString RampRegion;
-		FString Direction;
-		FString PathProfile;
-		FString BehaviorFamily;
-		FString HoldBand;
-		int32 SequenceGrenadeCount = 0;
-		bool bRequiresReaimDifference = false;
-		float MinimumCameraDeltaDegrees = 0.0f;
-		TArray<FV2SequenceStep> SequenceSteps;
 	};
 
 	bool ParseConfiguration();
@@ -342,38 +270,18 @@ private:
 		int32 SuccessObservationIndex);
 	uint16 SelectPostSuccessAction() const;
 	uint16 SelectTrajectoryShowcaseAction() const;
-	uint16 SelectV2RuntimeSmokeAction() const;
-	uint16 SelectV2TrajectoryHoldMissionAction() const;
-	uint16 SelectV2ProductionAction();
-	uint16 SelectV2SemiMarkovAction(bool bAllowThrows);
-	uint16 SelectV2PersistentBaseAction();
-	uint16 SelectV2PersistentMovementBits();
-	uint16 SelectV2PersistentCameraBits();
-	uint16 ApplyV2PostThrowAttention(uint16 ActionMask);
-	int32 SelectV2PersistentHoldSteps();
-	bool ConfigureV2RecipeSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch);
-	void ConfigureV2SequenceStepAim(int32 StepIndex);
-	bool CertifyV2Aim(
-		const FVector& PlayerLocation,
-		const FVector& DesiredTarget,
-		const FString& Family,
-		const FString& Target,
-		const FString& Outcome,
-		const FString& ContactSequence,
-		const FString& Direction,
-		const FString& Approach,
-		bool bHighArc,
-		float& OutYaw,
-		float& OutPitch) const;
-	void UpdateV2RecipeProgress();
-	bool ValidateV2RecipeSemantics() const;
-	bool ValidateV2ThrowSemantics(const FGeneratedGrenade& Grenade) const;
+	uint16 SelectPersistentSemiMarkovAction(bool bAllowThrows);
+	uint16 SelectPersistentSemiMarkovBaseAction(bool bAllowGrenadeControls);
+	uint16 SelectPersistentSemiMarkovMovementBits();
+	uint16 SelectPersistentSemiMarkovCameraBits();
+	uint16 ApplySemiMarkovPostThrowAttention(uint16 ActionMask);
+	int32 SelectPersistentSemiMarkovHoldSteps();
 	FString BuildV2ThrowsJson() const;
 	uint16 SelectCoverageGuidedAction();
 	uint16 WorldDirectionToMovementBits(const FVector& DesiredWorldDirection) const;
 	uint16 CameraBitsToward(const FVector& WorldTarget, float* OutYawError = nullptr) const;
-	uint16 SelectStableV2CameraBitsToward(const FVector& WorldTarget);
-	void ResetStableV2CameraSteering();
+	uint16 SelectStableCameraBitsToward(const FVector& WorldTarget);
+	void ResetStableCameraSteering();
 	FVector GetLocomotionFacingDirection(const FVector& TravelDirection) const;
 	FVector SelectGuidedCameraTarget(
 		const FVector& ObjectiveTarget,
@@ -441,6 +349,7 @@ private:
 	class FCurriculumTarWriter* TarWriter = nullptr;
 
 	FRandomStream EpisodeRandom;
+	FRandomStream GrenadeActionRandom;
 	TArray<FGeneratedGrenade> Grenades;
 	FGrenadeSimConfig GrenadeSimConfig;
 	FRecordedState PreviousState;
@@ -466,32 +375,9 @@ private:
 	FString DatasetSplit;
 	FString CurrentRecipeId;
 	FString CurrentV2Source;
-	FString CurrentV2CellId;
 	FString CurrentV2ReplayIdentity;
-	FString CurrentV2SequenceTemplateId;
-	FString CurrentV2AimAcquisitionProfile;
-	FString CurrentV2QRetentionProfile;
-	FString CurrentV2PostThrowMovementProfile;
-	FString CurrentV2PostThrowCameraProfile;
-	FString CurrentV2Target;
-	FString CurrentV2TargetRegion;
-	FString CurrentV2Outcome;
-	FString CurrentV2ApproachSector;
-	FString CurrentV2DistanceBand;
-	FString CurrentV2ArcBand;
-	FString CurrentV2Wall;
-	FString CurrentV2HeightBand;
-	FString CurrentV2ContactSequence;
-	FString CurrentV2RampRegion;
-	FString CurrentV2Direction;
-	FString CurrentV2PathProfile;
-	FString CurrentV2BehaviorFamily;
-	FString CurrentV2HoldBand;
 	TArray<int32> RequestedEpisodeIndices;
 	TArray<FPrescribedRecipe> PrescribedRecipes;
-	TArray<FV2SequenceStep> CurrentV2SequenceSteps;
-	FVector CurrentV2SequenceAimTarget = FVector::ZeroVector;
-	bool bCurrentV2SequenceAimTargetValid = false;
 
 	int32 EpisodeCount = 2;
 	int32 EpisodeSeconds = 10;
@@ -529,17 +415,8 @@ private:
 	int32 CurrentRefinementLevel = 0;
 	int32 CurrentRepetitionIndex = 0;
 	int32 CurrentPlannedCreditedFrames = 0;
-	int32 CurrentV2ExpectedThrowCount = 0;
 	int32 CurrentV2AcceptedThrowCount = 0;
 	int32 CurrentV2PreviewStartFrame = 0;
-	int32 CurrentV2RestTailSteps = 0;
-	int32 CurrentV2RequiredRestTailSteps = 20;
-	int32 CurrentV2NominalTransitions = 0;
-	int32 CurrentV2MaximumTransitions = 0;
-	int32 CurrentV2ContinuationStartFrame = INDEX_NONE;
-	int32 CurrentV2RequiredContinuationSteps = 0;
-	int32 CurrentV2SequenceGrenadeCount = 0;
-	int32 CurrentV2LastThrowFrame = INDEX_NONE;
 	int32 CurrentV2ERequestCount = 0;
 	int32 CurrentV2QRisingCount = 0;
 	int32 CurrentV2QFallingCount = 0;
@@ -623,8 +500,8 @@ private:
 	int64 OverallHoopScenarioObservationFrames[30] = {};
 	int64 OverallGuidedCameraStyleObservationFrames[4] = {};
 	int64 OverallPitchBandObservationFrames[4] = {};
-	int32 CurrentV2PositionBinFrames[9] = {};
-	int32 CurrentV2ViewBinFrames[8] = {};
+	int32 PersistentPositionBinFrames[9] = {};
+	int32 PersistentViewBinFrames[8] = {};
 	TArray<uint16> ActionScriptMasks;
 	TArray<int32> ActionScriptHoldSteps;
 	TArray<FVector> CoverageWaypoints;
@@ -695,14 +572,7 @@ private:
 	bool bExitOnComplete = true;
 	bool bTrajectoryShowcase = false;
 	bool bMissionReviewSuite = false;
-	bool bV2RuntimeSmoke = false;
-	bool bV2TrajectoryHoldMission = false;
-	bool bV2ProductionRecipe = false;
-	bool bV2RequiresReaimDifference = false;
-	bool bV2SemanticSuccess = false;
-	bool bV2SemanticFailure = false;
-	bool bV2PrimaryEventComplete = false;
-	float CurrentV2MinimumCameraDeltaDegrees = 0.0f;
+	bool bV2SemiMarkovRecipe = false;
 	bool bCoverageGuided = true;
 	bool bPrescribedRecipes = false;
 	V2ActionSemantics::EThrowRejectionReason CurrentERejectionReason =

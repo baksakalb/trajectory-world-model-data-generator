@@ -171,12 +171,12 @@ def build_validated_result(
         produced_frames += observation_count
         mission = recipe["mission"]
         is_v2 = str(assignment.get("plan_version", "")).startswith("trajectory-throw-v2")
-        semantic_success = (
-            bool(row.get("accepted_for_balancing"))
-            if is_v2
-            else mission == "semi_markov" or bool(row["mission_success"])
-        )
-        if semantic_success:
+        # V2 contains persistent semi-Markov play only. It has no mission
+        # semantics, semantic rejection, reserve recipes, or replacement path.
+        if is_v2 and mission != "semi_markov":
+            raise ValueError(f"V2 assignment contains forbidden mission {mission!r}")
+        creditable = mission == "semi_markov" or bool(row["mission_success"])
+        if creditable:
             successful.append(recipe_id)
             credited_frame_cap = int(recipe.get("planned_credited_frames", observation_count))
             credited_frames = min(observation_count, credited_frame_cap)
@@ -186,7 +186,6 @@ def build_validated_result(
                 "mission": mission,
                 "scenario_index": int(recipe["scenario_index"]),
                 "cell_id": recipe.get("cell_id"),
-                "sequence_template_id": recipe.get("sequence_template_id"),
                 "recipe_id": recipe_id,
                 "credited_observation_frames": credited_frames,
                 "produced_observation_frames": observation_count,
