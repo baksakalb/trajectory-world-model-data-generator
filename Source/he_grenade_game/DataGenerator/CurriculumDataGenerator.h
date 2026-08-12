@@ -253,10 +253,15 @@ private:
 	bool OpenOutput();
 	bool ResolvePlayer();
 	bool BeginEpisode();
+	void RunV1PlanCertification();
+	void CompleteV1CertificationRecipe(bool bCertified, const FString& ErrorMessage);
+	void FinishV1PlanCertification();
 	void RunV2PlanCertification();
 	void EndEpisode();
 	void FinishRun(bool bSuccess, const FString& ErrorMessage = FString());
 	FTransform GetObservationCameraTransform() const;
+	bool ReadObservedState(FRecordedState& OutState);
+	bool ObserveV1CertificationState(int32 ObservationIndex, FRecordedState& OutState);
 	bool CaptureObservation(int32 ObservationIndex, FRecordedState& OutState);
 	void AppendTransition(
 		int32 SourceFrameIndex,
@@ -642,6 +647,10 @@ private:
 	// QA-only escape hatch for rendering a rejected immutable recipe. Normal
 	// collection commands never set this and still fail closed.
 	bool bAllowUncertifiedV2Diagnostic = false;
+	bool bV1PlanCertificationOnly = false;
+	int32 V1CertificationCertifiedCount = 0;
+	int32 V1CertificationFailedCount = 0;
+	TArray<TSharedPtr<FJsonValue>> V1CertificationResults;
 	bool bV2PlanCertificationOnly = false;
 	int32 V2CertificationCertifiedCount = 0;
 	int32 V2CertificationFailedCount = 0;

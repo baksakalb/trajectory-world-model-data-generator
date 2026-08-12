@@ -51,8 +51,10 @@ production still requires the prescribed human visual review:
 
 The implementation deliberately contains no qualification search, behavioral
 acceptance gate, alternate production seed, reserve recipe, semantic retry, or
-replacement path. A machine-interrupted recipe may be replayed unchanged; a
-certified mission that fails its invariant is a regression and stops generation.
+replacement path. A realized certified-mission disagreement is preserved as an
+uncredited failed episode and generation continues through the immutable plan;
+the final inventory reports the shortfall and exact failed recipes. A technical
+failure such as a crash, corrupt output, or validation failure stops the worker.
 
 The no-capture verifier certifies the complete immutable production plan before
 recording. The current one-million-frame plan certified all 2,468 recipes
@@ -249,6 +251,25 @@ Recording is forbidden unless this command exits successfully with
 `complete: true` and zero rejected recipes. Runtime repeats the same
 construction check immediately before each recipe as a final fail-closed gate.
 
+Movement V1 uses its own no-capture runtime verifier. It executes the normal V1
+guided mission controller and success checks against every guided recipe in the
+immutable plan, including reserves, while deliberately excluding stochastic
+semi-Markov recipes. It allocates no RGB render target and writes no dataset:
+
+```powershell
+python Scripts/certify_v1_plan.py Artifacts/MovementV1Plan `
+  --executable "C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+  --output Artifacts/MovementV1Plan/certification
+```
+
+`Scripts/dataset_worker.py` refuses V1 or V2 recording when the corresponding
+certificate is absent, rejected any recipe, or no longer matches the exact plan
+and executable/package runtime. The normal lifecycle is therefore: create the
+V1 and V2 plans, run their structural verifiers, run each stage's no-capture
+certifier, record assignments, validate package integrity, and only then render
+the separately selected 85-video human-audit set. Video creation is not a
+mission-physics verification pass.
+
 Run assignments with `Scripts/dataset_worker.py`, inspect progress with the V1
 or V2 controller's `inventory` command, and validate/render review media with
 `Scripts/review_dataset.py`.
@@ -376,6 +397,8 @@ source and test output:
 - `Source/he_grenade_game/DataGenerator/V2ActionSemantics.*`: Q/E edge and
   cooldown semantics.
 - `Scripts/dataset_controller.py`: immutable Movement V1 planner.
+- `Scripts/certify_v1_plan.py`: one-session, no-RGB V1 guided-mission runtime
+  verifier with immutable plan and executable/package bindings.
 - `Scripts/v2_mission_catalog.py`: immutable 62-type catalog and certified
   deterministic solution regions.
 - `Scripts/v2_dataset_controller.py`: combined V2 planner, verifier, inventory,

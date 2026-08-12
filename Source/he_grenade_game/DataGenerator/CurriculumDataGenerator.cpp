@@ -813,7 +813,7 @@ void ACurriculumDataGenerator::BeginPlay()
 		}
 		return;
 	}
-	const bool bOutputReady = bV2PlanCertificationOnly
+	const bool bOutputReady = (bV1PlanCertificationOnly || bV2PlanCertificationOnly)
 		? IFileManager::Get().MakeDirectory(*OutputDirectory, true)
 			&& !FPaths::FileExists(FPaths::Combine(
 				OutputDirectory, TEXT("certification-report.json")))
@@ -868,7 +868,7 @@ void ACurriculumDataGenerator::BeginPlay()
 			? TEXT("webp_parquet")
 			: TEXT("png_jsonl"),
 		WebPLosslessEffort,
-		bV2PlanCertificationOnly ? TEXT("true") : TEXT("false"));
+		(bV1PlanCertificationOnly || bV2PlanCertificationOnly) ? TEXT("true") : TEXT("false"));
 }
 
 void ACurriculumDataGenerator::Tick(float DeltaSeconds)
@@ -897,6 +897,11 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 	if (bV2PlanCertificationOnly)
 	{
 		RunV2PlanCertification();
+		return;
+	}
+	if (bV1PlanCertificationOnly)
+	{
+		RunV1PlanCertification();
 		return;
 	}
 
@@ -933,18 +938,10 @@ void ACurriculumDataGenerator::Tick(float DeltaSeconds)
 	const bool bMissionTimedOut =
 		!bCoverageMissionSucceeded
 		&& FrameIndex >= TransitionsPerEpisode;
-	if (bV2MissionRecipe && (bCoverageMissionFailed || bMissionTimedOut)
-		&& !bAllowUncertifiedV2Diagnostic)
-	{
-		FinishRun(
-			false,
-			LastError.IsEmpty()
-				? FString::Printf(
-					TEXT("Certified V2 mission invariant failed for immutable recipe %s."),
-					*CurrentRecipeId)
-				: LastError);
-		return;
-	}
+	// A realized mission disagreement is semantic evidence, not a recorder
+	// failure. Preserve the failed episode and continue the immutable manifest;
+	// the worker credits no frames for it and reports the exact recipe. Build,
+	// I/O, construction, and schema failures still terminate the process.
 	if (bPostSuccessRolloutComplete
 		|| bCoverageMissionFailed
 		|| bMissionTimedOut)
@@ -1247,8 +1244,29 @@ bool ACurriculumDataGenerator::ParseConfiguration()
 	}
 	bAllowUncertifiedV2Diagnostic =
 		FParse::Param(CommandLine, TEXT("AllowUncertifiedV2Diagnostic"));
+	bV1PlanCertificationOnly =
+		FParse::Param(CommandLine, TEXT("CertifyV1PlanOnly"));
 	bV2PlanCertificationOnly =
 		FParse::Param(CommandLine, TEXT("CertifyV2PlanOnly"));
+	if (bV1PlanCertificationOnly && bV2PlanCertificationOnly)
+	{
+		LastError = TEXT("V1 and V2 plan certification modes are mutually exclusive.");
+		return false;
+	}
+	if (bV1PlanCertificationOnly
+		&& (!bPrescribedRecipes
+			|| CurriculumStage != ECurriculumStage::Movement))
+	{
+		LastError = TEXT("-CertifyV1PlanOnly requires a prescribed Movement V1 manifest.");
+		return false;
+	}
+	if (bV1PlanCertificationOnly
+		&& Algo::AnyOf(PrescribedRecipes, [](const FPrescribedRecipe& Recipe)
+			{ return Recipe.Mission == TEXT("semi_markov"); }))
+	{
+		LastError = TEXT("V1 mission certification manifests cannot contain semi-Markov recipes.");
+		return false;
+	}
 	if (bV2PlanCertificationOnly
 		&& (!bPrescribedRecipes
 			|| CurriculumStage != ECurriculumStage::TrajectoryThrowV2))
@@ -1752,6 +1770,12 @@ bool ACurriculumDataGenerator::ResolvePlayer()
 		CurriculumStage == ECurriculumStage::TrajectoryThrowV2);
 
 	AddTickPrerequisiteActor(Character);
+	if (bV1PlanCertificationOnly)
+	{
+		// V1 certification consumes only the live physical/player state. Do not
+		// allocate a render target or perform any RGB capture/readback.
+		return true;
+	}
 
 	RenderTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("DatasetRenderTarget"));
 	RenderTarget->RenderTargetFormat = ETextureRenderTargetFormat::RTF_RGBA8_SRGB;
@@ -1949,7 +1973,10 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		&& RampDirection == ERampDirection::Downhill;
 	ApplyAction(0);
 
-	if (!CaptureObservation(0, PreviousState))
+	const bool bInitialObservationReady = bV1PlanCertificationOnly
+		? ObserveV1CertificationState(0, PreviousState)
+		: CaptureObservation(0, PreviousState);
+	if (!bInitialObservationReady)
 	{
 		return false;
 	}
@@ -2704,6 +2731,106 @@ FTransform ACurriculumDataGenerator::GetObservationCameraTransform() const
 		: FTransform::Identity;
 }
 
+bool ACurriculumDataGenerator::ReadObservedState(FRecordedState& OutState)
+{
+	if (!PlayerCamera || !Character || !GetWorld())
+	{
+		LastError = TEXT("Observation state resources are not ready.");
+		return false;
+	}
+
+	OutState.Position = Character->GetActorLocation();
+	OutState.Velocity = Character->GetVelocity();
+	OutState.CameraRotation = Character->GetControlRotation().GetNormalized();
+	OutState.CameraRotation.Roll = 0.0f;
+	if ((CurriculumStage == ECurriculumStage::Movement
+			|| CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
+		&& CoverageMission == ECoverageMission::SemiMarkov)
+	{
+		const int32 XBin = FMath::Clamp(
+			FMath::FloorToInt((OutState.Position.X + 1600.0f) / (3200.0f / 3.0f)),
+			0,
+			2);
+		const int32 YBin = FMath::Clamp(
+			FMath::FloorToInt((OutState.Position.Y + 1600.0f) / (3200.0f / 3.0f)),
+			0,
+			2);
+		++PersistentPositionBinFrames[YBin * 3 + XBin];
+		const float NormalizedYaw = FMath::Fmod(
+			OutState.CameraRotation.Yaw + 540.0f,
+			360.0f);
+		const int32 ViewBin = FMath::Clamp(
+			FMath::FloorToInt(NormalizedYaw / 45.0f),
+			0,
+			7);
+		++PersistentViewBinFrames[ViewBin];
+	}
+	OutState.bGrounded =
+		Character->GetCharacterMovement()
+		&& Character->GetCharacterMovement()->IsMovingOnGround();
+	OutState.bContact = false;
+	OutState.ContactObject.Reset();
+
+	if (UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
+	{
+		TArray<FOverlapResult> Overlaps;
+		FCollisionObjectQueryParams ObjectQuery;
+		ObjectQuery.AddObjectTypesToQuery(ECC_WorldStatic);
+		FCollisionQueryParams ContactQuery(
+			SCENE_QUERY_STAT(CurriculumContact),
+			false,
+			Character);
+		const FCollisionShape ContactShape = FCollisionShape::MakeCapsule(
+			Capsule->GetScaledCapsuleRadius() + 3.0f,
+			Capsule->GetScaledCapsuleHalfHeight() + 3.0f);
+		GetWorld()->OverlapMultiByObjectType(
+			Overlaps,
+			Character->GetActorLocation(),
+			FQuat::Identity,
+			ObjectQuery,
+			ContactShape,
+			ContactQuery);
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			const AActor* ContactActor = Overlap.GetActor();
+			if (!ContactActor)
+			{
+				continue;
+			}
+			for (const FName Tag : ContactActor->Tags)
+			{
+				const FString TagText = Tag.ToString();
+				if (TagText.StartsWith(TEXT("CurriculumWall_"))
+					|| TagText.StartsWith(TEXT("CurriculumObject_")))
+				{
+					OutState.bContact = true;
+					OutState.ContactObject = TagText;
+					break;
+				}
+			}
+			if (OutState.bContact)
+			{
+				break;
+			}
+		}
+	}
+	return true;
+}
+
+bool ACurriculumDataGenerator::ObserveV1CertificationState(
+	const int32 ObservationIndex,
+	FRecordedState& OutState)
+{
+	if (!ReadObservedState(OutState))
+	{
+		return false;
+	}
+	UpdatePitchMetrics(OutState.CameraRotation.Pitch);
+	UpdateCoverageMetrics(OutState, ObservationIndex);
+	return true;
+}
+
 bool ACurriculumDataGenerator::CaptureObservation(
 	const int32 ObservationIndex,
 	FRecordedState& OutState)
@@ -2833,82 +2960,9 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		return false;
 	}
 
-	OutState.Position = Character->GetActorLocation();
-	OutState.Velocity = Character->GetVelocity();
-	OutState.CameraRotation =
-		Character->GetControlRotation().GetNormalized();
-	OutState.CameraRotation.Roll = 0.0f;
-	if ((CurriculumStage == ECurriculumStage::Movement
-			|| CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
-		&& CoverageMission == ECoverageMission::SemiMarkov)
+	if (!ReadObservedState(OutState))
 	{
-		const int32 XBin = FMath::Clamp(
-			FMath::FloorToInt((OutState.Position.X + 1600.0f) / (3200.0f / 3.0f)),
-			0,
-			2);
-		const int32 YBin = FMath::Clamp(
-			FMath::FloorToInt((OutState.Position.Y + 1600.0f) / (3200.0f / 3.0f)),
-			0,
-			2);
-		++PersistentPositionBinFrames[YBin * 3 + XBin];
-		const float NormalizedYaw = FMath::Fmod(
-			OutState.CameraRotation.Yaw + 540.0f,
-			360.0f);
-		const int32 ViewBin = FMath::Clamp(
-			FMath::FloorToInt(NormalizedYaw / 45.0f),
-			0,
-			7);
-		++PersistentViewBinFrames[ViewBin];
-	}
-	OutState.bGrounded =
-		Character->GetCharacterMovement()
-		&& Character->GetCharacterMovement()->IsMovingOnGround();
-	OutState.bContact = false;
-	OutState.ContactObject.Reset();
-
-	if (UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
-	{
-		TArray<FOverlapResult> Overlaps;
-		FCollisionObjectQueryParams ObjectQuery;
-		ObjectQuery.AddObjectTypesToQuery(ECC_WorldStatic);
-		FCollisionQueryParams ContactQuery(
-			SCENE_QUERY_STAT(CurriculumContact),
-			false,
-			Character);
-		const FCollisionShape ContactShape = FCollisionShape::MakeCapsule(
-			Capsule->GetScaledCapsuleRadius() + 3.0f,
-			Capsule->GetScaledCapsuleHalfHeight() + 3.0f);
-		GetWorld()->OverlapMultiByObjectType(
-			Overlaps,
-			Character->GetActorLocation(),
-			FQuat::Identity,
-			ObjectQuery,
-			ContactShape,
-			ContactQuery);
-
-		for (const FOverlapResult& Overlap : Overlaps)
-		{
-			const AActor* ContactActor = Overlap.GetActor();
-			if (!ContactActor)
-			{
-				continue;
-			}
-			for (const FName Tag : ContactActor->Tags)
-			{
-				const FString TagText = Tag.ToString();
-				if (TagText.StartsWith(TEXT("CurriculumWall_"))
-					|| TagText.StartsWith(TEXT("CurriculumObject_")))
-				{
-					OutState.bContact = true;
-					OutState.ContactObject = TagText;
-					break;
-				}
-			}
-			if (OutState.bContact)
-			{
-				break;
-			}
-		}
+		return false;
 	}
 
 	const bool bQVisible =
@@ -4334,6 +4388,213 @@ bool ACurriculumDataGenerator::ConfigureV2MissionSpawn(
 	OutYaw = CurrentV2MissionAimYaw;
 	OutPitch = CurrentV2MissionAimPitch;
 	return true;
+}
+
+void ACurriculumDataGenerator::CompleteV1CertificationRecipe(
+	const bool bCertified,
+	const FString& ErrorMessage)
+{
+	ApplyAction(0);
+	const FPrescribedRecipe& Recipe = PrescribedRecipes[EpisodeOrdinal];
+	if (bCertified)
+	{
+		++V1CertificationCertifiedCount;
+	}
+	else
+	{
+		++V1CertificationFailedCount;
+	}
+	TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+	Entry->SetStringField(TEXT("recipe_id"), Recipe.RecipeId);
+	Entry->SetStringField(TEXT("mission"), Recipe.Mission);
+	Entry->SetNumberField(TEXT("episode_index"), Recipe.EpisodeIndex);
+	Entry->SetNumberField(TEXT("scenario_index"), Recipe.ScenarioIndex);
+	Entry->SetNumberField(TEXT("repetition_index"), Recipe.RepetitionIndex);
+	Entry->SetNumberField(TEXT("observation_count"), FrameIndex + 1);
+	Entry->SetBoolField(TEXT("certified"), bCertified);
+	Entry->SetStringField(
+		TEXT("status"), bCertified ? TEXT("certified") : TEXT("rejected"));
+	Entry->SetStringField(TEXT("error"), bCertified ? FString() : ErrorMessage);
+	V1CertificationResults.Add(MakeShared<FJsonValueObject>(Entry));
+	bEpisodeActive = false;
+	ResetStageState();
+
+	const int32 CheckedCount = EpisodeOrdinal + 1;
+	if (!bCertified || CheckedCount % 25 == 0
+		|| CheckedCount == PrescribedRecipes.Num())
+	{
+		TSharedPtr<FJsonObject> Progress = MakeShared<FJsonObject>();
+		Progress->SetNumberField(TEXT("checked_count"), CheckedCount);
+		Progress->SetNumberField(TEXT("recipe_count"), PrescribedRecipes.Num());
+		Progress->SetNumberField(
+			TEXT("certified_count"), V1CertificationCertifiedCount);
+		Progress->SetNumberField(TEXT("failed_count"), V1CertificationFailedCount);
+		Progress->SetStringField(TEXT("last_recipe_id"), Recipe.RecipeId);
+		FString ProgressJson;
+		TSharedRef<TJsonWriter<>> ProgressWriter =
+			TJsonWriterFactory<>::Create(&ProgressJson);
+		FJsonSerializer::Serialize(Progress.ToSharedRef(), ProgressWriter);
+		FFileHelper::SaveStringToFile(
+			ProgressJson,
+			*FPaths::Combine(OutputDirectory, TEXT("certification-progress.json")),
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	}
+	if (bCertified)
+	{
+		UE_LOG(
+			LogTemp,
+			Display,
+			TEXT("V1 plan certification progress: %d/%d, recipe %s, mission %s, status certified."),
+			CheckedCount,
+			PrescribedRecipes.Num(),
+			*Recipe.RecipeId,
+			*Recipe.Mission);
+	}
+	else
+	{
+		UE_LOG(
+			LogTemp,
+			Error,
+			TEXT("V1 plan certification progress: %d/%d, recipe %s, mission %s, status rejected: %s"),
+			CheckedCount,
+			PrescribedRecipes.Num(),
+			*Recipe.RecipeId,
+			*Recipe.Mission,
+			*ErrorMessage);
+	}
+}
+
+void ACurriculumDataGenerator::FinishV1PlanCertification()
+{
+	TSharedPtr<FJsonObject> Report = MakeShared<FJsonObject>();
+	Report->SetNumberField(TEXT("schema_version"), 1);
+	Report->SetStringField(TEXT("purpose"), TEXT("v1_plan_runtime_mission_certification"));
+	Report->SetStringField(TEXT("plan_id"), PlanId);
+	Report->SetStringField(TEXT("plan_version"), PlanVersion);
+	Report->SetStringField(TEXT("assignment_id"), AssignmentId);
+	Report->SetStringField(
+		TEXT("unreal_engine_version"), FEngineVersion::Current().ToString());
+	Report->SetNumberField(TEXT("recipe_count"), PrescribedRecipes.Num());
+	Report->SetNumberField(
+		TEXT("certified_count"), V1CertificationCertifiedCount);
+	Report->SetNumberField(TEXT("failed_count"), V1CertificationFailedCount);
+	Report->SetBoolField(
+		TEXT("complete"),
+		EpisodeOrdinal >= PrescribedRecipes.Num()
+			&& V1CertificationFailedCount == 0);
+	Report->SetArrayField(TEXT("results"), V1CertificationResults);
+	FString ReportJson;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ReportJson);
+	FJsonSerializer::Serialize(Report.ToSharedRef(), Writer);
+	const FString ReportPath = FPaths::Combine(
+		OutputDirectory, TEXT("certification-report.json"));
+	const bool bWroteReport = FFileHelper::SaveStringToFile(
+		ReportJson, *ReportPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	if (!bWroteReport)
+	{
+		++V1CertificationFailedCount;
+	}
+	if (V1CertificationFailedCount == 0)
+	{
+		UE_LOG(
+			LogTemp,
+			Display,
+			TEXT("V1 plan certification completed: %d certified, 0 rejected. Report: %s"),
+			V1CertificationCertifiedCount,
+			*ReportPath);
+	}
+	else
+	{
+		UE_LOG(
+			LogTemp,
+			Error,
+			TEXT("V1 plan certification completed: %d certified, %d rejected. Report: %s"),
+			V1CertificationCertifiedCount,
+			V1CertificationFailedCount,
+			*ReportPath);
+	}
+	bRunFinished = true;
+	FApp::SetUseFixedTimeStep(false);
+	if (bExitOnComplete)
+	{
+		FPlatformMisc::RequestExitWithStatus(
+			false, V1CertificationFailedCount == 0 ? 0 : 1);
+	}
+}
+
+void ACurriculumDataGenerator::RunV1PlanCertification()
+{
+	if (EpisodeOrdinal >= PrescribedRecipes.Num())
+	{
+		FinishV1PlanCertification();
+		return;
+	}
+
+	const auto AdvanceRecipe = [this]()
+	{
+		++EpisodeOrdinal;
+		if (EpisodeOrdinal >= PrescribedRecipes.Num())
+		{
+			FinishV1PlanCertification();
+		}
+		else
+		{
+			EpisodeIndex = PrescribedRecipes[EpisodeOrdinal].EpisodeIndex;
+		}
+	};
+
+	if (!bEpisodeActive)
+	{
+		LastError.Reset();
+		if (!BeginEpisode())
+		{
+			const FString Error = LastError.IsEmpty()
+				? TEXT("V1 mission configuration failed.")
+				: LastError;
+			CompleteV1CertificationRecipe(false, Error);
+			AdvanceRecipe();
+		}
+		return;
+	}
+
+	FRecordedState CurrentState;
+	const int32 TargetObservationIndex = FrameIndex + 1;
+	if (!ObserveV1CertificationState(TargetObservationIndex, CurrentState))
+	{
+		const FString Error = LastError.IsEmpty()
+			? TEXT("V1 mission state observation failed.")
+			: LastError;
+		CompleteV1CertificationRecipe(false, Error);
+		AdvanceRecipe();
+		return;
+	}
+	PreviousState = CurrentState;
+	FrameIndex = TargetObservationIndex;
+
+	const bool bPostSuccessRolloutComplete =
+		bCoverageMissionSucceeded
+		&& CoveragePostSuccessSteps
+			>= FMath::Max(1, CoverageRequiredPostSuccessSteps);
+	const bool bMissionTimedOut =
+		!bCoverageMissionSucceeded
+		&& FrameIndex >= TransitionsPerEpisode;
+	if (bPostSuccessRolloutComplete || bCoverageMissionFailed || bMissionTimedOut)
+	{
+		const bool bCertified = bCoverageMissionSucceeded
+			&& !bCoverageMissionFailed;
+		FString Error;
+		if (!bCertified)
+		{
+			Error = bCoverageMissionFailed
+				? TEXT("mission_no_progress")
+				: TEXT("mission_timeout");
+		}
+		CompleteV1CertificationRecipe(bCertified, Error);
+		AdvanceRecipe();
+		return;
+	}
+
+	PrepareNextAction();
 }
 
 void ACurriculumDataGenerator::RunV2PlanCertification()

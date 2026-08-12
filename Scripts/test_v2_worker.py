@@ -8,10 +8,35 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from dataset_worker import bind_execution_build, build_validated_result, command_for
+from dataset_worker import (
+    bind_execution_build,
+    build_validated_result,
+    command_for,
+    require_v2_certification,
+)
 
 
 class V2WorkerBuildBindingTests(unittest.TestCase):
+    def test_v2_recording_requires_prior_bound_batch_certification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "game.exe"
+            executable.write_bytes(b"game")
+            (root / "plan").mkdir()
+            (root / "assignments").mkdir()
+            (root / "plan" / "collection-plan.json").write_text("{}\n")
+            (root / "plan" / "recipes.jsonl").write_text("{}\n")
+            plan = {
+                "plan_id": "p",
+                "plan_version": "trajectory-throw-v2-test",
+                "assignment_count": 0,
+                "active_recipe_count": 0,
+                "generator_source_sha256": "source",
+            }
+            build = bind_execution_build(root, executable, plan)
+            with self.assertRaisesRegex(ValueError, "requires certification"):
+                require_v2_certification(root, plan, executable, build)
+
     def test_editor_command_opens_the_project_in_game_mode(self) -> None:
         command = command_for(
             Path("UnrealEditor-Cmd.exe"),
@@ -76,7 +101,7 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
         self.assertEqual(result["accepted_observation_frames"], 100)
         self.assertEqual(result["semantic_failure_recipe_ids"], [])
 
-    def test_certified_mission_failure_is_a_regression_not_replacement(self) -> None:
+    def test_certified_mission_failure_is_recorded_without_replacement(self) -> None:
         assignment = {
             "plan_id": "p", "plan_version": "trajectory-throw-v2-sixty-missions-1",
             "assignment_id": "a", "recipes": [{
@@ -89,11 +114,20 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
         row = {
             "recipe_id": "r", "observation_count": 101,
             "v2_source": "mission", "v2_mission_type": "rectangle_north_face",
-            "mission_success": False,
+            "mission_success": False, "termination_reason": "mission_timeout",
+            "v2_construction_certified": True, "v2_mission_event_frame": None,
         }
-        with patch("dataset_worker.read_episode_rows", return_value=[row]):
-            with self.assertRaisesRegex(ValueError, "invariant failed"):
-                build_validated_result(assignment, "attempt-000", "worker", Path("unused"))
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "dataset.json").write_text("{}\n", encoding="utf-8")
+            with patch("dataset_worker.read_episode_rows", return_value=[row]):
+                result = build_validated_result(
+                    assignment, "attempt-000", "worker", output
+                )
+        self.assertEqual(result["accepted_observation_frames"], 0)
+        self.assertEqual(result["resolved_recipe_ids"], ["r"])
+        self.assertEqual(result["semantic_failure_recipe_ids"], ["r"])
+        self.assertEqual(result["semantic_result"], "resolved_with_failures")
 
 
 if __name__ == "__main__":

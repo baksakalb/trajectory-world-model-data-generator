@@ -101,6 +101,133 @@ def bind_execution_build(root: Path, executable: Path, plan: dict[str, Any]) -> 
     return identity
 
 
+def require_v2_certification(
+    root: Path,
+    plan: dict[str, Any],
+    executable: Path,
+    execution_build: dict[str, Any],
+) -> None:
+    """Require a successful batch certificate bound to this plan and build."""
+    report_path = root / "certification" / "certification-report-bound.json"
+    if not report_path.is_file():
+        raise ValueError(
+            "V2 recording requires certification/certification-report-bound.json "
+            "from certify_v2_plan.py"
+        )
+    report = read_json(report_path)
+    bindings = report.get("bindings") or {}
+    plan_path = root / "plan" / "collection-plan.json"
+    recipes_path = root / "plan" / "recipes.jsonl"
+    assignment_digests = [
+        read_json(path)["assignment_digest"]
+        for path in sorted((root / "assignments").glob("*.json"))
+    ]
+    assignment_digest_sha256 = hashlib.sha256(
+        json.dumps(
+            assignment_digests,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    expected = {
+        "plan_id": plan["plan_id"],
+        "plan_version": plan["plan_version"],
+        "collection_plan_sha256": sha256_file(plan_path),
+        "recipes_jsonl_sha256": sha256_file(recipes_path),
+        "assignment_digest_sha256": assignment_digest_sha256,
+        "assignment_count": int(plan["assignment_count"]),
+        "recipe_count": int(plan["active_recipe_count"]),
+        "executable_path": str(executable.resolve()),
+        "executable_sha256": execution_build["executable_sha256"],
+        "executable_size_bytes": execution_build["executable_size_bytes"],
+        "generator_source_sha256": execution_build.get("generator_source_sha256"),
+        "package_runtime_sha256": execution_build["package_runtime_sha256"],
+        "package_runtime_file_count": execution_build["package_runtime_file_count"],
+    }
+    if not bool(report.get("complete")) or int(report.get("failed_count", -1)) != 0:
+        raise ValueError("V2 recording requires a complete zero-rejection certificate")
+    if int(report.get("certified_count", -1)) != expected["recipe_count"]:
+        raise ValueError("V2 certification recipe count is incomplete")
+    mismatches = [key for key, value in expected.items() if bindings.get(key) != value]
+    if mismatches:
+        raise ValueError(
+            "V2 certification does not bind to the current plan/build: "
+            + ", ".join(mismatches)
+        )
+
+
+def v1_certification_recipe_counts(recipes_path: Path) -> tuple[int, int]:
+    """Return (guided mission recipes, semi-Markov recipes) for a V1 plan."""
+    guided = 0
+    semi_markov = 0
+    with recipes_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            recipe = json.loads(line)
+            if recipe.get("mission") == "semi_markov":
+                semi_markov += 1
+            else:
+                guided += 1
+    return guided, semi_markov
+
+
+def v1_certification_bindings(
+    root: Path,
+    plan: dict[str, Any],
+    executable: Path,
+    execution_build: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the immutable plan/build identity required by V1 recording."""
+    plan_path = root / "plan" / "collection-plan.json"
+    recipes_path = root / "plan" / "recipes.jsonl"
+    guided_count, semi_markov_count = v1_certification_recipe_counts(recipes_path)
+    return {
+        "plan_id": plan["plan_id"],
+        "plan_version": plan["plan_version"],
+        "collection_plan_sha256": sha256_file(plan_path),
+        "recipes_jsonl_sha256": sha256_file(recipes_path),
+        "plan_recipe_count": guided_count + semi_markov_count,
+        "guided_recipe_count": guided_count,
+        "semi_markov_recipe_count": semi_markov_count,
+        "executable_path": str(executable.resolve()),
+        "executable_sha256": execution_build["executable_sha256"],
+        "executable_size_bytes": execution_build["executable_size_bytes"],
+        "generator_source_sha256": execution_build.get("generator_source_sha256"),
+        "package_runtime_sha256": execution_build["package_runtime_sha256"],
+        "package_runtime_file_count": execution_build["package_runtime_file_count"],
+    }
+
+
+def require_v1_certification(
+    root: Path,
+    plan: dict[str, Any],
+    executable: Path,
+    execution_build: dict[str, Any],
+) -> None:
+    """Require V1 guided missions to pass no-capture runtime certification."""
+    report_path = root / "certification" / "certification-report-bound.json"
+    if not report_path.is_file():
+        raise ValueError(
+            "V1 recording requires certification/certification-report-bound.json "
+            "from certify_v1_plan.py"
+        )
+    report = read_json(report_path)
+    expected = v1_certification_bindings(root, plan, executable, execution_build)
+    if not bool(report.get("complete")) or int(report.get("failed_count", -1)) != 0:
+        raise ValueError("V1 recording requires a complete zero-rejection certificate")
+    if int(report.get("certified_count", -1)) != expected["guided_recipe_count"]:
+        raise ValueError("V1 certification guided-recipe count is incomplete")
+    bindings = report.get("bindings") or {}
+    mismatches = [key for key, value in expected.items() if bindings.get(key) != value]
+    if mismatches:
+        raise ValueError(
+            "V1 certification does not bind to the current plan/build: "
+            + ", ".join(mismatches)
+        )
+
+
 def results_for(root: Path, assignment_id: str) -> list[dict[str, Any]]:
     paths = sorted((root / "results").glob(f"{assignment_id}--attempt-*.json"))
     return [read_json(path) for path in paths]
@@ -157,6 +284,7 @@ def build_validated_result(
     resolved: list[str] = []
     successful: list[str] = []
     semantic_failures: list[str] = []
+    semantic_failure_details: list[dict[str, Any]] = []
     credited_cells: list[dict[str, Any]] = []
     accepted_frames = 0
     produced_frames = 0
@@ -188,12 +316,6 @@ def build_validated_result(
                 raise ValueError(f"V2 recipe {recipe_id} changed replay identity")
             if source == "mission" and row.get("v2_mission_type") != recipe.get("mission_type"):
                 raise ValueError(f"V2 recipe {recipe_id} changed runtime mission type")
-            # A certified mission disagreement is a code/physics regression.
-            # It is never a semantic result eligible for a different seed.
-            if source == "mission" and not bool(row["mission_success"]):
-                raise ValueError(
-                    f"certified V2 mission invariant failed for immutable recipe {recipe_id}"
-                )
         creditable = source == "semi_markov" if is_v2 else mission == "semi_markov"
         creditable = creditable or bool(row["mission_success"])
         if creditable:
@@ -216,6 +338,13 @@ def build_validated_result(
             })
         else:
             semantic_failures.append(recipe_id)
+            semantic_failure_details.append({
+                "recipe_id": recipe_id,
+                "mission_type": recipe.get("mission_type"),
+                "termination_reason": row.get("termination_reason"),
+                "construction_certified": row.get("v2_construction_certified"),
+                "mission_event_frame": row.get("v2_mission_event_frame"),
+            })
     result = {
         "schema_version": 1,
         "plan_id": assignment["plan_id"],
@@ -232,6 +361,7 @@ def build_validated_result(
         "resolved_recipe_ids": resolved,
         "successful_recipe_ids": successful,
         "semantic_failure_recipe_ids": semantic_failures,
+        "semantic_failure_details": semantic_failure_details,
         "credited_cells": credited_cells,
     }
     if assignment_is_v2:
@@ -431,6 +561,11 @@ def main() -> int:
         }, indent=2, sort_keys=True))
         return 0
     args.execution_build = bind_execution_build(root, args.executable, plan)
+    plan_version = str(plan.get("plan_version", ""))
+    if plan_version.startswith("trajectory-throw-v2"):
+        require_v2_certification(root, plan, args.executable, args.execution_build)
+    elif plan_version.startswith("movement-v1"):
+        require_v1_certification(root, plan, args.executable, args.execution_build)
     for assignment_path in sorted((root / "assignments").glob("*.json")):
         if (root / "STOP").exists():
             break
@@ -446,6 +581,8 @@ def main() -> int:
             break
         status = run_assignment(args, assignment_path)
         statuses.append({"assignment_id": assignment["assignment_id"], "status": status})
+        if status not in {"validated", "already_validated", "budget_complete"}:
+            break
         if args.one or args.simulate_interruption or (root / "STOP").exists():
             break
     print(json.dumps({"worker_id": args.worker_id, "executor_id": args.executor_id, "assignments": statuses}, indent=2, sort_keys=True))

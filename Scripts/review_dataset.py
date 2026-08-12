@@ -978,9 +978,11 @@ def validate_v2_runtime_contract(
         raise DatasetValidationError(f"{episode_id}: wrong combined V2 contract version.")
     if int(dataset.get("observation_rate_hz") or 0) != 20:
         raise DatasetValidationError(f"{episode_id}: V2 certified catalog requires 20 Hz.")
-    if not bool(episode.get("accepted_for_balancing")):
-        raise DatasetValidationError(f"{episode_id}: technically valid V2 episode was not credited.")
     if source == "semi_markov":
+        if not bool(episode.get("accepted_for_balancing")):
+            raise DatasetValidationError(
+                f"{episode_id}: technically valid V2 free-play episode was not credited."
+            )
         if episode.get("collection_mission") != "semi_markov":
             raise DatasetValidationError(f"{episode_id}: V2 free-play mission changed.")
         if bool(episode.get("mission_required")) or bool(episode.get("mission_success")):
@@ -991,21 +993,41 @@ def validate_v2_runtime_contract(
         mission_type = episode.get("v2_mission_type")
         if not mission_type or episode.get("collection_mission") != mission_type:
             raise DatasetValidationError(f"{episode_id}: immutable mission identity disagrees.")
-        if not bool(episode.get("mission_required")) or not bool(episode.get("mission_success")):
-            raise DatasetValidationError(f"{episode_id}: certified mission invariant failed.")
+        if not bool(episode.get("mission_required")):
+            raise DatasetValidationError(f"{episode_id}: V2 mission is not marked required.")
         if not bool(episode.get("v2_construction_certified")):
             raise DatasetValidationError(f"{episode_id}: mission was not construction-certified.")
+        mission_success = bool(episode.get("mission_success"))
+        if mission_success != bool(episode.get("accepted_for_balancing")):
+            raise DatasetValidationError(
+                f"{episode_id}: V2 mission credit disagrees with realized success."
+            )
+        if not mission_success:
+            if episode.get("termination_reason") not in {
+                "mission_timeout", "mission_no_progress"
+            }:
+                raise DatasetValidationError(
+                    f"{episode_id}: failed V2 mission has invalid termination."
+                )
+            if episode.get("v2_mission_event_frame") is not None:
+                raise DatasetValidationError(
+                    f"{episode_id}: failed V2 mission claims interaction evidence."
+                )
+            # The failure is valid recorded evidence. It receives no credit,
+            # triggers no replacement, and does not prevent later recipes from
+            # being captured in the same immutable run.
         if not bool(episode.get("v2_mission_region_visible_all_frames")):
             raise DatasetValidationError(f"{episode_id}: mission region left the camera view.")
         if not bool(episode.get("v2_preview_region_visible_all_q_frames")):
             raise DatasetValidationError(f"{episode_id}: Q preview lost the mission region.")
         if not bool(episode.get("v2_opening_arena_context_visible")):
             raise DatasetValidationError(f"{episode_id}: mission opening lacked arena context.")
-        if episode.get("v2_mission_event_frame") is None:
-            raise DatasetValidationError(f"{episode_id}: named interaction evidence is absent.")
-        event_frame = int(episode["v2_mission_event_frame"])
-        if not 0 <= event_frame < len(frames):
-            raise DatasetValidationError(f"{episode_id}: named interaction frame is invalid.")
+        if mission_success:
+            if episode.get("v2_mission_event_frame") is None:
+                raise DatasetValidationError(f"{episode_id}: named interaction evidence is absent.")
+            event_frame = int(episode["v2_mission_event_frame"])
+            if not 0 <= event_frame < len(frames):
+                raise DatasetValidationError(f"{episode_id}: named interaction frame is invalid.")
         mission_frames = [frame for frame in frames if frame.get("v2_mission_type") == mission_type]
         if len(mission_frames) != len(frames):
             raise DatasetValidationError(f"{episode_id}: frame mission identity is not immutable.")
@@ -1061,7 +1083,8 @@ def validate_v2_runtime_contract(
             raise DatasetValidationError(
                 f"{episode_id}: mission episode lacks canonical configuration evidence."
             )
-        _validate_named_mission_evidence(episode_id, episode, throw)
+        if bool(episode.get("mission_success")):
+            _validate_named_mission_evidence(episode_id, episode, throw)
 
 def validate_run_distributions(
     dataset: dict[str, Any],
@@ -1079,8 +1102,9 @@ def validate_run_distributions(
     ]
     failures = [episode for episode in guided if not episode.get("mission_success")]
     if policy == "inspection_only_mission_review_suite":
-        expected_episode_count = 60 if strict_v9 else 44
-        expected_guided_count = 59 if strict_v9 else 43
+        current_v1_review = strict_v9 or dataset.get("schema_version") == "movement_v1-production-1"
+        expected_episode_count = 60 if current_v1_review else 44
+        expected_guided_count = 59 if current_v1_review else 43
         if (
             len(episodes) != expected_episode_count
             or len(guided) != expected_guided_count
@@ -1106,7 +1130,7 @@ def validate_run_distributions(
                 "ramp_traverse": 10,
                 "hoop_pass": 10,
             }
-            if strict_v9
+            if current_v1_review
             else {
                 "semi_markov": 1,
                 "object_view": 30,
@@ -1133,7 +1157,7 @@ def validate_run_distributions(
             raise DatasetValidationError(
                 "Review suite must contain each target/mode/orbit-direction once."
             )
-        if strict_v9:
+        if current_v1_review:
             for mission, direction_field, directions in (
                 ("ramp_traverse", "ramp_direction", {"uphill", "downhill"}),
                 (
