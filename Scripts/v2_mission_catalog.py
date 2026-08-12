@@ -18,7 +18,7 @@ from fractions import Fraction
 from typing import Any, Iterable
 
 
-CATALOG_VERSION = "trajectory-throw-v2-progressive-certified-regions-9"
+CATALOG_VERSION = "trajectory-throw-v2-progressive-certified-regions-10"
 CANONICAL_PHYSICS_ID = "grenade-sim-config-r1+launch-1400cmps+cooldown-2s"
 TYPE_FRAME_SHARE = Fraction(3, 620)
 FAMILY_FRAME_SHARES = {
@@ -141,12 +141,12 @@ def mission_types() -> tuple[MissionType, ...]:
         _m("hoop_clean_posx_to_negx", h, "hoop_passage", hoop, "safe_opening", (700, -700, 145), (1, 0), "7", direction="positive_x_to_negative_x", variation_axis=(0, 1, 0), variation_extent_cm=32, secondary_axis=(0, 0, 1), secondary_extent_cm=32),
         *tuple(_m(f"hoop_{rim}_{short}", h, "rim_contact", hoop, f"{rim}_rim", point, approach, "7", direction=direction, region_radius_cm=49, variation_axis=axis, variation_extent_cm=24, secondary_extent_cm=0) for direction, short, approach in (("negative_x_to_positive_x", "negx_to_posx", (-1, 0)), ("positive_x_to_negative_x", "posx_to_negx", (1, 0))) for rim, point, axis in (("upper", (700, -700, 250), (0, 1, 0)), ("lower", (700, -700, 40), (0, 1, 0)), ("left", (700, -805, 145), (0, 0, 1)), ("right", (700, -595, 145), (0, 0, 1)))),
         # Ramp surface, crossover, and physical edge/lip corridors.
-        _m("ramp_uphill_surface", r, "ramp_contact", ramp, "uphill_surface", (80, 0, 82), (1, 0), "7", variation_axis=(0, 1, 0), variation_extent_cm=62, secondary_axis=(1, 0, .325), secondary_extent_cm=55),
-        _m("ramp_downhill_surface", r, "ramp_contact", ramp, "downhill_surface", (160, 0, 54), (-1, 0), "7", region_radius_cm=52, variation_axis=(0, 1, 0), variation_extent_cm=62, secondary_axis=(1, 0, .325), secondary_extent_cm=45),
+        _m("ramp_uphill_surface", r, "ramp_contact", ramp, "uphill_surface", (80, 0, 82), (1, 0), "7", variation_axis=(0, 1, 0), variation_extent_cm=62, secondary_axis=(1, 0, -.325), secondary_extent_cm=55),
+        _m("ramp_downhill_surface", r, "ramp_contact", ramp, "downhill_surface", (160, 0, 54), (-1, 0), "7", region_radius_cm=52, variation_axis=(0, 1, 0), variation_extent_cm=62, secondary_axis=(1, 0, -.325), secondary_extent_cm=45),
         _m("ramp_crossover_left_to_right", r, "ramp_crossover", ramp, "body_crossing", (0, 0, 150), (0, -1), "15/2", variation_axis=(1, 0, 0), variation_extent_cm=100, direction="left_to_right"),
         _m("ramp_crossover_right_to_left", r, "ramp_crossover", ramp, "body_crossing", (0, 0, 150), (0, 1), "15/2", variation_axis=(1, 0, 0), variation_extent_cm=100, direction="right_to_left"),
-        _m("ramp_left_side_edge", r, "edge_contact", ramp, "left_side_edge", (0, -130, 108), (0, -1), "7", variation_axis=(1, 0, .325), variation_extent_cm=95, region_radius_cm=24),
-        _m("ramp_right_side_edge", r, "edge_contact", ramp, "right_side_edge", (0, 130, 108), (0, 1), "7", variation_axis=(1, 0, .325), variation_extent_cm=95, region_radius_cm=24),
+        _m("ramp_left_side_edge", r, "edge_contact", ramp, "left_side_edge", (0, -130, 108), (0, -1), "7", variation_axis=(1, 0, -.325), variation_extent_cm=95, region_radius_cm=24),
+        _m("ramp_right_side_edge", r, "edge_contact", ramp, "right_side_edge", (0, 130, 108), (0, 1), "7", variation_axis=(1, 0, -.325), variation_extent_cm=95, region_radius_cm=24),
         _m("ramp_high_end_lip", r, "edge_contact", ramp, "high_end_lip", (-250, 0, 190), (-1, 0), "7", variation_axis=(0, 1, 0), variation_extent_cm=70, region_radius_cm=25),
         _m("ramp_low_end_lip", r, "edge_contact", ramp, "low_end_lip", (250, 0, 28), (1, 0), "7", variation_axis=(0, 1, 0), variation_extent_cm=70, region_radius_cm=25),
         # Boundary exits are aimed above the wall, retaining the named wall in view.
@@ -257,6 +257,20 @@ def _project_hoop_rim_target(item: MissionType, u: float) -> list[float]:
     raise ValueError(f"unknown hoop rim region {region!r}")
 
 
+def _project_pyramid_apex_target(u: float, v: float) -> list[float]:
+    """Project apex-corridor variation onto the authored pyramid surface.
+
+    The pyramid has a 280 cm square base and is 250 cm high. Moving laterally
+    away from its apex while retaining z=250 places the requested target in
+    empty air, so endpoint-inclusive budget sampling must lower z onto the
+    corresponding triangular face.
+    """
+    offset_x = (2.0 * u - 1.0) * 12.0
+    offset_y = (2.0 * v - 1.0) * 12.0
+    height = 250.0 - (250.0 / 140.0) * max(abs(offset_x), abs(offset_y))
+    return [700.0 + offset_x, 700.0 + offset_y, height]
+
+
 def _budget_coverage_units(sample_index: int, sample_count: int) -> tuple[float, ...]:
     """Evenly cover every parameter range for the exact allocated count.
 
@@ -319,6 +333,8 @@ def build_solution(
         center = _project_sphere_target(item, u, v)
     elif item.event_kind == "rim_contact":
         center = _project_hoop_rim_target(item, u)
+    elif item.slug == "pyramid_apex":
+        center = _project_pyramid_apex_target(u, v)
 
     expected_contact_order = list(item.expected_contact_order)
     contact_order_variant: str | None = None

@@ -24,8 +24,9 @@ and the implemented V2 missions pass human visual review.
 
 ### Implementation checkpoint
 
-The V2 implementation is structurally complete against `V2_MISSION_DESIGN.md`,
-but the current catalog is not qualified for recording:
+The V2 implementation is structurally complete against `V2_MISSION_DESIGN.md`.
+The current catalog is machine-qualified at a one-million-frame budget, but
+production still requires the prescribed human visual review:
 
 - the immutable catalog contains exactly 62 mission types in seven mission
   families, including two trajectory-control demonstrations;
@@ -53,9 +54,11 @@ acceptance gate, alternate production seed, reserve recipe, semantic retry, or
 replacement path. A machine-interrupted recipe may be replayed unchanged; a
 certified mission that fails its invariant is a regression and stops generation.
 
-The full-plan verifier currently reports 179/186 review recipes certified and
-seven rejected. Recording remains blocked until all 186 certify and the new
-review set passes human inspection.
+The no-capture verifier certifies the complete immutable production plan before
+recording. The current one-million-frame plan certified all 2,468 recipes
+(234 semi-Markov plan entries and 2,234 construction-tested mission entries)
+with zero rejects. Recording remains blocked until the new review set passes
+human inspection.
 
 ## Canonical action schema
 
@@ -258,7 +261,7 @@ distribution.
 
 The implementation checkpoint was verified on Windows with Unreal Engine 5.8:
 
-- all 53 Python unit, contract, and regression tests passed;
+- all 55 Python unit, contract, and regression tests passed;
 - every Python file under `Scripts/` compiled successfully;
 - `git diff --check` passed for the committed implementation;
 - the `he_grenade_gameEditor Win64 Development` target built successfully;
@@ -282,26 +285,34 @@ The implementation checkpoint was verified on Windows with Unreal Engine 5.8:
 - complete manifests that omit any requested episode are now rejected, closing
   the empty-shard fail-open condition found by the smoke run.
 
-The one-session verifier completed the 186-recipe review plan in 18.9 seconds
-without recording observations. It certified 179 recipes and rejected seven:
-one pyramid-apex recipe, uphill and downhill ramp-surface recipes, two left
-ramp-edge recipes, and two right ramp-edge recipes. It also rejected the exact
-historical rectangle-NW recipe before capture and identified the ramp as its
-first collision. These results prove the gate works and prove that the current
-catalog is not ready for review recording or production.
+The one-session verifier originally completed the 186-recipe review plan in
+18.9 seconds without recording observations and correctly rejected seven bad
+constructions. A subsequent one-million-frame plan exposed 68 later progressive
+failures: 60 ramp recipes and eight pyramid-apex recipes. The causes were catalog
+geometry errors, not physics tolerances: ramp X variation used the inverse of
+the authored downhill Z slope, and lateral pyramid-apex samples retained the
+apex Z coordinate instead of projecting onto the triangular surface.
+
+Catalog version 10 corrects those physical projections without widening edge or
+apex tolerances, changing grenade physics, adding retries, reducing parameter
+coverage, or replacing recipes. The corrected one-million-frame plan preserves
+35 variants for every affected ramp type and 37 pyramid-apex variants. Unreal
+5.8 certified all 2,468 recipes in 113.8 seconds with `complete: true` and zero
+rejects. The bound report is retained under
+`Artifacts/V2Plan1000000FramesFixed20260812/certification/` locally; generated
+plans and certification artifacts are not repository source.
 
 ## Required next work
 
 Complete the remaining work in this order:
 
-1. Fix all seven recipes rejected by the current full-plan report. Change the
-   global catalog/region construction; never substitute a seed or reserve.
-2. Rebuild Unreal, create a fresh immutable 186-recipe plan, and run
-   `Scripts/certify_v2_plan.py`. Require 186/186 certified and retain the bound
-   report. Do not record anything if it exits nonzero.
-3. Independently audit the implementation and successful certification report
+1. Independently audit the implementation and successful million-frame
+   certification report
    against this README and `V2_MISSION_DESIGN.md`.
-4. After explicit review-only authorization, execute the 186 assignments
+2. Create and certify a fresh immutable 186-recipe review plan from catalog
+   version 10. Require 186/186 certified and retain the bound report. Do not
+   record anything if certification exits nonzero.
+3. After explicit review-only authorization, execute the 186 assignments
    through `Scripts/dataset_worker.py`, then validate and render them with:
 
    ```powershell
@@ -309,19 +320,19 @@ Complete the remaining work in this order:
      --output Artifacts/V2ReviewPlan/videos
    ```
 
-5. Human-review all 186 videos for correct named interaction, target/region
+4. Human-review all 186 videos for correct named interaction, target/region
    visibility throughout, preview/target co-visibility, readable opening and
    timing, meaningful separated variation, and natural post-contact behavior.
-6. If any example is defective, fix the mission definition or certified region
+5. If any example is defective, fix the mission definition or certified region
    globally. Do not select a friendlier seed or add replacement logic. Rebuild
    and re-review the affected catalog consistently.
-7. Re-run the complete Python suite, Unreal build, native automation, full-plan
+6. Re-run the complete Python suite, Unreal build, native automation, full-plan
    certification, and the full 186-video review after any runtime, physics,
    catalog, camera, or timing
    change.
-8. Authorize production explicitly only after the independent code audit and
+7. Authorize production explicitly only after the independent code audit and
    human visual review both pass.
-9. Create the final production plan at the approved frame budget, statically
+8. Create the final production plan at the approved frame budget, statically
    verify it, batch-certify that exact immutable plan/build, then dispatch its
    assignments. Inventory credited frames, finalize WebP/Parquet output, and
    perform final technical/distribution validation.

@@ -83,6 +83,32 @@ class V2MissionCatalogTests(unittest.TestCase):
             self.assertGreater(solution["player_spawn"]["y"], 200.0)
             self.assertGreater(solution["target_point"]["y"], 400.0)
 
+    def test_budget_ramp_targets_follow_authored_downhill_plane(self) -> None:
+        by_slug = {item.slug: item for item in mission_types()}
+        for slug in (
+            "ramp_uphill_surface",
+            "ramp_downhill_surface",
+            "ramp_left_side_edge",
+            "ramp_right_side_edge",
+        ):
+            first = build_solution(by_slug[slug], 0, 20, sample_count=35)["target_point"]
+            last = build_solution(by_slug[slug], 34, 20, sample_count=35)["target_point"]
+            self.assertNotEqual(last["x"], first["x"], slug)
+            self.assertLess(
+                (last["x"] - first["x"]) * (last["z"] - first["z"]),
+                0.0,
+                slug,
+            )
+
+    def test_budget_apex_targets_remain_on_pyramid_surface(self) -> None:
+        item = next(value for value in mission_types() if value.slug == "pyramid_apex")
+        for repetition in range(37):
+            target = build_solution(item, repetition, 20, sample_count=37)["target_point"]
+            dx = abs(target["x"] - 700.0)
+            dy = abs(target["y"] - 700.0)
+            expected_z = 250.0 - (250.0 / 140.0) * max(dx, dy)
+            self.assertAlmostEqual(target["z"], expected_z, places=6)
+
     def test_continuous_variations_are_deterministic_and_well_separated(self) -> None:
         for item in mission_types():
             first = [build_solution(item, repetition, 20) for repetition in (0, 5, 17)]
