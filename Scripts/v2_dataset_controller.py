@@ -136,6 +136,11 @@ def write_new_jsonl(path: Path, values: Iterable[Any]) -> None:
             handle.write(canonical_json(value) + "\n")
 
 
+def canonical_source_bytes(value: bytes) -> bytes:
+    """Normalize text line endings before hashing cross-platform source."""
+    return value.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def generator_source_fingerprint() -> str:
     root = Path(__file__).resolve().parent.parent
     digest = hashlib.sha256()
@@ -149,7 +154,7 @@ def generator_source_fingerprint() -> str:
     for relative in (*GENERATOR_PIPELINE_FILES, *runtime_sources):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update((root / relative).read_bytes())
+        digest.update(canonical_source_bytes((root / relative).read_bytes()))
         digest.update(b"\0")
     return digest.hexdigest()
 

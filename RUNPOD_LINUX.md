@@ -35,6 +35,13 @@ Compute the package fingerprint on Linux. Filesystem ordering can make an
 aggregate fingerprint calculated on Windows unsuitable as the Linux binding,
 even when every individual runtime file is byte-identical.
 
+V2 plan identity uses a separate generator-source fingerprint. The planner
+canonicalizes CRLF, LF, and CR text line endings to LF before hashing source,
+so the same committed generator produces the same plan ID and assignment
+digests on Windows and Linux. This normalization changes identity metadata
+only; recipe construction, ordering, seeds, splits, and frame targets do not
+depend on source-file line endings.
+
 The RunPod template must expose graphics as well as compute. Set:
 
 ```text

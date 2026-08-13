@@ -35,6 +35,22 @@ def plan_args(root: Path, **overrides: object) -> argparse.Namespace:
 
 
 class V2PlannerTests(unittest.TestCase):
+    def test_source_fingerprint_line_endings_are_platform_independent(self) -> None:
+        expected = b"first line\nsecond line\nthird line\n"
+        self.assertEqual(controller.canonical_source_bytes(expected), expected)
+        self.assertEqual(
+            controller.canonical_source_bytes(
+                b"first line\r\nsecond line\r\nthird line\r\n"
+            ),
+            expected,
+        )
+        self.assertEqual(
+            controller.canonical_source_bytes(
+                b"first line\rsecond line\rthird line\r"
+            ),
+            expected,
+        )
+
     def test_campaign_budget_rounds_to_exact_v2_targets(self) -> None:
         self.assertEqual(
             controller.rounded_source_targets(2_222_222),
