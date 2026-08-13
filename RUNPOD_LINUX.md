@@ -208,7 +208,7 @@ canonical plan JSON, are:
 | Plan | Plan ID | Normalized plan SHA-256 | Recipes SHA-256 |
 | --- | --- | --- | --- |
 | V1 10k | `plan-b494b1c07ec20d12` | `4a4c465c4fbfb7f074182beff40dcc1ab491e345f7b367eef6c65c385bc895f3` | `40d6f52b44bd471a5778c5f6cdd56cc78f165b41f9bda5cae3d00ded29a9670c` |
-| V2 minimum | `v2plan-d3a839dff5c13469` | `d5ee6ea0dbdebc417f5154c4d5095120772adfbd4a2fed832f27e4f538d41e51` | `6b6d67e9877ed0ad672c3905414d82bed4888340703e1eca8d7d6bcb1f45769b` |
+| V2 minimum | `v2plan-3347fbb7b2a98fee` | `c850432cb06b22d4909c9681b07d8954f9b80e74b2bc31d015bba73b8a3b148a` | `6b6d67e9877ed0ad672c3905414d82bed4888340703e1eca8d7d6bcb1f45769b` |
 
 Only `created_utc` may differ. Plan IDs, recipes, assignments, allocations,
 catalog identity, replay identity, and generator-source identity must match.
@@ -251,7 +251,7 @@ With the current source and arguments, the candidate identities must be:
 
 ```text
 V1: plan-ed06f39e9f221ef5
-V2: v2plan-f6963ef7654ff948
+V2: v2plan-9feae38daf1e9fb5
 ```
 
 Do not proceed if the IDs or exact frame allocations differ from
