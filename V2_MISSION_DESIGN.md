@@ -3,9 +3,16 @@
 ## Status
 
 The catalog, construction-time certification, runtime playback, immutable
-planner, schemas, full-plan verifier, validators, and 186-recipe review tooling
-described here are implemented. The current full-plan report certifies 179
-recipes and rejects seven, so recording and production remain unauthorized.
+planner, schemas, full-plan verifier, validators, bounded pre-recording
+resolver, 85-video representative review tooling, and optional 186-video
+exhaustive V2 review tooling described here are implemented.
+
+The approved 2,222,222-frame V2 campaign contains 1,555,555 semi-Markov frames
+and 666,667 prescribed-mission frames. Its original certification passed all
+4,940 prescribed mission recipes. The complete final resolved plan passed
+5,459/5,459 recipes with zero rejects and is bound to the Windows Unreal Engine
+5.8 executable/package used for certification. RGB production capture has not
+yet run.
 
 ## Purpose
 
@@ -31,8 +38,9 @@ corners, and arena exits.
 3. A recipe may vary only legitimate player-controlled initial conditions and
    actions: spawn, camera yaw/pitch, action timing, and post-throw attention.
 4. Mission solutions are constructed and certified before video generation.
-5. Production does not generate candidates and then accept, reject, retry with
-   another seed, activate a reserve, or substitute another recipe.
+5. The planner and verifier never mutate recipes. A separate pre-recording
+   resolver may replace a rejected quota slot only through the bounded,
+   same-type policy below; the recorder never searches or substitutes.
 6. A technical retry may replay the identical immutable recipe after a machine
    interruption; it may not change the recipe or seed.
 7. Missions guarantee only their named interaction and its visibility.
@@ -41,10 +49,12 @@ corners, and arena exits.
 
 ## Catalog: 62 meaningful types
 
-Each type receives `3/620` (approximately 0.4839%) of total dataset frames.
-Variations within a type are continuous samples, not additional semantic labels.
+Each type receives the nearest whole-frame allocation to `3/620`
+(approximately 0.4839%) of total dataset frames. At most one frame separates
+type targets. Variations within a type are continuous samples, not additional
+semantic labels.
 
-### 1. Broad object-surface impacts — 13 types, 6.5%
+### 1. Broad object-surface impacts - 13 types, 6.5%
 
 Rectangle:
 
@@ -71,7 +81,7 @@ Sphere:
 Surface impacts must land safely inside their intended face/region and away
 from an edge corridor. Contact height, distance, arc, and obliqueness vary.
 
-### 2. Object edge and apex impacts — 13 types, 6.5%
+### 2. Object edge and apex impacts - 13 types, 6.5%
 
 Rectangle vertical corner edges:
 
@@ -100,7 +110,7 @@ geometry and grenade radius, not a zero-width mathematical line or point. Each
 type must support direct and oblique approaches that visibly produce different
 natural deflections.
 
-### 3. Wall and corner rebounds — 12 types, 6%
+### 3. Wall and corner rebounds - 12 types, 6%
 
 Direct wall contacts:
 
@@ -126,7 +136,7 @@ Two-wall corner interactions:
 Oblique direction and, for corners, first-contact order vary across repetitions
 without becoming separate labels.
 
-### 4. Hoop interactions — 10 types, 5%
+### 4. Hoop interactions - 10 types, 5%
 
 Clean passages:
 
@@ -147,7 +157,7 @@ Rim contacts from each direction:
 Clean passages vary across safe center and offset regions. Rim contacts target
 the physical tube body with margin; they are not tangent near-misses.
 
-### 5. Ramp interactions — 8 types, 4%
+### 5. Ramp interactions - 8 types, 4%
 
 1. uphill surface impact;
 2. downhill surface impact;
@@ -162,7 +172,7 @@ Lateral crossover launch and landing regions must lie on opposite sides of the
 ramp, and the simulated path must geometrically cross the ramp body. Merely
 moving laterally in front of or behind the ramp is not a crossover.
 
-### 6. Deliberate out-of-bounds — 4 types, 2%
+### 6. Deliberate out-of-bounds - 4 types, 2%
 
 1. north boundary exit;
 2. south boundary exit;
@@ -173,7 +183,7 @@ Directness, obliqueness, and exit height vary. The chosen boundary and useful
 arena context remain visible. Natural out-of-bounds throws also remain legal in
 semi-Markov play.
 
-### 7. Trajectory-control demonstrations — 2 types, approximately 0.9677%
+### 7. Trajectory-control demonstrations - 2 types, approximately 0.9677%
 
 1. manual trajectory-preview toggle cycle;
 2. throw, cooldown-hidden preview, reload, and unchanged-angle preview reopen.
@@ -210,8 +220,8 @@ semantic region.
 
 The exact resulting launch is simulated with the same function and config used
 by preview and realized play. A construction assertion confirms the named
-contact, crossing, passage, or exit. Failure aborts catalog/plan construction;
-it does not select another production seed.
+contact, crossing, passage, or exit. Inside the solution builder, failure aborts
+construction; the builder does not silently select another production seed.
 
 ### Certified variation region
 
@@ -283,8 +293,9 @@ interleaves families and spatial regions so early partial runs are not localized
 to one arena area.
 
 After the mandatory pass, it selects the type with the largest credited-frame
-deficit relative to its `3/620` target. Selection is frame-based, not episode-count
-based, so longer flights do not receive accidental excess weight.
+deficit relative to its whole-frame `3/620` target. Selection is frame-based,
+not episode-count based, so longer flights do not receive accidental excess
+weight.
 
 At a 700,000-frame budget:
 
@@ -311,7 +322,7 @@ contains all 62 mission types at least once. No runtime recipe is invented to
 repair a plan.
 
 With the default 150-second semi-Markov duration and the certified 20 Hz
-observation rate, the calculated floor is 33,280 frames. The planner derives and
+observation rate, the calculated floor is 33,274 frames. The planner derives and
 recomputes this value from mandatory durations and shares rather than storing it
 as a legacy constant. Observation rates other than 20 Hz are rejected until they
 have their own physics and camera certification.
@@ -337,24 +348,50 @@ not applicable. The bound report records every recipe result and fingerprints:
 - the exact executable and packaged runtime;
 - the canonical physics identity and Unreal version.
 
-Any rejected recipe makes the command exit unsuccessfully and blocks recording.
-The catalog must be fixed globally and a new immutable plan certified. The
-worker repeats construction certification immediately before each mission as a
-second fail-closed check against runtime mismatch.
+Any rejected recipe makes the command exit unsuccessfully and blocks recording
+of that candidate plan. The worker repeats construction certification
+immediately before each mission as a second fail-closed check against runtime
+mismatch.
 
 The verifier is not a candidate search. It never changes a seed, selects a
 replacement, or approves a subset. Its only valid production result is a
 complete report with every recipe certified.
+
+### Bounded pre-recording resolution
+
+`Scripts/resolve_plan_certification.py` consumes the complete verifier report;
+it does not modify the verifier or its acceptance thresholds. For each rejected
+quota slot it:
+
+1. preserves the original recipe and engine failure evidence;
+2. tries up to ten distinct candidates of the same mission type and scenario;
+3. orders attempts from diverse to increasingly conservative variation;
+4. if those fail, may mutate toward an already certified recipe of the same
+   mission type while retaining the failed slot's type, scenario, split, and
+   frame cap;
+5. records every attempt and its certification result;
+6. emits a new immutable resolved collection; and
+7. runs `certify_v2_plan.py` over the complete resolved collection to create the
+   ordinary plan/build-bound recording certificate.
+
+An unresolved slot keeps the campaign incomplete. No partial plan is approved.
+The approved V2 campaign needed no replacements: 4,940/4,940 original mission
+recipes certified.
 
 ## Crediting, failures, and validation
 
 Semi-Markov episodes are always credited when technically valid. No behavioral
 or statistical threshold can reject them.
 
-Mission recipes are not part of an accept/reject search. Their named event is an
-invariant already established during construction. If runtime output disagrees,
-generation stops as a code or physics regression. It does not credit a
-replacement seed.
+Mission recipes are not part of a recording-time accept/reject search. Their
+named event is an invariant already established during construction and final
+plan certification. If runtime output disagrees, generation stops as a code or
+physics regression. It does not credit a replacement seed.
+
+`planned_credited_frames` is allocation metadata, not a storage truncation
+instruction. Finalization retains every valid observation and transition in the
+complete episode. The worker reports both produced and credited observations;
+training should use complete episodes and must never join different episode IDs.
 
 Machine checks cover:
 
@@ -373,10 +410,15 @@ Machine checks cover:
 Machine checks do not approve visual quality. Human review decides whether
 pacing, framing, variation, and interactions are understandable.
 
-## Human review set
+## Human review sets
 
-Before production, generate exactly three 384x384 examples for every type: 186
-videos total.
+The current representative contract is the fixed 85-video V1/V2 suite: 19 V1
+videos and 66 V2 videos. It was generated and accepted during the current
+project review. This media audit is separate from plan certification and
+production data capture.
+
+The repository also supports an optional exhaustive V2 review: exactly three
+384x384 examples for every type, or 186 videos total.
 
 The three examples sample separated parts of the certified region:
 
@@ -390,32 +432,32 @@ human-readable timing, and repetition. A bad example requires fixing the mission
 definition or certified region globally; it is never replaced by a friendlier
 seed.
 
-No complete production generation begins until this review is accepted by the
-human auditor.
+Video review checks usefulness and readability; construction certification
+checks physics and named events. Rendering a video is not a second physics
+verifier.
 
 ## Implementation status
 
-Implemented:
+Implemented and verified:
 
-1. catalog-count, share, deterministic-identity, and no-replacement tests;
+1. catalog-count, share, deterministic-identity, and fail-closed recorder tests;
 2. focused geometry, timing, camera, variation, and canonical-identity tests for
    all 62 types;
 3. the construction-time low-branch ballistic and camera solution builder;
 4. frozen deterministic solution regions and immutable mission recipes;
-5. the exact 70/30 frame planner, mandatory pass, deficit scheduling, and
+5. exact whole-frame 70/30 allocation, mandatory pass, deficit scheduling, and
    calculated feasibility floor;
 6. runtime playback using ordinary player inputs and canonical throws;
 7. technical and invariant validation without statistical acceptance gates;
-8. tooling that prepares, validates, and renders the exact 186-video review set;
+8. fixed 85-video representative tooling and optional 186-video V2 tooling;
 9. one-session full-plan construction certification with immutable build and
-   plan bindings.
+   plan bindings;
+10. bounded pre-recording replacement lineage and full resolved-plan
+    recertification;
+11. the approved 2,222,222-frame V2 campaign, passing 4,940/4,940 original
+    mission recipes and 5,459/5,459 final total recipes.
 
-Not performed:
-
-1. fixing the seven recipes rejected by the current full-plan report;
-2. generating or visually auditing the 186 review videos;
-3. applying any additional global catalog/region fixes that a human audit may require;
-4. authorizing production.
-
-Movement V1 missions and the shared V1/V2 semi-Markov policy must remain
-unchanged while this work is implemented.
+Remaining operational work is RGB capture, exact produced-frame inventory, and
+Linux-specific build binding/recertification if capture moves from the currently
+certified Windows build. Movement V1 mission semantics and the shared V1/V2
+semi-Markov policy remain protected by regression tests.
