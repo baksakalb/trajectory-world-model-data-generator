@@ -16,9 +16,15 @@ clone does not lose the result.
 | Executable SHA-256 | `327209aa83f741c91e32e3b61b3a6744b18cf0adaefd89586e62f2c743f2394b` |
 | Candidate V1 plan | `plan-ed06f39e9f221ef5` |
 | Resolved V1 plan | `resolved-ac203dfcab087bac` |
-| Candidate V2 plan | `v2plan-9feae38daf1e9fb5` |
+| Candidate V2 plan | `v2plan-f6963ef7654ff948` |
 | Resolved V2 plan | `resolved-7262de08ffd6f518` |
 | Final status | Complete |
+
+This table intentionally retains the historical Windows-bound V2 identity to
+match its resolved plan and certificates. The current portable Windows/Linux
+candidate has identical recipes but uses the canonical source fingerprint and
+plan ID `v2plan-9feae38daf1e9fb5`; see `RUNPOD_LINUX.md`. The historical Windows
+certificate does not authorize Linux recording.
 
 Local evidence root:
 
