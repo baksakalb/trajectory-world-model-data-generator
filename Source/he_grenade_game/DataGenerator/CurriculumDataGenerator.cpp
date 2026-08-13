@@ -150,11 +150,12 @@ namespace
 
 	constexpr double AutomatedMissionFrameShares[] =
 	{
-		55.0 / 90.0, // Semi-Markov. The remaining 10% of the final mixture is human.
-		20.0 / 90.0, // Object-view navigation.
-		5.0 / 90.0,  // Deliberate contact and recovery.
-		5.0 / 90.0,  // Ramp traversal.
-		5.0 / 90.0   // Hoop passage.
+		0.700, // Semi-Markov.
+		0.132, // Object-view navigation.
+		0.099, // Deliberate contact and recovery.
+		0.033, // Ramp traversal.
+		0.033, // Hoop passage.
+		0.003  // Ten-second static no-input control.
 	};
 	constexpr double ObjectViewModeFrameShares[] = {0.40, 0.35, 0.20, 0.05};
 	constexpr double ObjectGazeIntentFrameShares[] = {0.40, 0.25, 0.20, 0.15};
@@ -1837,9 +1838,11 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		CurrentV2PreviewDwellSteps = Recipe.PreviewDwellSteps;
 		CurrentV2MissionObservationFrames = Recipe.MissionObservationFrames;
 		CurrentV2ExpectedContactOrder = Recipe.ExpectedContactOrder;
-		TransitionsPerEpisode = bV2MissionRecipe
-			? FMath::Max(1, CurrentV2MissionObservationFrames - 1)
-			: EpisodeSeconds * ObservationRate;
+		TransitionsPerEpisode = Recipe.Mission == TEXT("static_no_input")
+			? FMath::Max(1, (10 * ObservationRate) - 1)
+			: (bV2MissionRecipe
+				? FMath::Max(1, CurrentV2MissionObservationFrames - 1)
+				: EpisodeSeconds * ObservationRate);
 	}
 
 	const int32 EpisodeSeed = SeedStart + EpisodeIndex;
@@ -5364,6 +5367,9 @@ void ACurriculumDataGenerator::SelectCoverageMission()
 	bCoverageHoopCrossingRecorded = false;
 	bCoverageMissionSucceeded = false;
 	bCoverageMissionFailed = false;
+	bStaticNoInputInitialStateValid = false;
+	StaticNoInputInitialPosition = FVector::ZeroVector;
+	StaticNoInputInitialCameraRotation = FRotator::ZeroRotator;
 	bCoverageMissionConfigurationValid = true;
 	bRampMounted = false;
 	bHoopPositiveToNegative = false;
@@ -5402,6 +5408,10 @@ void ACurriculumDataGenerator::SelectCoverageMission()
 		else if (MissionOverride == TEXT("hoop_pass"))
 		{
 			CoverageMission = ECoverageMission::HoopPass;
+		}
+		else if (MissionOverride == TEXT("static_no_input"))
+		{
+			CoverageMission = ECoverageMission::StaticNoInput;
 		}
 		else
 		{
@@ -5459,6 +5469,11 @@ void ACurriculumDataGenerator::SelectCoverageMission()
 		else if (MissionOverride == TEXT("hoop_pass"))
 		{
 			CoverageMission = ECoverageMission::HoopPass;
+			bMissionOverridden = true;
+		}
+		else if (MissionOverride == TEXT("static_no_input"))
+		{
+			CoverageMission = ECoverageMission::StaticNoInput;
 			bMissionOverridden = true;
 		}
 	}
@@ -5527,6 +5542,9 @@ void ACurriculumDataGenerator::SelectCoverageMission()
 		break;
 	case ECoverageMission::HoopPass:
 		ConfigureHoopMission();
+		break;
+	case ECoverageMission::StaticNoInput:
+		// Spawn, actions, duration, and invariants are contractual below.
 		break;
 	default:
 		break;
@@ -7249,8 +7267,44 @@ void ACurriculumDataGenerator::ConfigureHoopMission()
 bool ACurriculumDataGenerator::GetCoverageMissionSpawn(
 	FVector& OutLocation,
 	float& OutYaw,
-	float& OutPitch) const
+	float& OutPitch)
 {
+	if (CoverageMission == ECoverageMission::StaticNoInput)
+	{
+		UWorld* World = GetWorld();
+		UCapsuleComponent* Capsule = Character ? Character->GetCapsuleComponent() : nullptr;
+		if (!World || !Capsule)
+		{
+			return false;
+		}
+		const int32 Scenario = FMath::Clamp(CurrentPrescribedScenarioIndex, 0, 14);
+		const int32 XStratum = Scenario % 5;
+		const int32 YStratum = Scenario / 5;
+		const float XMinimum = -1300.0f + (520.0f * XStratum);
+		const float YMinimum = -1300.0f + ((2600.0f / 3.0f) * YStratum);
+		const FCollisionShape Shape = FCollisionShape::MakeCapsule(
+			Capsule->GetScaledCapsuleRadius(),
+			Capsule->GetScaledCapsuleHalfHeight());
+		FCollisionQueryParams QueryParams(
+			SCENE_QUERY_STAT(CurriculumStaticNoInputSpawn), false, Character);
+		for (int32 Attempt = 0; Attempt < 100; ++Attempt)
+		{
+			const FVector Candidate(
+				EpisodeRandom.FRandRange(XMinimum + 45.0f, XMinimum + 475.0f),
+				EpisodeRandom.FRandRange(YMinimum + 45.0f, YMinimum + (2600.0f / 3.0f) - 45.0f),
+				100.0f);
+			if (!World->OverlapBlockingTestByChannel(
+				Candidate, FQuat::Identity, ECC_Pawn, Shape, QueryParams))
+			{
+				OutLocation = Candidate;
+				OutYaw = EpisodeRandom.FRandRange(-180.0f, 180.0f);
+				OutPitch = EpisodeRandom.FRandRange(-70.0f, 80.0f);
+				return true;
+			}
+		}
+		return false;
+	}
+
 	FVector LookTarget = FVector::ZeroVector;
 	if (CoverageMission == ECoverageMission::ObjectView
 		&& CoverageTargetIndex != INDEX_NONE)
@@ -7719,6 +7773,51 @@ void ACurriculumDataGenerator::UpdateCoverageMetrics(
 	CurrentCoveragePositionDistanceBand = INDEX_NONE;
 	CurrentMovementCameraYawDeltaDegrees = 0.0f;
 
+	if (CoverageMission == ECoverageMission::StaticNoInput)
+	{
+		if (bCoverageMissionSucceeded)
+		{
+			++CoveragePostSuccessSteps;
+			++OverallPostSuccessObservationFrames;
+			return;
+		}
+		if (!bStaticNoInputInitialStateValid)
+		{
+			StaticNoInputInitialPosition = State.Position;
+			StaticNoInputInitialCameraRotation = State.CameraRotation;
+			bStaticNoInputInitialStateValid = true;
+		}
+		const float TranslationErrorCm = FVector::Dist2D(
+			StaticNoInputInitialPosition,
+			State.Position);
+		const float YawErrorDegrees = FMath::Abs(FMath::FindDeltaAngleDegrees(
+			StaticNoInputInitialCameraRotation.Yaw,
+			State.CameraRotation.Yaw));
+		const float PitchErrorDegrees = FMath::Abs(FMath::FindDeltaAngleDegrees(
+			StaticNoInputInitialCameraRotation.Pitch,
+			State.CameraRotation.Pitch));
+		if (CurrentActionMask != 0
+			|| TranslationErrorCm > 1.0f
+			|| YawErrorDegrees > 0.01f
+			|| PitchErrorDegrees > 0.01f)
+		{
+			bCoverageMissionFailed = true;
+			return;
+		}
+		// Latch success one observation before the 200th frame so the ordinary
+		// one-frame completion rollout ends at exactly 200 observations.
+		if (ObservationIndex >= (10 * ObservationRate) - 2)
+		{
+			bCoveragePrimaryObjectiveAchieved = true;
+			bCoverageMissionSucceeded = true;
+			StartPostSuccessRollout(State, ObservationIndex);
+			CoverageRequiredPostSuccessSteps = 1;
+		}
+		CoveragePreviousPosition = State.Position;
+		bCoveragePreviousPositionValid = true;
+		return;
+	}
+
 	if (CoverageMission == ECoverageMission::SemiMarkov || bV2SemiMarkovRecipe)
 	{
 		if (State.bContact)
@@ -8085,6 +8184,8 @@ FString ACurriculumDataGenerator::GetCoverageMissionSlug() const
 		return TEXT("ramp_traverse");
 	case ECoverageMission::HoopPass:
 		return TEXT("hoop_pass");
+	case ECoverageMission::StaticNoInput:
+		return TEXT("static_no_input");
 	default:
 		return TEXT("semi_markov");
 	}
@@ -8539,6 +8640,11 @@ void ACurriculumDataGenerator::PrepareNextAction()
 	{
 		ApplyAction(SelectPersistentSemiMarkovAction(
 			CurriculumStage == ECurriculumStage::TrajectoryThrowV2));
+		return;
+	}
+	if (CoverageMission == ECoverageMission::StaticNoInput)
+	{
+		ApplyAction(0);
 		return;
 	}
 
@@ -9387,7 +9493,8 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 		TEXT("  \"agent_frame_summary\": {\n")
 		TEXT("    \"mission_observations\": {\"semi_markov\": %lld, ")
 		TEXT("\"object_view\": %lld, \"contact_recovery\": %lld, ")
-		TEXT("\"ramp_traverse\": %lld, \"hoop_pass\": %lld},\n")
+		TEXT("\"ramp_traverse\": %lld, \"hoop_pass\": %lld, ")
+		TEXT("\"static_no_input\": %lld},\n")
 		TEXT("    \"post_success_observations\": %lld,\n")
 		TEXT("    \"object_view_modes\": {\"approach_observe\": %lld, ")
 		TEXT("\"pass_by\": %lld, \"partial_orbit\": %lld, \"full_orbit\": %lld},\n")
@@ -9501,6 +9608,8 @@ FString ACurriculumDataGenerator::BuildDatasetJson(
 			static_cast<int32>(ECoverageMission::RampTraverse)]),
 		static_cast<long long>(OverallMissionObservationFrames[
 			static_cast<int32>(ECoverageMission::HoopPass)]),
+		static_cast<long long>(OverallMissionObservationFrames[
+			static_cast<int32>(ECoverageMission::StaticNoInput)]),
 		static_cast<long long>(OverallPostSuccessObservationFrames),
 		static_cast<long long>(OverallObjectModeObservationFrames[
 			static_cast<int32>(EObjectViewMode::ApproachObserve)]),

@@ -35,6 +35,12 @@ def plan_args(root: Path, **overrides: object) -> argparse.Namespace:
 
 
 class V2PlannerTests(unittest.TestCase):
+    def test_campaign_budget_rounds_to_exact_v2_targets(self) -> None:
+        self.assertEqual(
+            controller.rounded_source_targets(2_222_222),
+            {"semi_markov": 1_555_555, "mission": 666_667},
+        )
+
     def test_catalog_has_exactly_the_agreed_sixty_types_and_shares(self) -> None:
         values = mission_types()
         self.assertEqual(len(values), 62)
@@ -88,15 +94,20 @@ class V2PlannerTests(unittest.TestCase):
             mandatory = sum(controller.mission_expected_frames(item, rate) for item in grouped[family])
             candidates.append(Fraction(mandatory, 1) / share)
         raw = max((item.numerator + item.denominator - 1) // item.denominator for item in candidates)
-        expected = ((raw + 9) // 10) * 10
+        expected = raw
         self.assertEqual(controller.minimum_feasible_frame_budget(150, rate), expected)
-        self.assertEqual(expected, 33_280)
+        self.assertEqual(expected, 33_274)
         with self.assertRaisesRegex(ValueError, "calculated minimum"):
             controller.build_recipes(expected - 200, 150, rate, 1, 10)
 
-    def test_budget_quantum_is_required_for_exact_type_shares(self) -> None:
-        with self.assertRaisesRegex(ValueError, "divisible by 10"):
-            controller.build_recipes(700_001, 150, 20, 1, 10)
+    def test_non_quantized_budget_is_accounted_exactly(self) -> None:
+        recipes = controller.build_recipes(700_001, 150, 20, 1, 10)
+        distribution = controller.planned_distribution(recipes)
+        self.assertEqual(distribution["total_credited_frames"], 700_001)
+        self.assertEqual(
+            distribution["source_frames"],
+            controller.rounded_source_targets(700_001),
+        )
 
     def test_types_reach_both_splits_when_budget_permits(self) -> None:
         recipes = controller.build_recipes(700_000, 150, 20, 200_000, 10)

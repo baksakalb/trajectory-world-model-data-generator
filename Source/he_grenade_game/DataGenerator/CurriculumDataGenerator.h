@@ -76,6 +76,7 @@ private:
 		ContactRecovery,
 		RampTraverse,
 		HoopPass,
+		StaticNoInput,
 		Count
 	};
 
@@ -338,7 +339,7 @@ private:
 	void ConfigureContactRecoveryMission();
 	void ConfigureRampMission();
 	void ConfigureHoopMission();
-	bool GetCoverageMissionSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch) const;
+	bool GetCoverageMissionSpawn(FVector& OutLocation, float& OutYaw, float& OutPitch);
 	void UpdateCoverageMetrics(
 		const FRecordedState& State,
 		int32 ObservationIndex);
@@ -636,9 +637,12 @@ private:
 	bool bCoverageHoopCrossingRecorded = false;
 	bool bCoverageMissionSucceeded = false;
 	bool bCoverageMissionFailed = false;
+	bool bStaticNoInputInitialStateValid = false;
 	bool bCoverageMissionConfigurationValid = true;
 	bool bRampMounted = false;
 	bool bHoopPositiveToNegative = false;
+	FVector StaticNoInputInitialPosition = FVector::ZeroVector;
+	FRotator StaticNoInputInitialCameraRotation = FRotator::ZeroRotator;
 	bool bConfigured = false;
 	bool bRunFinished = false;
 	bool bEpisodeActive = false;

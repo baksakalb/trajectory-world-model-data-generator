@@ -23,9 +23,11 @@ V1_FUNCTION_HASHES = {
     "ConfigureContactRecoveryMission": "67096c47d079791f050f4c8cfcf69f23ba2285cffa72e9d99c1ce1441e1204f1",
     "ConfigureRampMission": "8c8d735d51cd0361470712323bf4e8eaca806b3b256f5efaf240ce2296784600",
     "ConfigureHoopMission": "71b0656f3cc67a90199790413a9c58606dd21e8a48d0a097ae971e795aaac6c1",
-    "GetCoverageMissionSpawn": "04809fcd1adc52bb938c3f7842ef2f21c45399f9efe9db9a4c0433d09e552e92",
+    # The only changed shared spawn function adds the isolated static-no-input
+    # branch before the preserved object/contact/ramp/hoop implementation.
+    "GetCoverageMissionSpawn": "69cc47c661c769c69ffbbfa8dd964f163248a071158d1b3259d04f40d8613156",
 }
-V1_CONTROLLER_HASH = "45b7f65502b4d32e8f084f31b222921ebc70e9c38ebf349360245bb897a43a23"
+V1_CONTROLLER_HASH = "d09eebbd31d1988e9041c4fb2cb52cd0aa7534ded8c46581c7f968832d314b08"
 
 
 def function_text(source: str, name: str) -> str:

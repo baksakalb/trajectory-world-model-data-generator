@@ -22,7 +22,7 @@ import dataset_worker as worker
 def plan_args(
     root: Path,
     *,
-    budget: int = 600000,
+    budget: int = 1200000,
     workers: int = 1,
     seed_start: int = 1000,
     allow_infeasible_diagnostic: bool = False,
@@ -48,7 +48,7 @@ def plan_args(
 
 
 def create(
-    root: Path, *, budget: int = 600000, workers: int = 1, seed_start: int = 1000
+    root: Path, *, budget: int = 1200000, workers: int = 1, seed_start: int = 1000
 ) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         controller.create_plan(
@@ -57,6 +57,19 @@ def create(
 
 
 class ControllerContractTests(unittest.TestCase):
+    def test_campaign_budget_rounds_to_exact_v1_targets(self) -> None:
+        self.assertEqual(
+            controller.rounded_frame_targets(1_111_111),
+            {
+                "semi_markov": 777_778,
+                "object_view": 146_666,
+                "contact_recovery": 110_000,
+                "ramp_traverse": 36_667,
+                "hoop_pass": 36_667,
+                "static_no_input": 3_333,
+            },
+        )
+
     def test_complete_catalog_and_single_worker_invariant(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -87,7 +100,7 @@ class ControllerContractTests(unittest.TestCase):
             small = base / "small"
             large = base / "large"
             create(small, budget=controller.minimum_feasible_frame_budget() + 1000)
-            create(large, budget=650000)
+            create(large, budget=1250000)
             fields = (
                 "recipe_index",
                 "episode_index",
@@ -150,7 +163,7 @@ class ControllerContractTests(unittest.TestCase):
     def test_planned_frame_distribution_and_nested_weights(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "collection"
-            create(root, budget=600000)
+            create(root, budget=1200000)
             plan = controller.read_json(root / "plan" / "collection-plan.json")
             recipes = controller.read_jsonl(root / "plan" / "recipes.jsonl")[: plan["base_recipe_count"]]
             expected = {
@@ -184,12 +197,15 @@ class ControllerContractTests(unittest.TestCase):
         requirements = controller.feasibility_requirements()
         self.assertEqual(
             controller.minimum_feasible_frame_budget(),
-            requirements["contact_recovery"]["minimum_total_budget"],
+            requirements["static_no_input"]["minimum_total_budget"],
         )
-        self.assertTrue(requirements["contact_recovery"]["limiting_requirement"].startswith("facing="))
+        self.assertEqual(
+            requirements["static_no_input"]["limiting_requirement"],
+            "complete_mission_catalog",
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "collection"
-            create(root, budget=600000)
+            create(root, budget=1200000)
             plan = controller.read_json(root / "plan" / "collection-plan.json")
             assignments = [controller.read_json(path) for path in sorted((root / "assignments").glob("*.json"))]
             for assignment in assignments:

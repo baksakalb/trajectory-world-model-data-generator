@@ -15,9 +15,9 @@ The curriculum has two stages:
   immutable launch/camera solutions are certified with the canonical simulator
   before capture.
 
-V2 plans allocate exactly 70% of credited frames to semi-Markov play and 30% to
-prescribed missions. Each of the 62 mission types receives exactly `3/620`
-(approximately 0.4839%) of the total frame budget.
+V2 plans allocate whole-frame targets nearest to 70% semi-Markov and 30%
+prescribed missions, while always summing exactly to the requested budget. The
+62 mission types differ by at most one credited frame.
 
 Production generation is not authorized until the current semi-Markov policy
 and the implemented V2 missions pass human visual review.
@@ -30,8 +30,8 @@ production still requires the prescribed human visual review:
 
 - the immutable catalog contains exactly 62 mission types in seven mission
   families, including two trajectory-control demonstrations;
-- the planner produces an exact 70/30 credited-frame split and an exact `3/620`
-  share for every mission type;
+- the planner produces an exact whole-frame budget, nearest-integer 70/30 source
+  targets, and mission-type targets that differ by at most one frame;
 - every feasible plan begins with one semi-Markov recipe and one recipe for all
   62 mission types, then uses deterministic largest-frame-deficit scheduling;
 - the feasibility floor is calculated from mandatory recipe durations and
@@ -49,12 +49,14 @@ production still requires the prescribed human visual review:
 - Movement V1 planning and guided-mission behavior remain protected by
   byte-preservation regression tests.
 
-The implementation deliberately contains no qualification search, behavioral
-acceptance gate, alternate production seed, reserve recipe, semantic retry, or
-replacement path. A realized certified-mission disagreement is preserved as an
-uncredited failed episode and generation continues through the immutable plan;
-the final inventory reports the shortfall and exact failed recipes. A technical
-failure such as a crash, corrupt output, or validation failure stops the worker.
+The recorder deliberately contains no qualification search, alternate seed, or
+runtime replacement path. Before recording, a separate resolver may replace a
+candidate-plan recipe that fails no-capture certification. It preserves the
+failed recipe and evidence, tries at most ten distinct same-slot candidates in
+increasingly conservative order, records complete lineage, and emits a new
+immutable plan. That resolved plan is certified again and bound to the exact
+executable before it can be recorded. A disagreement while recording remains a
+regression and is never replaced on the fly.
 
 The no-capture verifier certifies the complete immutable production plan before
 recording. The current one-million-frame plan certified all 2,468 recipes
@@ -131,12 +133,14 @@ be recorded as rejected gameplay without rejecting its episode.
 
 ## Movement V1
 
-V1 retains four guided families:
+V1 contains five guided families:
 
 - object view/navigation;
 - contact and recovery;
 - ramp traversal;
-- hoop passage.
+- hoop passage;
+- static no-input controls, with a collision-safe random spawn and fixed random
+  camera orientation for ten seconds.
 
 The immutable V1 planner contains 855 guided catalog cells plus 32 semi-Markov
 opening cells. The large count comes from crossing meaningful tasks with gaze,
@@ -144,7 +148,7 @@ facing, recovery, and path variants. Approximately 59 combinations represent
 the distinct task geometry a human reviewer needs to understand.
 
 V1 planning schedules every catalog cell once, then balances additional work in
-credited frame units. Its current calculated minimum feasible budget is 516,800
+credited frame units. Its current calculated minimum feasible budget is 1,000,000
 frames. That floor belongs only to V1 and must not be reused for V2.
 
 Existing V1 datasets and previously approved videos are unchanged.
@@ -157,7 +161,9 @@ credited-frame deficit. Repetitions progress through deterministic coverage
 cells (surface/rim position, distance, arc, approach side, and two-wall contact
 order) before refining those cells with seeded continuous offsets. The
 implementation has no candidate qualification, reserve recipes, replacement
-seeds, or post-generation behavioral rejection.
+seeds, or post-generation behavioral rejection inside the planner or recorder.
+Qualification and any pre-recording substitution are handled by the separate
+bounded resolver, leaving the canonical planner and verifier unchanged.
 
 The implemented V2 mixture is:
 
@@ -172,14 +178,14 @@ The implemented V2 mixture is:
 | Deliberate out-of-bounds | 4 | 2% |
 | Trajectory-control demonstrations | 2 | 0.9677% |
 
-Each of the 62 mission types therefore receives `3/620` of total frames. Ordinary
+Each of the 62 mission types therefore receives the nearest whole-frame
+allocation to `3/620` of total frames. Ordinary
 misses, floor throws, settling, bounce-count variants, generic temporal actions,
 and multi-throw play remain the responsibility of semi-Markov episodes.
 
 V2 missions must be constructed from canonical-physics solutions before video
-generation. Production will sample only from frozen, known-working launch and
-camera regions. It will not generate candidates and then accept, reject, retry,
-or replace seeds.
+generation. Production records only the frozen recipes in a zero-rejection
+resolved plan.
 
 Every mission must keep its intended object region or arena boundary visible
 from the opening through the required interaction and final frame. During Q
@@ -189,7 +195,7 @@ together. A mission may not open on an empty-sky or floor-only view.
 The V2 minimum feasible frame budget is calculated from the frozen mission
 durations, mandatory semi-Markov opening, and exact family shares. At the
 certified 20 Hz observation rate and default 150-second semi-Markov duration it
-is 33,280 frames. The duration-dependent floor is recomputed; non-20-Hz plans
+is 33,274 frames. The duration-dependent floor is recomputed; non-20-Hz plans
 are rejected because their physics/camera timing has not been certified.
 
 The complete agreed implementation contract is in `V2_MISSION_DESIGN.md`.
@@ -269,6 +275,23 @@ V1 and V2 plans, run their structural verifiers, run each stage's no-capture
 certifier, record assignments, validate package integrity, and only then render
 the separately selected 85-video human-audit set. Video creation is not a
 mission-physics verification pass.
+
+For the approved campaign—1,000,000 mission frames plus 2,333,333 semi-Markov
+frames, split one-third V1 and two-thirds V2—the Windows orchestration command
+is:
+
+```powershell
+python Scripts/plan_verify_resolve_windows.py Artifacts/WindowsCampaign3333333 `
+  --executable "C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe"
+```
+
+This creates both candidate plans, runs both structural verifiers, performs
+their existing no-capture runtime/physics certification, resolves rejected
+mission slots without weakening either verifier, certifies each final resolved
+plan again using the standard recording gate, and writes
+`windows-plan-verification-report.json`. It does not record RGB data or render
+videos. Candidate plans and every failed/replacement attempt remain immutable
+under the campaign directory.
 
 Run assignments with `Scripts/dataset_worker.py`, inspect progress with the V1
 or V2 controller's `inventory` command, and validate/render review media with
@@ -370,12 +393,12 @@ source and test output:
 - catalog counts `13 + 13 + 12 + 10 + 8 + 4 + 2 = 62`, exact family shares, and
   unique deterministic identities;
 - one mandatory pass over every type before deterministic frame-deficit
-  scheduling, exact 70/30 allocation, exact `3/620` per type, calculated floor,
-  and train/evaluation separation when the budget permits;
+  scheduling, exact whole-frame source/type targets, calculated floor, and
+  train/evaluation separation when the budget permits;
 - unconditional credit for technically valid semi-Markov episodes and no
   behavioral/statistical rejection thresholds;
-- absence of candidate, qualification, reserve, alternate-seed, substitution,
-  or semantic-replacement paths across planner, worker, runtime, and validator;
+- absence of candidate search or substitution inside the worker/runtime, and a
+  bounded, fully reported pre-recording resolver that never weakens a verifier;
 - one canonical `FGrenadeSimConfig`, fixed launch speed, identical preview and
   realized launch state, construction-time canonical simulation, and runtime
   invariant failure handling;
@@ -405,13 +428,17 @@ source and test output:
   and 186-recipe review-plan builder.
 - `Scripts/certify_v2_plan.py`: one-session, no-capture construction verifier
   with plan, assignment, executable, runtime-package, and source bindings.
+- `Scripts/resolve_plan_certification.py`: bounded pre-recording replacement
+  rounds, immutable lineage, resolved-plan construction, and final certification.
+- `Scripts/plan_verify_resolve_windows.py`: exact 3,333,333-frame Windows
+  campaign planner, verifier, resolver, and combined report.
 - `Scripts/build_v2_review_set.py`: authorized review-capture validator and
   renderer.
 - `Scripts/dataset_worker.py`: assignment execution and frame crediting.
 - `Scripts/finalize_production_dataset.py`: WebP/Parquet finalization.
 - `Scripts/review_dataset.py`: technical validation and MP4 rendering.
 
-Historical V2 audit, calibration, reserve, and replacement systems remain
-deleted. The implemented mission design uses construction-time certification
-and treats runtime disagreement as a regression, never as a search for a more
-convenient seed.
+Historical runtime replacement systems remain deleted. The implemented mission
+design uses construction-time certification; only the bounded pre-recording
+resolver may substitute a failed candidate-plan slot. Runtime disagreement is a
+regression, never a search for a more convenient seed.

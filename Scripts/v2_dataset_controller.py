@@ -33,7 +33,7 @@ SOURCE_FRAME_SHARES = {
 }
 MINIMUM_EPISODE_SECONDS = 120
 MAXIMUM_EPISODE_SECONDS = 180
-PRODUCTION_BUDGET_QUANTUM = 10  # preserves the exact 70/30 source split
+PRODUCTION_BUDGET_QUANTUM = 1  # rounded whole-frame 70/30 targets support any budget
 V2_OBSERVATION_RATE = 20
 FORBIDDEN_V2_KEYS = {
     "candidate_seed", "reserve_activation_for", "reserve_for",
@@ -51,6 +51,12 @@ GENERATOR_PIPELINE_FILES = (
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def rounded_source_targets(frame_budget: int) -> dict[str, int]:
+    """Return whole-frame 70/30 targets whose sum is exactly the budget."""
+    mission = (frame_budget * 3 + 5) // 10
+    return {"semi_markov": frame_budget - mission, "mission": mission}
 
 
 def stable_id(prefix: str, value: Any, length: int = 16) -> str:
@@ -313,21 +319,16 @@ def build_recipes(
         raise ValueError(
             f"V2 frame budget {frame_budget} is below calculated minimum {floor}"
         )
-    if frame_budget % PRODUCTION_BUDGET_QUANTUM:
-        raise ValueError(
-            f"V2 frame budget must be divisible by {PRODUCTION_BUDGET_QUANTUM} "
-            "to preserve every exact 0.5% type share"
-        )
-
     type_values = mission_types()
     type_index = {item.slug: index for index, item in enumerate(type_values)}
-    mission_total = frame_budget * 3 // 10
+    source_targets = rounded_source_targets(frame_budget)
+    mission_total = source_targets["mission"]
     base_type_target, extra_type_targets = divmod(mission_total, len(type_values))
     type_targets = {
         item.slug: base_type_target + (index < extra_type_targets)
         for index, item in enumerate(type_values)
     }
-    semi_target = frame_budget * 7 // 10
+    semi_target = source_targets["semi_markov"]
     drafts: list[dict[str, Any]] = []
     credited: Counter[str] = Counter()
     repetitions: Counter[str] = Counter()
@@ -513,6 +514,7 @@ def create_plan(args: argparse.Namespace) -> None:
         "catalog_sha256": catalog_fingerprint(),
         "generator_source_sha256": source_fingerprint,
         "target_accepted_frames": args.frame_budget,
+        "target_frames_by_source": rounded_source_targets(args.frame_budget),
         "minimum_feasible_frame_budget": minimum_feasible_frame_budget(
             args.episode_seconds, args.observation_rate
         ),
@@ -684,16 +686,14 @@ def verify_plan(root: Path) -> dict[str, Any]:
         str(item.get("mission_type")) for item in recipes if item.get("source") == "mission"
     }
     mandatory = [item for item in recipes if item.get("schedule_phase") == "mandatory_coverage"]
-    mission_total = int(plan["target_accepted_frames"]) * 3 // 10
+    source_targets = rounded_source_targets(int(plan["target_accepted_frames"]))
+    mission_total = source_targets["mission"]
     base_type_target, extra_type_targets = divmod(mission_total, 62)
     exact_type_frames = sorted(distribution["mission_type_frames"].values()) == sorted(
         [base_type_target + 1] * extra_type_targets
         + [base_type_target] * (62 - extra_type_targets)
     )
-    exact_source_frames = distribution["source_frames"] == {
-        "mission": int(plan["target_accepted_frames"]) * 3 // 10,
-        "semi_markov": int(plan["target_accepted_frames"]) * 7 // 10,
-    }
+    exact_source_frames = distribution["source_frames"] == source_targets
     exact_assignment = Counter(assigned_ids) == Counter(recipe_ids)
     unique = len(recipe_ids) == len(set(recipe_ids)) and len({item["replay_identity"] for item in recipes}) == len(recipes)
     complete_coverage = len(mission_types_present) == 62 and len(

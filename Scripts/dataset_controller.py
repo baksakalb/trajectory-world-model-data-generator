@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-PLAN_VERSION = "movement-v1-persistent-semi-markov-4"
-CATALOG_VERSION = "fixed-arena-r4-realized-facing"
+PLAN_VERSION = "movement-v1-persistent-semi-markov-5"
+CATALOG_VERSION = "fixed-arena-r5-static-no-input"
 DEFAULT_DURATION_CALIBRATION = Path(__file__).with_name("movement_v1_duration_calibration.json")
 MISSION_COUNTS = {
     "semi_markov": 32,  # 8 initial behavior families x 4 hold-duration bands.
@@ -25,14 +25,16 @@ MISSION_COUNTS = {
     "contact_recovery": 675,
     "ramp_traverse": 30,
     "hoop_pass": 30,
+    "static_no_input": 15,
 }
 GUIDED_MISSIONS = set(MISSION_COUNTS) - {"semi_markov"}
 MISSION_FRAME_SHARES = {
     "semi_markov": Fraction(70, 100),
-    "object_view": Fraction(2, 15),
-    "contact_recovery": Fraction(10, 100),
-    "ramp_traverse": Fraction(1, 30),
-    "hoop_pass": Fraction(1, 30),
+    "object_view": Fraction(132, 1000),
+    "contact_recovery": Fraction(99, 1000),
+    "ramp_traverse": Fraction(33, 1000),
+    "hoop_pass": Fraction(33, 1000),
+    "static_no_input": Fraction(3, 1000),
 }
 FACING_SHARES = {
     "forward": Fraction(35, 100),
@@ -66,6 +68,30 @@ def canonical_json(value: Any) -> str:
 def stable_id(prefix: str, value: Any, length: int = 16) -> str:
     digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
     return f"{prefix}-{digest[:length]}"
+
+
+def rounded_frame_targets(frame_budget: int) -> dict[str, int]:
+    """Largest-remainder whole-frame targets preserving the frozen shares."""
+    exact = {
+        mission: Fraction(frame_budget) * share
+        for mission, share in MISSION_FRAME_SHARES.items()
+    }
+    targets = {
+        mission: value.numerator // value.denominator
+        for mission, value in exact.items()
+    }
+    remaining = frame_budget - sum(targets.values())
+    order = sorted(
+        MISSION_COUNTS,
+        key=lambda mission: (
+            exact[mission] - targets[mission],
+            -list(MISSION_COUNTS).index(mission),
+        ),
+        reverse=True,
+    )
+    for mission in order[:remaining]:
+        targets[mission] += 1
+    return targets
 
 
 def write_new_json(path: Path, value: Any) -> None:
@@ -180,6 +206,11 @@ def mandatory_cells() -> list[tuple[str, int]]:
 
 def load_duration_calibration(path: Path = DEFAULT_DURATION_CALIBRATION) -> dict[str, Any]:
     calibration = read_json(path.resolve())
+    # Static control recipes have a contractual duration rather than an
+    # empirical early-success duration: 200 observations at the required 20 Hz.
+    calibration.setdefault("expected_frames_by_scenario", {})["static_no_input"] = [
+        200.0
+    ] * MISSION_COUNTS["static_no_input"]
     values = calibration.get("expected_frames_by_scenario", {})
     for mission, count in MISSION_COUNTS.items():
         if len(values.get(mission, [])) != count:
@@ -211,6 +242,8 @@ def nested_frame_targets(mission: str) -> dict[str, dict[str, Fraction]]:
             "initial_behavior_family": equal(["idle", "forward", "strafe", "camera_yaw", "camera_pitch", "movement_camera", "opposing_inputs", "deliberate_contact"]),
             "initial_hold_band": equal(["short", "medium", "long", "very_long"]),
         }
+    if mission == "static_no_input":
+        return {"location": {str(index): Fraction(1, MISSION_COUNTS[mission]) for index in range(MISSION_COUNTS[mission])}}
     if mission == "object_view":
         return {
             "target": equal(["rectangle", "pyramid", "sphere", "hoop", "ramp"]),
@@ -288,6 +321,12 @@ def cell_details(mission: str, scenario: int) -> dict[str, Any]:
             "initial_behavior_family": action_names[scenario // 4],
             "initial_hold_band": hold_names[scenario % 4],
         }
+    if mission == "static_no_input":
+        return {
+            "location": str(scenario),
+            "duration_seconds": 10,
+            "action_mask": 0,
+        }
     if mission == "object_view":
         gaze = ["target_center", "target_offset", "travel_direction", "roam_reacquire"]
         targets = ["rectangle", "pyramid", "sphere", "hoop", "ramp"]
@@ -325,6 +364,8 @@ def scenario_weight(mission: str, scenario: int) -> Fraction:
     """Frozen within-mission probability for a prescribed discrete cell."""
     cell = cell_details(mission, scenario)
     if mission == "semi_markov":
+        return Fraction(1, MISSION_COUNTS[mission])
+    if mission == "static_no_input":
         return Fraction(1, MISSION_COUNTS[mission])
     if mission == "object_view":
         weight = Fraction(1, 5) * OBJECT_MODE_SHARES[cell["mode"]] * OBJECT_GAZE_SHARES[cell["gaze"]]
@@ -371,12 +412,16 @@ def build_candidate_schedule(calibration: dict[str, Any], frame_budget: int, tai
     scenario_counts: dict[str, Counter[int]] = {mission: Counter() for mission in MISSION_COUNTS}
     recipe_weights = {mission: scenario_recipe_weights(calibration, mission) for mission in MISSION_COUNTS}
     mission_frames: dict[str, Fraction] = {mission: Fraction() for mission in MISSION_COUNTS}
+    mission_capacity: Counter[str] = Counter()
+    frame_targets = rounded_frame_targets(frame_budget)
 
     for mission, scenario in mandatory_cells():
         repetition = scenario_counts[mission][scenario]
         schedule.append((mission, scenario, repetition, "mandatory"))
         scenario_counts[mission][scenario] += 1
-        mission_frames[mission] += expected_recipe_frames(calibration, mission, scenario)
+        expected = expected_recipe_frames(calibration, mission, scenario)
+        mission_frames[mission] += expected
+        mission_capacity[mission] += max(1, int(round(float(expected))))
 
     total_frames = sum(mission_frames.values(), Fraction())
 
@@ -396,9 +441,10 @@ def build_candidate_schedule(calibration: dict[str, Any], frame_budget: int, tai
         scenario_counts[mission][scenario] += 1
         added = expected_recipe_frames(calibration, mission, scenario)
         mission_frames[mission] += added
+        mission_capacity[mission] += max(1, int(round(float(added))))
         total_frames += added
 
-    while total_frames < frame_budget:
+    while any(mission_capacity[name] < frame_targets[name] for name in MISSION_COUNTS):
         append_weighted("base")
     base_count = len(schedule)
     base_expected = total_frames
@@ -479,6 +525,23 @@ def create_plan(args: argparse.Namespace) -> None:
     for recipe_index, (mission, scenario, repetition, phase) in enumerate(candidates):
         active.append(build_recipe(calibration, plan_id, recipe_index, mission, scenario, repetition, schedule_phase=phase))
 
+    # The base schedule has exact whole-frame obligations even though mission
+    # episodes have calibrated (sometimes fractional) expected durations.
+    # Recording credits no more than this cap; tail candidates remain available
+    # if realized episodes are shorter than calibration.
+    remaining_targets = rounded_frame_targets(args.frame_budget)
+    for index, recipe in enumerate(active):
+        mission = str(recipe["mission"])
+        expected = max(1, int(round(float(recipe["expected_credited_frames"]))))
+        if index < base_count:
+            planned = min(expected, remaining_targets[mission])
+            remaining_targets[mission] -= planned
+        else:
+            planned = expected
+        recipe["planned_credited_frames"] = planned
+    if any(remaining_targets.values()):
+        raise AssertionError(f"base schedule did not fill exact frame targets: {remaining_targets}")
+
     reserves: list[dict[str, Any]] = []
     next_index = len(active)
     reserve_repetitions: dict[tuple[str, int], int] = Counter(
@@ -498,6 +561,9 @@ def create_plan(args: argparse.Namespace) -> None:
             repetition,
             primary["recipe_id"],
         ))
+        reserves[-1]["planned_credited_frames"] = int(
+            primary.get("planned_credited_frames", round(primary["expected_credited_frames"]))
+        )
         reserve_repetitions[key] += 1
         next_index += 1
 
@@ -541,7 +607,7 @@ def create_plan(args: argparse.Namespace) -> None:
 
     expected_base_by_mission = {
         mission: sum(
-            (Fraction(str(recipe["expected_credited_frames"])) for recipe in active[:base_count] if recipe["mission"] == mission),
+            (Fraction(int(recipe["planned_credited_frames"])) for recipe in active[:base_count] if recipe["mission"] == mission),
             Fraction(),
         )
         for mission in MISSION_COUNTS
@@ -563,6 +629,7 @@ def create_plan(args: argparse.Namespace) -> None:
         "tail_recipe_count": len(active) - base_count,
         "reserve_recipe_count": len(reserves),
         "target_accepted_frames": args.frame_budget,
+        "target_frames_by_mission": rounded_frame_targets(args.frame_budget),
         "minimum_feasible_accepted_frames": minimum_frames,
         "diagnostic_only": bool(infeasible_budget),
         "distribution_feasible": not infeasible_budget,
@@ -619,6 +686,7 @@ def distribution_summary(
         "contact_recovery": {"target": Counter(), "recovery": Counter(), "approach": Counter(), "facing": Counter()},
         "ramp_traverse": {"direction": Counter(), "path": Counter(), "facing": Counter()},
         "hoop_pass": {"direction": Counter(), "path": Counter(), "facing": Counter()},
+        "static_no_input": {"location": Counter()},
     }
     recipe_counts: Counter[str] = Counter()
     for recipe in recipes:
@@ -626,7 +694,7 @@ def distribution_summary(
         frames = (
             float(credited_frames.get(recipe_id, 0))
             if credited_frames is not None
-            else float(recipe["expected_credited_frames"])
+            else float(recipe.get("planned_credited_frames", recipe["expected_credited_frames"]))
         )
         if frames <= 0:
             continue
@@ -845,6 +913,19 @@ def verify_plan(args: argparse.Namespace) -> None:
     assigned = [recipe["recipe_id"] for assignment in assignments for recipe in assignment["recipes"]]
     if Counter(assigned) != Counter(recipe["recipe_id"] for recipe in active):
         raise ValueError("active recipes are not assigned exactly once")
+    target_frames = plan.get("target_frames_by_mission")
+    planned_frames: Counter[str] = Counter()
+    if target_frames is not None:
+        base = active[: int(plan["base_recipe_count"])]
+        planned_frames.update({
+            mission: sum(
+                int(recipe["planned_credited_frames"])
+                for recipe in base if recipe["mission"] == mission
+            )
+            for mission in MISSION_COUNTS
+        })
+        if dict(planned_frames) != {name: int(target_frames[name]) for name in MISSION_COUNTS}:
+            raise ValueError("base recipes do not exactly satisfy target_frames_by_mission")
     report = {
         "valid": not missing,
         "plan_id": plan["plan_id"],
@@ -853,6 +934,8 @@ def verify_plan(args: argparse.Namespace) -> None:
         "discrete_cells": len(cells),
         "expected_discrete_cells": sum(MISSION_COUNTS.values()),
         "missing_cells": missing,
+        "target_frames_by_mission": target_frames,
+        "planned_base_frames_by_mission": dict(planned_frames) if target_frames is not None else None,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     if missing:
