@@ -21,9 +21,11 @@ The approved campaign contains exactly **3,333,333 planned credited frames**:
 | V2 | 1,555,555 | 666,667 | 2,222,222 |
 | **Combined** | **2,333,333** | **1,000,000** | **3,333,333** |
 
-This plan was created, structurally verified, runtime/physics certified,
-resolved, and finally recertified on Windows with Unreal Engine 5.8. It has not
-yet been recorded as RGB training data.
+This production plan was created, structurally verified, runtime/physics
+certified, resolved, and finally recertified on Windows with Unreal Engine 5.8.
+The Linux package and complete recording pipeline have since passed a bounded
+RunPod qualification, but the full production plan has not yet been certified
+or recorded on Linux.
 
 The authoritative completed run is:
 
@@ -245,7 +247,7 @@ Technically valid semi-Markov episodes are not rejected for behavioral or
 statistical distributions. Technical corruption, schema disagreement, invalid
 action state, or preview/realized physics divergence remains fail-closed.
 
-## Windows planning, certification, and resolution
+## Historical Windows planning, certification, and resolution
 
 The campaign is created without recording RGB by:
 
@@ -297,7 +299,8 @@ strategy, accepted replacement, unresolved work, and final certification.
 Recording must use a resolved collection whose bound certificate matches the
 exact executable/package runtime. Do not record a candidate plan.
 
-For the Windows-certified executable:
+The following commands document the already completed Windows-bound workflow;
+they do not authorize Linux capture:
 
 ```powershell
 python Scripts/dataset_worker.py `
@@ -320,13 +323,44 @@ python Scripts/dataset_controller.py inventory <v1-resolved-collection> --write-
 python Scripts/v2_dataset_controller.py inventory <v2-resolved-collection>
 ```
 
-### Linux status
+### Linux and RunPod
 
-The current completed certificate is bound to the Windows executable/package.
-Do not assume it authorizes a Linux build. Before Linux capture, implement and
-test an explicit Linux plan/build binding and recertification workflow, or create
-and resolve the campaign on Linux with the same source/catalog versions. Do not
-silently delete or overwrite the Windows `execution-build.json` or certificate.
+The complete reproducible RunPod procedure is in
+[`RUNPOD_LINUX.md`](RUNPOD_LINUX.md). It covers the Linux package build and
+transfer, dependencies, Vulkan environment, smoke capture, planner parity,
+full production planning, certification/resolution, recording, inventory, and
+safe resume behavior.
+
+Linux qualification completed on 2026-08-13 on a RunPod EU-RO-1 RTX 5090 pod.
+The UE 5.8 Linux Development executable SHA-256 is
+`0bc31b9b2f9056af5454f4b24505d9572b906e8af5f3db55859ea605151b9740`.
+The package's Linux-computed runtime SHA-256 is
+`5bc0f818d4623a6055cc3a172a1782ea1b86f6832b6b6d3378e363ce55e186229`.
+
+Qualification established:
+
+- 72/72 Python tests passing on both Windows and Linux;
+- exact Windows/Linux planner parity for the V1 10,000-frame diagnostic and
+  V2 33,274-frame minimum plans;
+- offscreen Vulkan SM6 rendering on the RTX 5090 at 384x384;
+- V1 Linux resolution of one reproducible `mission_no_progress` recipe while
+  preserving all 902 discrete cells and the exact mission frame allocation;
+- rebuilt-package certification passing 870/870 V1 guided recipes and 127/127
+  V2 recipes, with zero failures;
+- one production-worker assignment passing for V1 (6 episodes, 588 stored
+  observations, 418 credited frames) and V2 (8 episodes, 3,958 stored and
+  credited observations), with typed Parquet finalization and validation;
+- zero technical or semantic failures in both published test assignments.
+
+The qualification found and fixed a V1 metadata defect: an empty per-recipe
+split overwrote the assignment-level `train` split. `BeginEpisode()` now keeps
+the manifest split unless a recipe supplies a non-empty override, preserving
+V1 behavior while retaining V2 per-recipe train/evaluation splits.
+
+These diagnostic certificates do not authorize the full 3,333,333-frame
+campaign. Full recording still requires Linux-bound certification/resolution
+for the production V1 and V2 resolved collections. Keep the Windows campaign,
+its `execution-build.json`, and its certificates immutable and separate.
 
 ## Human visual review
 
@@ -345,15 +379,16 @@ second mission-physics verifier.
 
 ## Verification checkpoint
 
-The implementation at commit `8cbdfbf` was checked with:
+The current implementation was checked with:
 
-- 70 Python unit, contract, regression, and resolver tests passing;
+- 72 Python unit, contract, regression, and resolver tests passing;
 - all Python files under `Scripts/` compiling;
 - `git diff --check` passing;
 - `he_grenade_gameEditor Win64 Development` building under Unreal Engine 5.8;
 - static no-input runtime qualification passing 19/19;
 - exact 3,333,333-frame V1/V2 structural planning passing;
-- final Windows campaign certification completing with zero unresolved recipes.
+- final Windows campaign certification completing with zero unresolved recipes;
+- Linux V1/V2 diagnostic certification and production-worker checks passing.
 
 Any change to runtime physics, mission geometry, camera behavior, timing,
 planner identity, finalizer schemas, or certification bindings requires

@@ -43,13 +43,32 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def package_runtime_root(executable: Path) -> Path:
+    """Locate a packaged-game root without mistaking an installed editor for one."""
+    executable = executable.resolve()
+    for candidate in (executable.parent, *executable.parents):
+        if not (candidate / "Engine").is_dir():
+            continue
+        launchers = [
+            path for path in candidate.iterdir()
+            if path.is_file() and path.suffix.lower() in {".exe", ".sh"}
+        ]
+        packaged_projects = [
+            path for path in candidate.iterdir()
+            if path.is_dir() and (path / "Content" / "Paks").is_dir()
+        ]
+        if launchers and packaged_projects:
+            return candidate
+    return executable.parent
+
+
 def package_runtime_fingerprint(executable: Path) -> tuple[str, int, int]:
-    root = executable.resolve().parent
-    extensions = {".dll", ".exe", ".ini", ".pak", ".sig", ".ucas", ".utoc"}
+    root = package_runtime_root(executable)
+    excluded_suffixes = {".debug", ".pdb", ".sym"}
     files = sorted(
         path for path in root.rglob("*")
         if path.is_file()
-        and path.suffix.lower() in extensions
+        and path.suffix.lower() not in excluded_suffixes
         and "saved" not in {
             part.lower() for part in path.relative_to(root).parts[:-1]
         }

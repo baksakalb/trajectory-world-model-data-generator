@@ -1813,7 +1813,12 @@ bool ACurriculumDataGenerator::BeginEpisode()
 		CurrentRefinementLevel = Recipe.RefinementLevel;
 		CurrentRepetitionIndex = Recipe.RepetitionIndex;
 		CurrentPlannedCreditedFrames = Recipe.PlannedCreditedFrames;
-		DatasetSplit = Recipe.Split;
+		// V1 assigns one split at the manifest level, while V2 may override it
+		// per recipe. Preserve the manifest value when a V1 recipe has no split.
+		if (!Recipe.Split.IsEmpty())
+		{
+			DatasetSplit = Recipe.Split;
+		}
 		CurrentV2Source = Recipe.Source;
 		CurrentV2ReplayIdentity = Recipe.ReplayIdentity;
 		bV2SemiMarkovRecipe = Recipe.Source == TEXT("semi_markov");

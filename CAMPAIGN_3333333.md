@@ -107,9 +107,13 @@ boundaries are defined by `(plan_id, plan_version, episode_id)`.
 
 ## Required next step
 
-Record the two final `resolved-collection` roots separately, then preserve the
-V1 and V2 inventory snapshots with both credited and produced frame counts.
+The Linux package and full worker pipeline have now passed bounded RunPod
+qualification, including real V1 and V2 WebP/Parquet generation and validation.
+See `RUNPOD_LINUX.md` for the qualified package identity and commands.
 
-The existing certificates authorize only the exact Windows build to which they
-are bound. Linux capture requires a tested Linux binding and recertification
-workflow; do not overwrite the Windows binding in place.
+The remaining step is to recreate the complete candidate plans on Linux, assert
+their portable identities against the candidate IDs above, resolve and certify
+them against the exact qualified Linux package, and then record the two Linux
+`resolved-collection` roots separately. Preserve V1 and V2 inventory snapshots
+with both credited and produced frame counts. Do not reuse or overwrite the
+Windows `execution-build.json` files or certificates.

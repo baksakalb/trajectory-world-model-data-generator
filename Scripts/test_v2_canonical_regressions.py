@@ -79,6 +79,15 @@ class SharedCanonicalRegressionTests(unittest.TestCase):
         apply = function_text(self.source, "ApplyAction")
         self.assertIn("CurrentActionMask &= ~(CurriculumAction::Q | CurriculumAction::E)", apply)
 
+    def test_v1_manifest_split_survives_recipes_without_split(self) -> None:
+        begin = function_text(self.source, "BeginEpisode")
+        split_guard = re.compile(
+            r"if\s*\(!Recipe\.Split\.IsEmpty\(\)\)\s*\{\s*"
+            r"DatasetSplit\s*=\s*Recipe\.Split;\s*\}",
+            re.DOTALL,
+        )
+        self.assertRegex(begin, split_guard)
+
     def test_every_throw_and_preview_use_one_speed_and_config(self) -> None:
         build = function_text(self.source, "BuildLaunchState")
         self.assertIn("Forward * CurriculumThrowSpeedCmPerSecond", build)

@@ -12,6 +12,8 @@ from dataset_worker import (
     bind_execution_build,
     build_validated_result,
     command_for,
+    package_runtime_fingerprint,
+    package_runtime_root,
     require_v2_certification,
 )
 
@@ -79,6 +81,34 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
             runtime.write_bytes(b"runtime-two")
             with self.assertRaisesRegex(ValueError, "immutable execution-build.json"):
                 bind_execution_build(root / "collection", executable, plan)
+
+    def test_linux_launcher_fingerprints_the_complete_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "Linux"
+            launcher = package / "he_grenade_game.sh"
+            launcher.parent.mkdir(parents=True)
+            launcher.write_bytes(b"#!/bin/sh\n")
+            elf = package / "he_grenade_game" / "Binaries" / "Linux" / "he_grenade_game"
+            elf.parent.mkdir(parents=True)
+            elf.write_bytes(b"elf-one")
+            shared = package / "Engine" / "Binaries" / "ThirdParty" / "libRuntime.so"
+            shared.parent.mkdir(parents=True)
+            shared.write_bytes(b"shared-one")
+            pak = package / "he_grenade_game" / "Content" / "Paks" / "game.pak"
+            pak.parent.mkdir(parents=True)
+            pak.write_bytes(b"pak-one")
+            debug = elf.with_suffix(".debug")
+            debug.write_bytes(b"debug-one")
+
+            self.assertEqual(package_runtime_root(launcher), package)
+            first = package_runtime_fingerprint(launcher)
+            self.assertEqual(first[1], 4)
+
+            debug.write_bytes(b"debug-two")
+            self.assertEqual(package_runtime_fingerprint(launcher), first)
+
+            shared.write_bytes(b"shared-two")
+            self.assertNotEqual(package_runtime_fingerprint(launcher), first)
 
     def test_technically_valid_semi_markov_is_unconditionally_credited(self) -> None:
         assignment = {

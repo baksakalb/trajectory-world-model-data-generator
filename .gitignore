@@ -34,3 +34,10 @@ package-lock.json
 # Python helper caches
 __pycache__/
 *.py[cod]
+
+# Local qualification, generated datasets, packaged builds, and transfer media
+.tools/
+Artifacts/
+Distribution/Windows/
+*.mp4
+*.tar.gz
