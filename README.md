@@ -377,11 +377,20 @@ but that historical suite is not the current 85-video representative contract.
 Video rendering validates packaging and supports human inspection; it is not a
 second mission-physics verifier.
 
+V2 schema 14 records camera presentation quality without rejecting otherwise
+valid episodes. Every V2 observation has `v2_visibility_degraded`; prescribed
+mission episodes also carry the aggregate `v2_visibility_degraded` value plus
+the detailed region, preview, and opening-context summaries. Visibility
+degradation never weakens physics, action, identity, or mission-event checks and
+does not stop recording. It is retained so training can include, exclude, or
+down-weight those observations explicitly. Assignment results and reconstructed
+V2 inventory also report the affected recipe IDs and count.
+
 ## Verification checkpoint
 
 The current implementation was checked with:
 
-- 72 Python unit, contract, regression, and resolver tests passing;
+- 74 Python unit, contract, regression, and resolver tests passing;
 - all Python files under `Scripts/` compiling;
 - `git diff --check` passing;
 - `he_grenade_gameEditor Win64 Development` building under Unreal Engine 5.8;

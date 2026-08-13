@@ -37,6 +37,7 @@ def frame(
         "v2_mission_type": mission_type,
         "v2_mission_region_visible": mission_type is not None,
         "v2_preview_region_visible": mission_type is not None,
+        "v2_visibility_degraded": False,
     }
 
 
@@ -160,6 +161,7 @@ class V2RuntimeContractTests(unittest.TestCase):
             "v2_mission_region_visible_all_frames": True,
             "v2_preview_region_visible_all_q_frames": True,
             "v2_opening_arena_context_visible": True,
+            "v2_visibility_degraded": False,
             "v2_mission_event_frame": 2,
             "v2_accepted_throw_count": 1,
             "mission_parameters": {
@@ -198,13 +200,30 @@ class V2RuntimeContractTests(unittest.TestCase):
             }],
         }
         dataset = {
-            "schema_version": "trajectory_throw_v2-preflight-13",
+            "schema_version": "trajectory_throw_v2-preflight-14",
             "observation_rate_hz": 20,
             "collection_policy": "training_v2_combined_sixty_two_missions_v1",
         }
         validate_v2_runtime_contract(
             dataset, "episode", frames, self.transitions, episode
         )
+
+        degraded_frames = copy.deepcopy(frames)
+        degraded_frames[1]["v2_preview_region_visible"] = False
+        degraded_frames[1]["v2_visibility_degraded"] = True
+        degraded_episode = copy.deepcopy(episode)
+        degraded_episode["v2_preview_region_visible_all_q_frames"] = False
+        degraded_episode["v2_visibility_degraded"] = True
+        validate_v2_runtime_contract(
+            dataset, "episode", degraded_frames, self.transitions, degraded_episode
+        )
+
+        inconsistent = copy.deepcopy(degraded_episode)
+        inconsistent["v2_visibility_degraded"] = False
+        with self.assertRaisesRegex(DatasetValidationError, "summary disagrees"):
+            validate_v2_runtime_contract(
+                dataset, "episode", degraded_frames, self.transitions, inconsistent
+            )
 
         slow = copy.deepcopy(episode)
         slow["v2_throws"][0]["launch_velocity"] = {"x": 1, "y": 0, "z": 0}

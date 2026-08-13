@@ -2408,6 +2408,7 @@ void ACurriculumDataGenerator::EndEpisode()
 		TEXT("\"v2_mission_region_visible_all_frames\":%s,")
 		TEXT("\"v2_preview_region_visible_all_q_frames\":%s,")
 		TEXT("\"v2_opening_arena_context_visible\":%s,")
+		TEXT("\"v2_visibility_degraded\":%s,")
 		TEXT("\"planned_credited_frames\":%d,\"v2_throws\":%s,")
 		TEXT("\"termination_reason\":\"%s\"}\n"),
 		*MakeEpisodeId(),
@@ -2579,6 +2580,10 @@ void ACurriculumDataGenerator::EndEpisode()
 		bV2MissionRecipe ? JsonBool(bV2MissionRegionVisibleAllFrames) : TEXT("null"),
 		bV2MissionRecipe ? JsonBool(bV2PreviewRegionVisibleAllQFrames) : TEXT("null"),
 		bV2MissionRecipe ? JsonBool(bV2OpeningArenaContextVisible) : TEXT("null"),
+		JsonBool(bV2MissionRecipe
+			&& (!bV2MissionRegionVisibleAllFrames
+				|| !bV2PreviewRegionVisibleAllQFrames
+				|| !bV2OpeningArenaContextVisible)),
 		CurrentPlannedCreditedFrames,
 		*BuildV2ThrowsJson(),
 		TerminationReason);
@@ -3035,17 +3040,10 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		{
 			bV2OpeningArenaContextVisible = IsV2OpeningArenaContextVisible();
 		}
-		if ((!bV2MissionRegionVisible || !bV2PreviewRegionVisible
-			|| !bV2OpeningArenaContextVisible)
-			&& !bAllowUncertifiedV2Diagnostic)
-		{
-			LastError = FString::Printf(
-				TEXT("V2 camera railguard failed for immutable mission %s at frame %d."),
-				*CurrentV2MissionType,
-				ObservationIndex);
-			return false;
-		}
 	}
+	const bool bV2VisibilityDegraded = bV2MissionRecipe
+		&& (!bV2MissionRegionVisible || !bV2PreviewRegionVisible
+			|| !bV2OpeningArenaContextVisible);
 	int32 FlyingGrenadeCount = 0;
 	int32 RestingGrenadeCount = 0;
 	int32 VisibleGrenadeCount = 0;
@@ -3106,7 +3104,8 @@ bool ACurriculumDataGenerator::CaptureObservation(
 		TEXT("\"visible_grenade_count\":%d,\"total_grenade_count\":%d,")
 		TEXT("\"v2_episode_phase\":\"%s\",\"v2_mission_type\":%s,")
 		TEXT("\"v2_mission_region_visible\":%s,")
-		TEXT("\"v2_preview_region_visible\":%s,\"grenades\":%s,")
+		TEXT("\"v2_preview_region_visible\":%s,")
+		TEXT("\"v2_visibility_degraded\":%s,\"grenades\":%s,")
 		TEXT("\"collection_mission\":\"%s\",\"mission_phase\":\"%s\",")
 		TEXT("\"mission_success_frame_index\":%s,\"coverage_target\":%s,")
 		TEXT("\"mission_review_slug\":%s,")
@@ -3173,6 +3172,7 @@ bool ACurriculumDataGenerator::CaptureObservation(
 			: TEXT("null"),
 		JsonBool(bV2MissionRegionVisible),
 		JsonBool(bV2PreviewRegionVisible),
+		JsonBool(bV2VisibilityDegraded),
 		*GrenadesJson,
 		bV2MissionRecipe
 			? *CurrentV2MissionType
@@ -9390,7 +9390,7 @@ FString ACurriculumDataGenerator::GetStageSchemaVersion() const
 	if (CurriculumStage == ECurriculumStage::TrajectoryThrowV2)
 	{
 		return FString::Printf(
-			TEXT("%s-%s-13"),
+			TEXT("%s-%s-14"),
 			*GetStageSlug(),
 			StorageFormat == EStorageFormat::WebPParquet
 				? TEXT("production")

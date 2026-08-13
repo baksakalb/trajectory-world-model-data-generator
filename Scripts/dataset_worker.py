@@ -304,6 +304,7 @@ def build_validated_result(
     successful: list[str] = []
     semantic_failures: list[str] = []
     semantic_failure_details: list[dict[str, Any]] = []
+    visibility_degraded_recipe_ids: list[str] = []
     credited_cells: list[dict[str, Any]] = []
     accepted_frames = 0
     produced_frames = 0
@@ -335,6 +336,8 @@ def build_validated_result(
                 raise ValueError(f"V2 recipe {recipe_id} changed replay identity")
             if source == "mission" and row.get("v2_mission_type") != recipe.get("mission_type"):
                 raise ValueError(f"V2 recipe {recipe_id} changed runtime mission type")
+            if bool(row.get("v2_visibility_degraded")):
+                visibility_degraded_recipe_ids.append(recipe_id)
         creditable = source == "semi_markov" if is_v2 else mission == "semi_markov"
         creditable = creditable or bool(row["mission_success"])
         if creditable:
@@ -387,6 +390,8 @@ def build_validated_result(
         result.update({
             "output_dataset_sha256": sha256_file(output / "dataset.json"),
             "assignment_digest": assignment.get("assignment_digest"),
+            "visibility_degraded_recipe_count": len(visibility_degraded_recipe_ids),
+            "visibility_degraded_recipe_ids": visibility_degraded_recipe_ids,
             "recipe_bindings": [
                 {
                     "recipe_id": recipe["recipe_id"],

@@ -95,6 +95,7 @@ FRAME_SCHEMA = pa.schema(
         pa.field("v2_mission_type", pa.string()),
         pa.field("v2_mission_region_visible", pa.bool_(), nullable=False),
         pa.field("v2_preview_region_visible", pa.bool_(), nullable=False),
+        pa.field("v2_visibility_degraded", pa.bool_(), nullable=False),
         pa.field("grenades", pa.list_(GRENADE), nullable=False),
         pa.field("collection_mission", pa.string(), nullable=False),
         pa.field("mission_phase", pa.string(), nullable=False),
@@ -321,6 +322,7 @@ EPISODE_SCHEMA = pa.schema(
         pa.field("v2_mission_region_visible_all_frames", pa.bool_()),
         pa.field("v2_preview_region_visible_all_q_frames", pa.bool_()),
         pa.field("v2_opening_arena_context_visible", pa.bool_()),
+        pa.field("v2_visibility_degraded", pa.bool_(), nullable=False),
         pa.field("planned_credited_frames", pa.int32()),
         pa.field("v2_throws", pa.list_(V2_THROW)),
         pa.field("termination_reason", pa.string(), nullable=False),
@@ -365,6 +367,7 @@ def parquet_bytes(
             record.setdefault("v2_mission_type", None)
             record.setdefault("v2_mission_region_visible", False)
             record.setdefault("v2_preview_region_visible", False)
+            record.setdefault("v2_visibility_degraded", False)
     if "planar_movement_suppressed" in schema.names:
         for record in records:
             record.setdefault("planar_movement_suppressed", False)
@@ -388,6 +391,7 @@ def parquet_bytes(
             record.setdefault("v2_mission_region_visible_all_frames", None)
             record.setdefault("v2_preview_region_visible_all_q_frames", None)
             record.setdefault("v2_opening_arena_context_visible", None)
+            record.setdefault("v2_visibility_degraded", False)
             record["mission_parameters_json"] = json.dumps(
                 record.pop("mission_parameters"),
                 separators=(",", ":"),

@@ -159,6 +159,35 @@ class V2WorkerBuildBindingTests(unittest.TestCase):
         self.assertEqual(result["semantic_failure_recipe_ids"], ["r"])
         self.assertEqual(result["semantic_result"], "resolved_with_failures")
 
+    def test_visibility_degraded_mission_is_credited_and_tracked(self) -> None:
+        assignment = {
+            "plan_id": "p", "plan_version": "trajectory-throw-v2-sixty-missions-1",
+            "assignment_id": "a", "recipes": [{
+                "recipe_id": "r", "mission": "trajectory_manual_toggle_cycle",
+                "mission_type": "trajectory_manual_toggle_cycle", "source": "mission",
+                "family": "trajectory_control", "scenario_index": 0,
+                "planned_credited_frames": 100,
+            }],
+        }
+        row = {
+            "recipe_id": "r", "observation_count": 101,
+            "v2_source": "mission",
+            "v2_mission_type": "trajectory_manual_toggle_cycle",
+            "mission_success": True,
+            "v2_visibility_degraded": True,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "dataset.json").write_text("{}\n", encoding="utf-8")
+            with patch("dataset_worker.read_episode_rows", return_value=[row]):
+                result = build_validated_result(
+                    assignment, "attempt-000", "worker", output
+                )
+        self.assertEqual(result["accepted_observation_frames"], 100)
+        self.assertEqual(result["semantic_failure_recipe_ids"], [])
+        self.assertEqual(result["visibility_degraded_recipe_count"], 1)
+        self.assertEqual(result["visibility_degraded_recipe_ids"], ["r"])
+
 
 if __name__ == "__main__":
     unittest.main()

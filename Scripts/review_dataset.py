@@ -1016,12 +1016,6 @@ def validate_v2_runtime_contract(
             # The failure is valid recorded evidence. It receives no credit,
             # triggers no replacement, and does not prevent later recipes from
             # being captured in the same immutable run.
-        if not bool(episode.get("v2_mission_region_visible_all_frames")):
-            raise DatasetValidationError(f"{episode_id}: mission region left the camera view.")
-        if not bool(episode.get("v2_preview_region_visible_all_q_frames")):
-            raise DatasetValidationError(f"{episode_id}: Q preview lost the mission region.")
-        if not bool(episode.get("v2_opening_arena_context_visible")):
-            raise DatasetValidationError(f"{episode_id}: mission opening lacked arena context.")
         if mission_success:
             if episode.get("v2_mission_event_frame") is None:
                 raise DatasetValidationError(f"{episode_id}: named interaction evidence is absent.")
@@ -1031,14 +1025,57 @@ def validate_v2_runtime_contract(
         mission_frames = [frame for frame in frames if frame.get("v2_mission_type") == mission_type]
         if len(mission_frames) != len(frames):
             raise DatasetValidationError(f"{episode_id}: frame mission identity is not immutable.")
-        if any(not bool(frame.get("v2_mission_region_visible")) for frame in mission_frames):
-            raise DatasetValidationError(f"{episode_id}: per-frame mission region visibility failed.")
-        if any(
-            bool(frame.get("q_visibility"))
-            and not bool(frame.get("v2_preview_region_visible"))
-            for frame in mission_frames
-        ):
-            raise DatasetValidationError(f"{episode_id}: preview/region co-visibility failed.")
+        if str(dataset.get("schema_version", "")).endswith(("-preflight-14", "-production-14")):
+            opening_visible = bool(episode.get("v2_opening_arena_context_visible"))
+            expected_degraded = []
+            for frame in mission_frames:
+                degraded = (
+                    not bool(frame.get("v2_mission_region_visible"))
+                    or (
+                        bool(frame.get("q_visibility"))
+                        and not bool(frame.get("v2_preview_region_visible"))
+                    )
+                    or not opening_visible
+                )
+                expected_degraded.append(degraded)
+                if frame.get("v2_visibility_degraded") is not degraded:
+                    raise DatasetValidationError(
+                        f"{episode_id}: visibility degradation metadata disagrees "
+                        f"at frame {frame.get('frame_index')}."
+                    )
+            if bool(episode.get("v2_visibility_degraded")) != any(expected_degraded):
+                raise DatasetValidationError(
+                    f"{episode_id}: episode visibility degradation summary disagrees."
+                )
+            if bool(episode.get("v2_mission_region_visible_all_frames")) != all(
+                bool(frame.get("v2_mission_region_visible")) for frame in mission_frames
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: mission-region visibility summary disagrees."
+                )
+            if bool(episode.get("v2_preview_region_visible_all_q_frames")) != all(
+                not bool(frame.get("q_visibility"))
+                or bool(frame.get("v2_preview_region_visible"))
+                for frame in mission_frames
+            ):
+                raise DatasetValidationError(
+                    f"{episode_id}: preview visibility summary disagrees."
+                )
+        else:
+            if not bool(episode.get("v2_mission_region_visible_all_frames")):
+                raise DatasetValidationError(f"{episode_id}: mission region left the camera view.")
+            if not bool(episode.get("v2_preview_region_visible_all_q_frames")):
+                raise DatasetValidationError(f"{episode_id}: Q preview lost the mission region.")
+            if not bool(episode.get("v2_opening_arena_context_visible")):
+                raise DatasetValidationError(f"{episode_id}: mission opening lacked arena context.")
+            if any(not bool(frame.get("v2_mission_region_visible")) for frame in mission_frames):
+                raise DatasetValidationError(f"{episode_id}: per-frame mission region visibility failed.")
+            if any(
+                bool(frame.get("q_visibility"))
+                and not bool(frame.get("v2_preview_region_visible"))
+                for frame in mission_frames
+            ):
+                raise DatasetValidationError(f"{episode_id}: preview/region co-visibility failed.")
     if int(episode.get("v2_accepted_throw_count") or 0) != len(accepted_grenade_ids):
         raise DatasetValidationError(f"{episode_id}: accepted throw count disagrees with transitions.")
 
@@ -1553,10 +1590,12 @@ def validate_dataset(
                     "-preflight-11",
                     "-preflight-12",
                     "-preflight-13",
+                    "-preflight-14",
                     "-production-1",
                     "-production-11",
                     "-production-12",
                     "-production-13",
+                    "-production-14",
                 )
             )
             if (
@@ -1617,6 +1656,7 @@ def validate_dataset(
                     "-preflight-11", "-production-11",
                     "-preflight-12", "-production-12",
                     "-preflight-13", "-production-13",
+                    "-preflight-14", "-production-14",
                 )
             ):
                 validate_v2_runtime_contract(
@@ -1651,10 +1691,12 @@ def validate_dataset(
                 "-preflight-11",
                 "-preflight-12",
                 "-preflight-13",
+                "-preflight-14",
                 "-production-1",
                 "-production-11",
                 "-production-12",
                 "-production-13",
+                "-production-14",
             )
         ):
             validate_run_distributions(dataset, episodes)

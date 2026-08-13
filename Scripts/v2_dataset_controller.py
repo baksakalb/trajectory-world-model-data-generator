@@ -757,6 +757,7 @@ def build_inventory(root: Path) -> dict[str, Any]:
     resolved: set[str] = set()
     technical_failures = 0
     semantic_failure_details: list[dict[str, Any]] = []
+    visibility_degraded_recipe_ids: set[str] = set()
     assignments = {
         value["assignment_id"]: value
         for path in sorted((root / "assignments").glob("*.json"))
@@ -794,6 +795,9 @@ def build_inventory(root: Path) -> dict[str, Any]:
         produced += int(result.get("produced_observation_frames", 0))
         resolved.update(result.get("resolved_recipe_ids", []))
         semantic_failure_details.extend(result.get("semantic_failure_details", []))
+        visibility_degraded_recipe_ids.update(
+            str(value) for value in result.get("visibility_degraded_recipe_ids", [])
+        )
         for cell in result.get("credited_cells", []):
             frames = int(cell.get("credited_observation_frames", 0))
             source = str(cell.get("source") or ("semi_markov" if cell.get("mission") == "semi_markov" else "mission"))
@@ -815,6 +819,8 @@ def build_inventory(root: Path) -> dict[str, Any]:
         "technical_failure_attempt_count": technical_failures,
         "semantic_failure_count": len(semantic_failure_details),
         "semantic_failure_details": semantic_failure_details,
+        "visibility_degraded_recipe_count": len(visibility_degraded_recipe_ids),
+        "visibility_degraded_recipe_ids": sorted(visibility_degraded_recipe_ids),
         "validated_assignment_count": len(validated_assignments),
         "resolved_recipe_count": len(resolved),
         "complete": credited >= target,
