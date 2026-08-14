@@ -21,13 +21,31 @@ The approved campaign contains exactly **3,333,333 planned credited frames**:
 | V2 | 1,555,555 | 666,667 | 2,222,222 |
 | **Combined** | **2,333,333** | **1,000,000** | **3,333,333** |
 
-This production plan was created, structurally verified, runtime/physics
-certified, resolved, and finally recertified on Windows with Unreal Engine 5.8.
-The Linux package and complete recording pipeline have since passed a bounded
-RunPod qualification, but the full production plan has not yet been certified
-or recorded on Linux.
+The campaign was first planned, structurally verified, runtime/physics
+certified, resolved, and recertified on Windows with Unreal Engine 5.8. It was
+then rebuilt, independently planned, certified, and recorded on Linux. The
+authoritative captured data is on the RunPod EU-RO-1 network volume:
 
-The authoritative completed run is:
+```text
+/workspace/LinuxCampaign3333333/
+|-- resolution/v1/resolved-collection/
+`-- v2-schema14-b49ddd0/resolution/resolved-collection/
+```
+
+The completed production inventory is:
+
+| Stage | Validated assignments | Credited observations | Stored observations |
+| --- | ---: | ---: | ---: |
+| V1 | 192 | 1,115,586 | 1,152,179 |
+| V2 | 171 | 2,222,222 | 2,229,369 |
+| **Combined** | **363** | **3,337,808** | **3,381,548** |
+
+V1 stops only between immutable assignments, so its realized credited count can
+exceed the 1,111,111 planning target; all 902 required cells are covered and the
+budget is complete. V2 hit its target exactly. All complete valid observations
+remain training data.
+
+The historical Windows planning/certification evidence is:
 
 ```text
 Artifacts/WindowsCampaign3333333-20260813-112500/
@@ -38,7 +56,7 @@ Its combined report is
 not repository source, and may not exist in another clone.
 `CAMPAIGN_3333333.md` preserves the source-controlled human-readable checkpoint.
 
-### Completed certification result
+### Historical Windows certification result
 
 - V1 original guided recipes: 6,339 passed and 5 rejected out of 6,344.
 - All five V1 rejected slots received a distinct same-mission/same-scenario
@@ -53,6 +71,23 @@ The five original V1 failures were four hoop timeouts and one contact-recovery
 no-progress result. The complete rejected recipes, engine errors, candidates,
 attempts, strategies, and accepted replacements are preserved in
 `resolution/v1/resolution-report.json`.
+
+### Completed Linux production result
+
+- Linux V1 inventory: complete, 192 validated assignments, 1,115,586 credited
+  observations, 1,152,179 stored observations, 902/902 cells, and zero technical
+  or semantic failures.
+- Linux V2 candidate: `v2plan-19d90e5db02a2104`.
+- Linux V2 resolved plan: `resolved-856bc5b5c7d32e77`.
+- V2 original certification: 4,940/4,940 prescribed recipes passed with zero
+  rejects or replacements.
+- V2 final recertification: 5,459/5,459 recipes passed.
+- V2 recording: 171/171 assignments, exactly 2,222,222 credited observations,
+  2,229,369 stored observations, zero technical/semantic failures, and worker
+  exit code 0.
+- Four V2 recipes were retained with `v2_visibility_degraded=true`; their named
+  physics/events remained valid.
+- The complete campaign occupies approximately 329 GiB on the network volume.
 
 ## The three different frame counts
 
@@ -77,17 +112,16 @@ transitions remain in the dataset; 60 count toward allocation and 15 are
 reported as produced-but-not-credited observations. Training should use the
 complete valid episode, not slice it at the credit cap.
 
-The plan projects approximately 3,343,246 complete stored observations:
+The plan projected approximately 3,343,246 complete stored observations:
 
 - V1 base recipes: approximately 1,113,877 observations from calibrated
   durations;
 - V2 recipes: 2,229,369 observations from frozen durations.
 
-This is a projection, not an exact capture result. V1 success-controlled
-gameplay may finish a few observations earlier or later than its calibration
-and may require tail recipes. The exact physical count is known only after
-capture and is reported as `produced_observation_frames`. The exact allocation
-target remains 3,333,333.
+The completed Linux capture contains 3,381,548 stored observations: 1,152,179
+for V1 and 2,229,369 for V2. The exact planned allocation target remains
+3,333,333; produced observations and V1 assignment-granular credit overshoot are
+reported separately and must not be discarded.
 
 ## Recipes, base work, tails, and replacements
 
@@ -357,10 +391,16 @@ split overwrote the assignment-level `train` split. `BeginEpisode()` now keeps
 the manifest split unless a recipe supplies a non-empty override, preserving
 V1 behavior while retaining V2 per-recipe train/evaluation splits.
 
-These diagnostic certificates do not authorize the full 3,333,333-frame
-campaign. Full recording still requires Linux-bound certification/resolution
-for the production V1 and V2 resolved collections. Keep the Windows campaign,
-its `execution-build.json`, and its certificates immutable and separate.
+Full V2 production then completed on 2026-08-14 on a RunPod EU-RO-1 RTX 4090
+pod using source commit `b49ddd038e688c01567b4899984b4c6d7a3b3a64` and schema
+`trajectory_throw_v2-production-14`. The package binary SHA-256 is
+`1b1ebcfa67c79c760d9515ec2750cb3481dc705e24b943991e3786707bd8a94a`;
+the Linux package-runtime fingerprint is
+`2ca9be2e3858dcd6f8ce28f3b841e12d3b315c9bd9ef6c24f7802069455ebece`.
+The Windows and Linux full V2 plans had the same plan ID and byte-identical 171
+assignment files and `recipes.jsonl`; only `created_utc` differed in the plan
+manifest. Certification and production evidence remains separate from the
+historical Windows-bound campaign.
 
 ## Human visual review
 
@@ -398,6 +438,10 @@ The current implementation was checked with:
 - exact 3,333,333-frame V1/V2 structural planning passing;
 - final Windows campaign certification completing with zero unresolved recipes;
 - Linux V1/V2 diagnostic certification and production-worker checks passing.
+- full Linux V2 certification passing 5,459/5,459 and production completing
+  171/171 assignments with an exact 2,222,222-frame credited inventory;
+- complete Linux V1 and V2 inventories written with zero technical or semantic
+  failures.
 
 Any change to runtime physics, mission geometry, camera behavior, timing,
 planner identity, finalizer schemas, or certification bindings requires

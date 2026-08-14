@@ -8,11 +8,10 @@ resolver, 85-video representative review tooling, and optional 186-video
 exhaustive V2 review tooling described here are implemented.
 
 The approved 2,222,222-frame V2 campaign contains 1,555,555 semi-Markov frames
-and 666,667 prescribed-mission frames. Its original certification passed all
-4,940 prescribed mission recipes. The complete final resolved plan passed
-5,459/5,459 recipes with zero rejects and is bound to the Windows Unreal Engine
-5.8 executable/package used for certification. RGB production capture has not
-yet run.
+and 666,667 prescribed-mission frames. The schema-14 Linux candidate passed all
+4,940 prescribed recipes and the resolved plan passed 5,459/5,459 total recipes
+with zero rejects or replacements. Linux RGB production completed all 171
+assignments with exactly 2,222,222 credited and 2,229,369 stored observations.
 
 ## Purpose
 
@@ -43,8 +42,9 @@ corners, and arena exits.
    same-type policy below; the recorder never searches or substitutes.
 6. A technical retry may replay the identical immutable recipe after a machine
    interruption; it may not change the recipe or seed.
-7. Missions guarantee only their named interaction and its visibility.
-   Subsequent bounce count, roll, rest, and final position remain natural.
+7. Missions guarantee their named interaction. Camera-presentation degradation
+   is recorded explicitly instead of invalidating otherwise correct physics;
+   subsequent bounce count, roll, rest, and final position remain natural.
 8. No privileged trajectory points or solver geometry become learning targets.
 
 ## Catalog: 62 meaningful types
@@ -270,6 +270,9 @@ without a pixel-percentage validator.
 
 These are construction rules, not dataset distribution thresholds. Framing may
 still place the target left, right, high, low, near, or far inside the image.
+Schema 14 additionally records `v2_visibility_degraded` per observation and per
+episode when runtime presentation falls below these goals. That annotation is
+non-fatal and never weakens action, identity, physics, or named-event checks.
 
 ### Human-readable timing
 
@@ -404,11 +407,13 @@ Machine checks cover:
 - preview-versus-realized parity;
 - named mission interaction evidence, including physical position, normal,
   incoming velocity, direction, clearance, and ordered contacts where relevant;
-- the two camera construction railguards;
+- camera visibility/context summaries and the schema-14 degradation annotation;
 - image and Parquet integrity.
 
-Machine checks do not approve visual quality. Human review decides whether
-pacing, framing, variation, and interactions are understandable.
+Machine checks do not reject an otherwise valid episode only for presentation
+degradation. Human review decides whether pacing, framing, variation, and
+interactions are understandable; training may include, exclude, or down-weight
+the explicit degradation flag.
 
 ## Human review sets
 
@@ -455,9 +460,10 @@ Implemented and verified:
 10. bounded pre-recording replacement lineage and full resolved-plan
     recertification;
 11. the approved 2,222,222-frame V2 campaign, passing 4,940/4,940 original
-    mission recipes and 5,459/5,459 final total recipes.
+    mission recipes and 5,459/5,459 final total recipes;
+12. Linux production completing 171/171 assignments, 2,229,369 stored
+    observations, four visibility-degraded recipes, and zero technical or
+    semantic failures.
 
-Remaining operational work is RGB capture, exact produced-frame inventory, and
-Linux-specific build binding/recertification if capture moves from the currently
-certified Windows build. Movement V1 mission semantics and the shared V1/V2
-semi-Markov policy remain protected by regression tests.
+RGB capture and exact inventory are complete. Movement V1 mission semantics and
+the shared V1/V2 semi-Markov policy remain protected by regression tests.

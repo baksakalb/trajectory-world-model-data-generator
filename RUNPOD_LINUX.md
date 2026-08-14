@@ -5,7 +5,7 @@ recording the HE Grenade Game V1/V2 dataset on a single Linux RunPod GPU. It is
 written for the current one-worker invariant and a persistent network volume
 mounted at `/workspace`.
 
-## Qualified configuration
+## Initial qualified configuration
 
 The bounded qualification completed on 2026-08-13 with:
 
@@ -30,6 +30,35 @@ SHA-256: 5bc0f818d4623a6055cc3a172a1782ea1b86f6832b6b6d3378e363ce55e186229
 Files:   37
 Bytes:   899577973
 ```
+
+Those hashes identify the 2026-08-13 bounded RTX 5090 qualification package.
+They are retained for provenance and must not be substituted for the later
+schema-14 production binding.
+
+## Completed schema-14 production checkpoint
+
+Full V2 production completed on 2026-08-14 with:
+
+- RunPod EU-RO-1 and the same 600 GB network volume;
+- one NVIDIA RTX 4090;
+- source commit `b49ddd038e688c01567b4899984b4c6d7a3b3a64`;
+- package release tag `linux-v14-b49ddd0`;
+- source/package root `/workspace/he_grenade_v2_b49ddd0`;
+- campaign root `/workspace/LinuxCampaign3333333/v2-schema14-b49ddd0`;
+- binary SHA-256
+  `1b1ebcfa67c79c760d9515ec2750cb3481dc705e24b943991e3786707bd8a94a`;
+- launcher SHA-256
+  `194c3995d341cbc6d7e1b5547d7782621b67be4db8405e1492f177ea4c6c099b`;
+- package-runtime SHA-256
+  `2ca9be2e3858dcd6f8ce28f3b841e12d3b315c9bd9ef6c24f7802069455ebece`;
+- candidate plan `v2plan-19d90e5db02a2104`;
+- resolved plan `resolved-856bc5b5c7d32e77`.
+
+All 74 Python tests passed on Linux. The exact recipe that had previously
+stopped recording for lost trajectory presentation was replayed with the normal
+production command: it succeeded, and 20 affected frames were annotated
+`v2_visibility_degraded=true`. Physics, action, identity, and named-event
+validation remained fail-closed.
 
 Compute the package fingerprint on Linux. Filesystem ordering can make an
 aggregate fingerprint calculated on Windows unsuitable as the Linux binding,
@@ -220,10 +249,11 @@ Create the production candidate plans independently on Linux:
 ```bash
 export CAMPAIGN=/workspace/LinuxCampaign3333333
 export V1_CANDIDATE="$CAMPAIGN/candidate-plans/v1-1111111"
-export V2_CANDIDATE="$CAMPAIGN/candidate-plans/v2-2222222"
-export GAME=/workspace/he_grenade_project/Linux/he_grenade_game.sh
+export V2_CANDIDATE="$CAMPAIGN/v2-schema14-b49ddd0/candidate"
+export GAME=/workspace/he_grenade_v2_b49ddd0/Linux/he_grenade_game.sh
 
-mkdir -p "$CAMPAIGN/candidate-plans" "$CAMPAIGN/resolution"
+mkdir -p "$CAMPAIGN/candidate-plans" "$CAMPAIGN/resolution" \
+  "$CAMPAIGN/v2-schema14-b49ddd0"
 
 /home/kasm-user/he_grenade_venv/bin/python Scripts/dataset_controller.py plan \
   "$V1_CANDIDATE" \
@@ -251,11 +281,17 @@ With the current source and arguments, the candidate identities must be:
 
 ```text
 V1: plan-ed06f39e9f221ef5
-V2: v2plan-9feae38daf1e9fb5
+V2: v2plan-19d90e5db02a2104
 ```
 
 Do not proceed if the IDs or exact frame allocations differ from
 `CAMPAIGN_3333333.md`.
+
+For schema 14, Windows and Linux produced the same V2 plan ID. All 171
+assignment JSON files and `recipes.jsonl` were byte-identical. The only byte
+difference was `created_utc` in `collection-plan.json`; after removing that
+field, both canonical manifests hashed to
+`1f745a642ed4039a3b2a2a9abb466c7c49b9f8608f40d84c02719468d453866d`.
 
 ## Linux certification and resolution
 
@@ -278,9 +314,9 @@ collection, and certifies that complete collection again:
 /home/kasm-user/he_grenade_venv/bin/python \
   Scripts/resolve_plan_certification.py v2 "$V2_CANDIDATE" \
   --executable "$GAME" \
-  --output "$CAMPAIGN/resolution/v2" \
+  --output "$CAMPAIGN/v2-schema14-b49ddd0/resolution" \
   --max-attempts 10 \
-  > "$CAMPAIGN/v2-resolution.log" 2>&1
+  > "$CAMPAIGN/v2-schema14-b49ddd0/v2-resolution.log" 2>&1
 ```
 
 Both `resolution-report.json` files must report:
@@ -299,7 +335,7 @@ Only record the Linux resolved collections:
 
 ```bash
 export V1_RESOLVED="$CAMPAIGN/resolution/v1/resolved-collection"
-export V2_RESOLVED="$CAMPAIGN/resolution/v2/resolved-collection"
+export V2_RESOLVED="$CAMPAIGN/v2-schema14-b49ddd0/resolution/resolved-collection"
 
 /home/kasm-user/he_grenade_venv/bin/python Scripts/dataset_worker.py \
   "$V1_RESOLVED" --executable "$GAME" --worker-id 0 \
@@ -308,8 +344,8 @@ export V2_RESOLVED="$CAMPAIGN/resolution/v2/resolved-collection"
 
 /home/kasm-user/he_grenade_venv/bin/python Scripts/dataset_worker.py \
   "$V2_RESOLVED" --executable "$GAME" --worker-id 0 \
-  --executor-id runpod-v2 \
-  > "$CAMPAIGN/v2-worker.log" 2>&1
+  --executor-id runpod-v2-schema14-b49ddd0 \
+  > "$CAMPAIGN/v2-schema14-b49ddd0/v2-production-worker.log" 2>&1
 ```
 
 Use `tmux`, `screen`, or another persistent session for long runs. If SSH
@@ -317,6 +353,28 @@ disconnects or the worker stops, rerun the same command with a new
 `--executor-id`. Immutable validated results are inventoried and skipped; an
 assignment is not accepted unless Unreal exits successfully, Parquet
 finalization succeeds, and the complete dataset validator passes.
+
+The production run used detached session `v2production14`, started at
+2026-08-14T00:57:48Z, and exited successfully at 2026-08-14T11:35:45Z. A robust
+launch follows this pattern:
+
+```bash
+tmux new-session -d -s v2production14 "bash -lc '
+  set -o pipefail
+  unset DISPLAY
+  export XDG_RUNTIME_DIR=/tmp/runtime-kasm
+  export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+  cd /workspace/he_grenade_v2_b49ddd0
+  /home/kasm-user/he_grenade_venv/bin/python Scripts/dataset_worker.py \
+    /workspace/LinuxCampaign3333333/v2-schema14-b49ddd0/resolution/resolved-collection \
+    --executable /workspace/he_grenade_v2_b49ddd0/Linux/he_grenade_game.sh \
+    --worker-id 0 --executor-id runpod-v2-schema14-b49ddd0 \
+    2>&1 | tee /workspace/LinuxCampaign3333333/v2-schema14-b49ddd0/v2-production-worker.log
+'"
+```
+
+Attach with `tmux attach -t v2production14`; detach without stopping it using
+Ctrl+B, then D.
 
 For a bounded integration test, append `--one` to process at most one eligible
 assignment. The qualified tests produced:
@@ -337,16 +395,42 @@ Inspect progress without starting new generation:
   inventory "$V2_RESOLVED" --write-snapshot
 ```
 
-Completion requires exactly 1,111,111 credited V1 frames and 2,222,222
-credited V2 frames, complete required coverage, no unresolved certification,
-and no technical or semantic failure. Keep all valid produced observations,
-including produced-but-not-credited context at episode ends.
+Completion requires V1 `budget_reached: true` and `coverage_complete: true`,
+exactly 2,222,222 credited V2 frames, no unresolved certification, and no
+technical or semantic failure. V1 stops only between assignments and may exceed
+its 1,111,111 target. Keep all valid produced observations, including
+produced-but-not-credited context at episode ends.
 
-The qualification shards averaged approximately 98-103 KB per observation,
-projecting roughly 335-345 GB for the complete dataset before extra diagnostic
-and retry evidence. A 600 GB volume is a reasonable first-run allocation, but
-monitor the collection with `du -sh`; RunPod's shared-filesystem `df` output is
-not necessarily the quota of the individual network volume.
+The completed inventories are:
+
+| Stage | Assignments | Credited | Produced | Technical failures | Semantic failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| V1 | 192 | 1,115,586 | 1,152,179 | 0 | 0 |
+| V2 | 171 | 2,222,222 | 2,229,369 | 0 | 0 |
+
+V2 reported four visibility-degraded recipe IDs and otherwise validated every
+result. The complete campaign occupies approximately 329 GiB: about 112 GiB for
+the V1 resolved collection and 215 GiB for the V2 schema-14 campaign, plus plan,
+certificate, log, and diagnostic evidence. RunPod's shared-filesystem `df`
+output is not necessarily the quota of the individual network volume.
+
+The V2 inventory snapshot is:
+
+```text
+/workspace/LinuxCampaign3333333/v2-schema14-b49ddd0/resolution/
+  resolved-collection/inventory/inventory-snapshot-032d154bbde157f3.json
+```
+
+To render a review MP4 from authoritative stored frames without re-simulating,
+use `review_dataset.py` with an episode ID:
+
+```bash
+FF=$(/home/kasm-user/he_grenade_venv/bin/python -c \
+  'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')
+/home/kasm-user/he_grenade_venv/bin/python Scripts/review_dataset.py \
+  <assignment-output-directory> --episode <episode-id> \
+  --output <review-directory> --ffmpeg "$FF"
+```
 
 After completion, preserve:
 
